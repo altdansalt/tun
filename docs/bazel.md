@@ -867,3 +867,37 @@ benchmark cleanup tried to remove Bazel's read-only output directories. The harn
 now makes only its private directories writable before unlinking their contents;
 it does not chmod artifact files or follow directory symlinks. The measured cache
 commands were not rerun for this cleanup-only correction.
+
+### Validation follow-ups and tun friction
+
+Full vet/build/race job `20261015T150230668265-210aceb3` on tun-r1 took 819.797s
+(28.599s queued). Vet/build and REAPI (232.401s), sandbox, server and workspace tests
+passed. Client tests reported one failure: the cancellation-race fixture's fake runner
+was expired by its one-second heartbeat budget during a loaded batch. The fixture now
+allows one minute between polls; it still tests the same start/cancel race. Its focused
+race rerun passed in 23.500s in `20261015T151227072904-9cfb4cc6` on tun-r3.
+
+Final streaming/malformed-response regressions passed in
+`20261015T151325874876-1d565c24` on tun-r5: 11.407s execution, **483.398s queued**.
+They caught and fixed EOF before a trailer payload (plain EOF must never hide a
+truncated trailer frame). Missing trailers, truncated headers/messages, compressed
+frames and missing status also fail closed.
+
+The ordinary CLI smoke passed in `20261015T151227072904-9cfb4cc6`, but its subsequent
+session hub restart check exposed a test-ordering deadlock: the hub exited after a
+successful 49.6s command, while the script waited for the attached client's retry
+before restarting the hub. The test now restarts the hub before waiting for that
+client, matching its existing queued-command restart test. This does not change
+production restart behavior. The complete job was 321.099s with 360.399s queued;
+it did not reach the separate runner smoke suite.
+
+Other concrete friction: initial submissions retried without a job ID while the shared
+hub returned 503 "server draining for restart" despite healthz `ok=true`. Queues took
+339–483s even for short focused checks. The first private benchmark attempt,
+`20261015T150231866978-399285d3` on tun-r4, failed workspace CAS sync with unexpected
+EOF before Bazel started; the diagnostic rerun succeeded without a transport change
+and the cause remains unisolated. Cold JVM/toolchain startup dominates quick tests;
+`--tail` heartbeats show liveness but Go's package buffering hides individual test
+progress. The documented BuildBuddy fallback passed the initial focused bridge tests
+(invocation `0dca4213-22ed-4116-8ece-ee6236387b61`); a fallback benchmark attempt had
+no Go on PATH, so measurements returned to tun once its drain finished.
