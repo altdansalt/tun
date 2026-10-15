@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,7 +55,6 @@ func init() {
 // selfExe is an O_PATH handle on the running executable, so the helper is this exact binary
 // even if the file on disk is replaced while the server runs.
 var selfExe = sync.OnceValues(func() (*os.File, error) {
-	const oPath = 0o10000000 // O_PATH; missing from package syscall
 	return os.OpenFile("/proc/self/exe", oPath|syscall.O_CLOEXEC, 0)
 })
 
@@ -69,6 +69,9 @@ func NetUsable() error {
 		return err
 	}
 	defer os.RemoveAll(dir)
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return err
+	}
 	var out strings.Builder
 	cmd, n, err := Start(Spec{Mode: Bwrap, PrivateNet: true, Argv: []string{"sleep", "10"}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: dir, Root: dir, Tmp: dir, DataDir: dir}, &out, &out)
 	if err != nil {

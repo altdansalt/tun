@@ -112,6 +112,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Mount sources must have no symlink in their path (sandbox.openMountSource).
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return nil, err
+	}
+	cfg.DataDir = dir
 	// Two runners on one data dir would wipe and reuse each other's job dirs.
 	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {

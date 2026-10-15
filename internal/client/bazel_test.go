@@ -48,6 +48,7 @@ case $cmd in
   fail) exit 3 ;;
   sleep) sleep "$1" ;;
   cat) cat "$@" ;;
+  sh) bash -c "$1" ;;
 esac
 `
 
@@ -269,6 +270,45 @@ func TestBazelSessionBwrap(t *testing.T) {
 	}
 }
 
+// TestBazelSessionMounts: what a session mounts can't be redirected by a job, the Bazel
+// caches are per client and out of reach of v0 jobs, and the sandbox root is read-only.
+func TestBazelSessionMounts(t *testing.T) {
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap unusable")
+	}
+	cfg := server.Config{Sandbox: sandbox.Bwrap, DataDir: t.TempDir()}
+	ts := bazelServer(t, cfg, false)
+	ws := bazelWS(t, map[string]string{"x": "1"})
+	// A v0 job owns the shared XDG cache: it used to be able to point bazelisk's home (and
+	// so a session's read-write mount) at the data dir.
+	if r := ts.tun("", "run", "--no-workspace", "-c", `mkdir -p "$XDG_CACHE_HOME" && rm -rf "$XDG_CACHE_HOME/bazelisk" && ln -s "$XDG_CACHE_HOME/../.." "$XDG_CACHE_HOME/bazelisk"`); r.code != 0 {
+		t.Fatalf("v0 job: %+v", r)
+	}
+	r := ts.tun(ws, "bazel", "sh", `ls /tun/cache/bazelisk; touch /tun/cache/bazelisk/mine /tun/cache/repo/mine /tun/cache/disk/mine; touch /newfile || echo root-ro`)
+	if r.code != 0 || strings.Contains(r.stdout, "token") || !strings.Contains(r.stdout, "root-ro") {
+		t.Fatalf("session: %+v", r)
+	}
+	ents, _ := os.ReadDir(filepath.Join(ts.data, "bazel"))
+	if len(ents) != 1 {
+		t.Fatalf("per-client cache dirs: %v", ents)
+	}
+	caches := filepath.Join(ts.data, "bazel", ents[0].Name())
+	for _, d := range []string{"bazelisk", "repo", "disk"} {
+		if _, err := os.Stat(filepath.Join(caches, d, "mine")); err != nil {
+			t.Errorf("%s is not the client's own dir: %v", d, err)
+		}
+	}
+	// Even a server-owned mount source that became a symlink is refused, not followed.
+	os.RemoveAll(filepath.Join(caches, "disk"))
+	if err := os.Symlink(ts.data, filepath.Join(caches, "disk")); err != nil {
+		t.Fatal(err)
+	}
+	r = ts.tun(ws, "bazel", "--cold", "sh", "ls /tun/cache/disk")
+	if r.code == 0 || strings.Contains(r.stdout, "token") || !strings.Contains(r.stderr, "is a symlink") {
+		t.Fatalf("symlinked mount source: %+v", r)
+	}
+}
+
 func TestBazelSessionQueueAndCancel(t *testing.T) {
 	ts := bazelServer(t, server.Config{MaxJobs: 4}, false)
 	ws := bazelWS(t, map[string]string{})
@@ -385,7 +425,7 @@ func TestBazelReal(t *testing.T) {
 		cfg.PrivateNet = true
 	}
 	if x := os.Getenv("XDG_CACHE_HOME"); x != "" { // in a tun job: its shared bazelisk downloads
-		cfg.BazeliskHome = filepath.Join(x, "bazelisk")
+		cfg.BazeliskSeed = filepath.Join(x, "bazelisk")
 	}
 	ts := bazelServer(t, cfg, true)
 	ws := bazelWS(t, map[string]string{

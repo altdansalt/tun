@@ -108,8 +108,19 @@ func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, *Net, error) {
 				f.Close()
 			}
 		}()
-		if err := addPipe(3, bwrapArgs(s)); err != nil {
+		args, srcs := bwrapArgs(s)
+		if err := addPipe(3, args); err != nil {
 			return nil, nil, err
+		}
+		for i, src := range srcs {
+			f, err := openMountSource(src.path, src.ro)
+			if err != nil {
+				return nil, nil, fmt.Errorf("sandbox mount: %v", err)
+			}
+			for len(files) <= firstMountFD-3+i {
+				files = append(files, nil)
+			}
+			files[firstMountFD-3+i], ours = f, append(ours, f)
 		}
 		argv := s.Argv
 		if s.PrivateNet || s.ExePath != "" {
@@ -171,18 +182,42 @@ func helperPath(s Spec) string {
 	return filepath.Join(s.DataDir, "tun-netns-helper")
 }
 
+// firstMountFD is the descriptor of the first bind mount source bwrap gets (see bwrapArgs).
+const firstMountFD = PassFD + 1
+
+// mountSource is a bind mount source that bwrap gets as an open descriptor.
+type mountSource struct {
+	path string
+	ro   bool
+}
+
 // bwrapArgs: read-only root, fresh /dev /proc and pid namespace, the job's tmp at /tmp,
 // the server user's home and the data dir hidden behind tmpfs, then the job's tree and shared
 // caches bound back read-write at their real paths (so env paths are valid inside), and the
 // job's env. Values must not contain NUL (the server rejects such jobs).
-func bwrapArgs(s Spec) []string {
+//
+// The sources of the job's own binds (Tmp, Root, Caches, Mounts) are returned for Start to
+// open (openMountSource: no symlink anywhere in the path, owned by this user) and pass as
+// descriptors firstMountFD, firstMountFD+1, ... (--bind-fd), so a symlink a job planted in
+// a directory it can write never redirects a mount, and with FixedRoot the root is
+// remounted read-only once everything is in place.
+func bwrapArgs(s Spec) ([]string, []mountSource) {
+	var srcs []mountSource
+	bind := func(src, dst string, ro bool) []string {
+		srcs = append(srcs, mountSource{src, ro})
+		op := "--bind-fd"
+		if ro {
+			op = "--ro-bind-fd"
+		}
+		return []string{op, strconv.Itoa(firstMountFD + len(srcs) - 1), dst}
+	}
 	a := []string{"--ro-bind", "/", "/"}
 	if s.FixedRoot {
 		a = rootBinds(s.Mounts)
 	}
 	a = append(a, "--dev", "/dev", "--proc", "/proc",
-		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
-		"--bind", s.Tmp, "/tmp")
+		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent")
+	a = append(a, bind(s.Tmp, "/tmp", false)...)
 	if home, err := os.UserHomeDir(); err == nil && home != "/" && filepath.IsAbs(home) {
 		// Hide the server user's home (it may hold the client token, ssh keys, ...), but keep
 		// toolchains on PATH that live under it (e.g. ~/go/bin -> ~/go) readable.
@@ -201,7 +236,7 @@ func bwrapArgs(s Spec) []string {
 	}
 	a = append(a, "--tmpfs", s.DataDir)
 	if s.Root != "" {
-		a = append(a, "--bind", s.Root, s.Root)
+		a = append(a, bind(s.Root, s.Root, false)...)
 	}
 	if s.PrivateNet {
 		a = append(a, "--unshare-net")
@@ -210,24 +245,70 @@ func bwrapArgs(s Spec) []string {
 		a = append(a, "--ro-bind-fd", strconv.Itoa(exeFD), helperPath(s))
 	}
 	for _, c := range s.Caches {
-		a = append(a, "--bind", c, c)
+		a = append(a, bind(c, c, false)...)
 	}
 	for _, m := range s.Mounts {
-		if m.RO {
-			a = append(a, "--ro-bind", m.Src, m.Dst)
-		} else {
-			a = append(a, "--bind", m.Src, m.Dst)
-		}
+		a = append(a, bind(m.Src, m.Dst, m.RO)...)
+	}
+	if s.FixedRoot {
+		// The root is a tmpfs holding only mount points: nothing may be written there (it
+		// would live in memory until the sandbox ends). Not recursive: the binds keep theirs.
+		a = append(a, "--remount-ro", "/")
 	}
 	a = append(a, "--clearenv")
 	if s.PrivateNet {
-		return append(a, "--chdir", s.Dir) // the helper sets the env
+		return append(a, "--chdir", s.Dir), srcs // the helper sets the env
 	}
 	for _, kv := range s.Env {
 		k, v, _ := strings.Cut(kv, "=")
 		a = append(a, "--setenv", k, v)
 	}
-	return append(a, "--chdir", s.Dir)
+	return append(a, "--chdir", s.Dir), srcs
+}
+
+const oPath = 0o10000000 // O_PATH; missing from package syscall
+
+// openMountSource opens p (absolute) as an O_PATH descriptor one component at a time from
+// /, refusing a symlink anywhere along the way, and checks that the result is a directory
+// (or, for a read-only mount, a regular file) owned by this user. The descriptor then names
+// that exact inode: replacing a path component later doesn't change what bwrap mounts.
+func openMountSource(p string, ro bool) (*os.File, error) {
+	if !filepath.IsAbs(p) {
+		return nil, fmt.Errorf("%s: not an absolute path", p)
+	}
+	fd, err := syscall.Open("/", oPath|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	var st syscall.Stat_t
+	for _, c := range strings.Split(filepath.Clean(p), "/")[1:] {
+		next, err := syscall.Openat(fd, c, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		syscall.Close(fd)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", p, err)
+		}
+		fd = next
+		if err := syscall.Fstat(fd, &st); err != nil {
+			syscall.Close(fd)
+			return nil, fmt.Errorf("%s: %v", p, err)
+		}
+		if st.Mode&syscall.S_IFMT == syscall.S_IFLNK {
+			syscall.Close(fd)
+			return nil, fmt.Errorf("%s: %q is a symlink; mount sources must not contain any", p, c)
+		}
+	}
+	f := os.NewFile(uintptr(fd), p)
+	switch typ := st.Mode & syscall.S_IFMT; {
+	case typ != syscall.S_IFDIR && !(ro && typ == syscall.S_IFREG):
+		err = fmt.Errorf("%s: not a directory", p)
+	case int(st.Uid) != os.Getuid():
+		err = fmt.Errorf("%s: owned by uid %d, not by this user (%d)", p, st.Uid, os.Getuid())
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // rootBinds binds the host's top-level entries read-only into the sandbox's empty root

@@ -22,9 +22,9 @@ const bazelUsage = `usage: tun bazel [--session NAME] [--cold] [--timeout DUR] <
 
 Run a Bazel command in a warm session on the tun server, e.g. tun bazel test //... .
 The bazel command and its args pass through unchanged; tun adds only startup options (the
-session's output base, its own --bazelrc) and, through that rc file, --repository_cache
-(shared by every session on the server), --disk_cache (one per client: it survives --cold
-and session expiry) with a size cap. Your workspace's .bazelrc applies as usual. Bazel's
+session's output base, its own --bazelrc) and, through that rc file, --repository_cache and
+--disk_cache (with a size cap). These caches and bazelisk's downloads are this client's own
+on the server: they survive --cold and session expiry, and other clients can't touch them. Your workspace's .bazelrc applies as usual. Bazel's
 output streams back; the exit status is Bazel's (124 on --timeout, 125 for tun's own errors,
 as for tun run). Bazel startup options of your own are not supported.
 

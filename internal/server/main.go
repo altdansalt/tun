@@ -59,7 +59,8 @@ under $DATA/sessions with the synced workspace and Bazel's output base, and a lo
 sandbox in which the Bazel server stays up between commands. A session is deleted after
 --session-idle without a command; at most --max-sessions exist (a Bazel server takes 1GB+ of
 memory): a new one evicts the least recently used idle one. tun bazel commands take local
-slots like other jobs. Shared caches: Bazel's repository cache, and a disk cache per client.
+slots like other jobs. Each client has its own Bazel caches (bazelisk downloads, repository
+cache, disk cache) in $DATA/bazel.
 
 flags:
 `
@@ -103,6 +104,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
 	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
 	maxSessions := fs.Int("max-sessions", 2, "tun bazel sessions at once (each can hold a Bazel server, 1GB+ of memory); a new one evicts the least recently used idle one")
+	bazeliskSeed := fs.String("bazelisk-seed", "", "copy this bazelisk home's downloads/ (e.g. ~/.cache/bazelisk; must not be writable by jobs) into each client's new bazelisk home for tun bazel, so Bazel isn't downloaded again")
 	sessionIdle := fs.Duration("session-idle", 30*time.Minute, "delete a tun bazel session (its Bazel server, output base and workspace copy) after this long without a command")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
@@ -186,7 +188,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs,
-		MaxSessions: *maxSessions, SessionIdle: *sessionIdle})
+		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}

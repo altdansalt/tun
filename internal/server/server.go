@@ -54,12 +54,17 @@ type Config struct {
 	RunnerStartTimeout time.Duration
 
 	// Bazel sessions (see session.go).
-	MaxSessions    int           // sessions at once (each may hold a Bazel server); default 2
-	SessionIdle    time.Duration // a session without a command for this long is deleted; default 30m
-	BazelCommand   string        // default "bazel" (tests use a fake; relative = in the workspace)
-	BazeliskHome   string        // bazelisk's download cache; default $DATA/cache/xdg/bazelisk (as v0 jobs)
-	BazelRepoCache string        // Bazel's --repository_cache, shared; default $DATA/cache/bazel-repo
-	DiskCacheMax   string        // --experimental_disk_cache_gc_max_size of each client's disk cache; default 5G
+	MaxSessions  int           // sessions at once (each may hold a Bazel server); default 2
+	SessionIdle  time.Duration // a session without a command for this long is deleted; default 30m
+	BazelCommand string        // default "bazel" (tests use a fake; relative = in the workspace)
+	// BazelCaches holds each client's Bazel caches (bazelisk downloads, repository cache,
+	// disk cache) in <dir>/<sha256(client)[:16 hex]>/; default $DATA/bazel. Never inside a
+	// tree a job can write (bind mount sources must not be replaceable by a job).
+	BazelCaches string
+	// BazeliskSeed: a server-owned bazelisk home whose downloads/ are copied into a client's
+	// new bazelisk home, so new clients don't download Bazel again; "" for none.
+	BazeliskSeed string
+	DiskCacheMax string // --experimental_disk_cache_gc_max_size of each client's disk cache; default 5G
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
@@ -158,16 +163,24 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	cfg.DataDir = dir
-	if cfg.BazeliskHome == "" {
-		cfg.BazeliskHome = filepath.Join(dir, "cache", "xdg", "bazelisk")
-	}
-	if cfg.BazelRepoCache == "" {
-		cfg.BazelRepoCache = filepath.Join(dir, "cache", "bazel-repo")
-	}
 	for _, d := range []string{"", "blobs", "cas", "jobs", "cache/go-build", "cache/gomod", "cache/xdg"} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, err
 		}
+	}
+	// Mount sources must have no symlink in their path (sandbox.openMountSource).
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return nil, err
+	}
+	cfg.DataDir = dir
+	if cfg.BazelCaches == "" {
+		cfg.BazelCaches = filepath.Join(dir, "bazel")
+	}
+	if err := os.MkdirAll(cfg.BazelCaches, 0o700); err != nil {
+		return nil, err
+	}
+	if cfg.BazelCaches, err = filepath.EvalSymlinks(cfg.BazelCaches); err != nil {
+		return nil, err
 	}
 	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{},
 		sessions: map[string]*session{}, quit: make(chan struct{})}

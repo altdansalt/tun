@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -356,12 +357,11 @@ type sessionPaths struct {
 func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandbox.Spec) {
 	dir := s.sessionDir(sess.ID)
 	sb := filepath.Join(dir, "sandbox")
-	ch := sha256.Sum256([]byte(sess.Client))
+	caches := s.clientCaches(sess.Client)
 	host = sessionPaths{
 		work: filepath.Join(sb, "work"), home: filepath.Join(sb, "home"), tmp: filepath.Join(sb, "tmp"),
-		out: filepath.Join(sb, "out"), repo: s.cfg.BazelRepoCache,
-		disk:     filepath.Join(s.cfg.DataDir, "cache", "bazel-disk", hex.EncodeToString(ch[:8])),
-		bazelisk: s.cfg.BazeliskHome, rc: filepath.Join(dir, "tun.bazelrc"),
+		out: filepath.Join(sb, "out"), repo: filepath.Join(caches, "repo"), disk: filepath.Join(caches, "disk"),
+		bazelisk: filepath.Join(caches, "bazelisk"), rc: filepath.Join(dir, "tun.bazelrc"),
 	}
 	in = host
 	spec = sandbox.Spec{Mode: s.cfg.Sandbox, Tmp: host.tmp, DataDir: s.cfg.DataDir}
@@ -382,6 +382,15 @@ func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandb
 	return in, host, spec
 }
 
+// clientCaches is the dir of client's Bazel caches. Per client, because none of them can be
+// trusted once a session has written it: bazelisk runs a cached Bazel binary without checking
+// it again, and Bazel trusts its repository contents cache (<repository_cache>/contents,
+// fetched repository trees) and disk cache. One client can only poison its own.
+func (s *Server) clientCaches(client string) string {
+	h := sha256.Sum256([]byte(client))
+	return filepath.Join(s.cfg.BazelCaches, hex.EncodeToString(h[:8]))
+}
+
 // startupOptions are the bazel startup options tun adds (they must not change between
 // commands of a session, or Bazel restarts its server).
 func (s *Server) startupOptions(p sessionPaths) []string {
@@ -397,10 +406,17 @@ func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 			return err
 		}
 	}
-	for _, d := range []string{host.repo, host.disk, host.bazelisk} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	for _, d := range []string{filepath.Dir(host.repo), host.repo, host.disk} {
+		if err := os.Mkdir(d, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
 		}
+	}
+	if err := os.Mkdir(host.bazelisk, 0o700); err == nil && s.cfg.BazeliskSeed != "" {
+		if err := copyTree(filepath.Join(s.cfg.BazeliskSeed, "downloads"), filepath.Join(host.bazelisk, "downloads")); err != nil {
+			log.Printf("tun: seeding %s from %s: %v", host.bazelisk, s.cfg.BazeliskSeed, err)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrExist) {
+		return err
 	}
 	rc := fmt.Sprintf("# Written by tun for session %s; tun passes it with --bazelrc.\n"+
 		"common --repository_cache=%s\ncommon --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n",
@@ -409,6 +425,42 @@ func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 		return err
 	}
 	return s.persistSession(sess)
+}
+
+// copyTree copies the directories and regular files under src (symlinks and anything else
+// are skipped) to dst, which must not exist.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		to := filepath.Join(dst, rel)
+		switch {
+		case d.IsDir():
+			return os.Mkdir(to, 0o700)
+		case d.Type().IsRegular():
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			in, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm()|0o600)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(out, in)
+			if cerr := out.Close(); err == nil {
+				err = cerr
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 // ensureSandbox starts the session's sandbox (and so, at the first command, its Bazel

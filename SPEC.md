@@ -338,14 +338,24 @@ command other than tun's flags (a Bazel startup option) is a usage error.
 - **Fixed paths.** Under bwrap the session sandbox has an empty root with the host's
   top-level directories bound read-only (so new top-level paths can exist), and binds
   `work` at `/work`, `home` at `/tun/home` (HOME), `tmp` at `/tmp` (TMPDIR), `out` at
-  `/tun/out` (Bazel's `--output_user_root`, output base `/tun/out/base`), the server's
-  shared Bazel repository cache at `/tun/cache/repo`, the client's disk cache
-  (`$DATA/cache/bazel-disk/<sha256(client)[:16 hex]>`) at `/tun/cache/disk`, bazelisk's
-  download cache (`$DATA/cache/xdg/bazelisk`, the same one v0 jobs use) at
-  `/tun/cache/bazelisk` (BAZELISK_HOME), `tun.bazelrc` read-only at `/tun/tun.bazelrc`, and
+  `/tun/out` (Bazel's `--output_user_root`, output base `/tun/out/base`), and the client's
+  own Bazel caches from `$DATA/bazel/<sha256(client)[:16 hex]>/`: `repo` at `/tun/cache/repo`
+  (`--repository_cache`; Bazel 8+ keep the repository contents cache, fetched repository
+  trees, in its `contents/` by default), `disk` at `/tun/cache/disk` (`--disk_cache`),
+  `bazelisk` at `/tun/cache/bazelisk` (BAZELISK_HOME; a new one is seeded with a copy of
+  `--bazelisk-seed DIR`'s `downloads/` if given), `tun.bazelrc` read-only at `/tun/tun.bazelrc`, and
   the tun executable at `/tun/bin/tun`. The server user's home and the data dir are hidden as
   for jobs; with network isolation the session has its own network namespace and egress
-  proxy. With sandbox `none` the same dirs are used at their host paths.
+  proxy. With sandbox `none` the same dirs are used at their host paths. The root is
+  remounted read-only once everything is mounted. Every bind source of a job or session
+  sandbox (its tree, tmp, the shared caches, the session mounts) is opened one path component
+  at a time without following symlinks, must be a directory owned by the server user (or a
+  regular file, read-only) and is handed to bwrap as a descriptor (`--bind-fd`), so a symlink
+  planted where a sandbox can write never redirects a mount. The caches are per client
+  because none can be trusted once a sandbox wrote it (bazelisk runs a cached Bazel without
+  checking it again; Bazel trusts its repository contents and disk caches): a client can
+  only poison its own. Clients are told apart by the identity in `client` (see visibility):
+  behind exe.dev's proxy it can't be forged; otherwise it is self-reported.
 - **Long-lived sandbox.** The session sandbox's first process is an agent
   (`tun __tun-session-agent`, under the network helper when isolated) that runs one command
   at a time on request over a socketpair (fd 7): the server sends argv, dir and the job's
