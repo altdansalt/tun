@@ -1,0 +1,61 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "client",
+    srcs = [
+        "cli.go",
+        "client.go",
+        "files.go",
+        "runners.go",
+        "service.go",
+    ],
+    importpath = "github.com/altdansalt/tun/internal/client",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/api",
+        "//internal/workspace",
+    ],
+)
+
+go_test(
+    name = "client_test",
+    # Integration tests: in-process servers that run jobs in bwrap sandboxes and private
+    # network namespaces (nested inside Bazel's linux-sandbox; loopback only, so no
+    # requires-network), plus jobs that run go and scripts/ci.sh.
+    size = "large",
+    srcs = [
+        "auth_test.go",
+        "bazel_test.go",
+        "bazelci_test.go",
+        "fast_test.go",
+        "files_review_test.go",
+        "files_test.go",
+        "gc_test.go",
+        "hardening_test.go",
+        "integration_test.go",
+        "netns_test.go",
+        "review2_test.go",
+        "review_runner_test.go",
+        "review_test.go",
+        "runner_test.go",
+        "sandbox_test.go",
+        "service_review_test.go",
+        "service_test.go",
+        "visibility_test.go",
+    ],
+    data = [
+        "//scripts:bazel-ci.sh",
+        "//scripts:bb-ci.sh",
+        "//scripts:ci.sh",
+        "@go_sdk//:bin/go",
+        "@go_sdk//:files",
+    ],
+    embed = [":client"],
+    env = {"TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
+    deps = [
+        "//internal/api",
+        "//internal/sandbox",
+        "//internal/server",
+        "//internal/workspace",
+    ],
+)

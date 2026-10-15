@@ -1,0 +1,5 @@
+# Print failing tests' logs (agents read the output, not bazel-testlogs/).
+test --test_output=errors
+# Race detector, like scripts/ci.sh's go test -race: bazel test --config=race //...
+# (needs cgo, so a C compiler on the host: rules_cc's autodetected toolchain).
+build:race --@rules_go//go/config:race
