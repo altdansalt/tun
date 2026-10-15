@@ -28,6 +28,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 }
 
 func TestRetentionWorkDirs(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{KeepWork: 300 * time.Millisecond, GCInterval: 50 * time.Millisecond})
 	ws := t.TempDir()
 	os.WriteFile(filepath.Join(ws, "in.txt"), []byte("hello"), 0o644)
@@ -80,6 +81,7 @@ func TestRetentionWorkDirs(t *testing.T) {
 }
 
 func TestRetentionJobs(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{KeepWork: 100 * time.Millisecond, KeepJobs: 500 * time.Millisecond, GCInterval: 50 * time.Millisecond})
 	id := ts.detach("", "-c", "echo hi")
 	long := ts.detach("", "-c", "sleep 2; echo still here")
@@ -99,6 +101,7 @@ func TestRetentionJobs(t *testing.T) {
 }
 
 func TestRetentionBlobs(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1, KeepBlobs: 500 * time.Millisecond, GCInterval: 50 * time.Millisecond})
 	ws := t.TempDir()
 	os.WriteFile(filepath.Join(ws, "f"), []byte("blob"), 0o644)
@@ -127,6 +130,7 @@ func TestRetentionBlobs(t *testing.T) {
 }
 
 func TestMaxWorkspace(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxWorkspace: 64 << 10})
 	ws := t.TempDir()
 	os.WriteFile(filepath.Join(ws, "a"), make([]byte, 32<<10), 0o644)
@@ -149,6 +153,7 @@ func TestMaxWorkspace(t *testing.T) {
 
 // From review: a job that makes its sandbox root read-only must not make it undeletable.
 func TestRetentionSandboxRootReadOnly(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{KeepWork: 200 * time.Millisecond, GCInterval: 50 * time.Millisecond})
 	id := ts.detach("", "-c", "echo data > big; chmod 500 ..; chmod 500 $HOME $TMPDIR")
 	ts.waitDone(id)
@@ -159,6 +164,7 @@ func TestRetentionSandboxRootReadOnly(t *testing.T) {
 }
 
 func TestLogsOfExpiredJob(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "-c", "echo hi")
 	ts.waitDone(id)
@@ -170,6 +176,7 @@ func TestLogsOfExpiredJob(t *testing.T) {
 }
 
 func TestMaxLog(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxLog: 1 << 10})
 	// 1MB on stdout must neither block the job nor land on disk; stderr exactly at the cap is kept whole.
 	r := ts.tun("", "run", "--json", "-c", `head -c 1048576 /dev/zero | tr '\0' a; head -c 1024 /dev/zero | tr '\0' b >&2`)

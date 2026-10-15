@@ -17,6 +17,7 @@ import (
 // must not follow it: not to the data dir (token, other jobs) nor to its own server-owned
 // job dir (job.json, stdout).
 func TestReviewFilesWorkSymlinkEscape(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	victim := ts.detach("", "-c", "echo victim-secret > private.txt")
 	ts.waitDone(victim)
@@ -42,6 +43,7 @@ func TestReviewFilesWorkSymlinkEscape(t *testing.T) {
 
 // Same under bwrap: sandbox/ is a read-write mount, so the job can still plant the link.
 func TestReviewFilesWorkSymlinkEscapeBwrap(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	id := ts.detach("", "-c", `cd .. && mv work work.orig && ln -s ../../.. work`)
 	ts.waitDone(id)
@@ -56,6 +58,7 @@ func TestReviewFilesWorkSymlinkEscapeBwrap(t *testing.T) {
 // An unreadable file is reported up front (skipped, exit 1) instead of silently cutting
 // the stream short with exit 0; the rest is delivered.
 func TestReviewFilesTruncatedStreamLooksLikeSuccess(t *testing.T) {
+	t.Parallel()
 	if os.Getuid() == 0 {
 		t.Skip("root can read mode 000 files")
 	}
@@ -71,6 +74,7 @@ func TestReviewFilesTruncatedStreamLooksLikeSuccess(t *testing.T) {
 
 // After the work dir is deleted (retention in feat/gc), the endpoint says so (410).
 func TestReviewFilesAfterWorkDeleted(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "-c", "echo hi > out.txt")
 	ts.waitDone(id)

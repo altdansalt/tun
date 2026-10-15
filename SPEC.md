@@ -70,6 +70,13 @@ Queueing is visible: if the created job is waiting in the FIFO (`queue_position`
 `running` from healthz), polls the job every 500ms, and when it starts prints
 `tun: started after Xs in queue` before streaming output. SIGINT/SIGTERM while queued cancel it.
 `tun run --json` adds `queue_sec` and `run_sec` to its object.
+On completion, non-JSON attached runs (including `--tail`) print a final stderr line:
+`tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)` with seconds to three
+decimal places and the CLI exit code. Detached runs and ready services have not completed,
+so they do not print a completion line.
+Non-JSON runs with a workspace also report its compressed tar.gz size in bytes:
+`tun: uploaded <size>B workspace` or `tun: workspace <size>B (already on server)`.
+The workspace root diagnostic is retained. JSON mode keeps stderr free of these diagnostics.
 
 ## Visibility
 - Every job object has `queue_sec` (creation to start; to now while queued, to end if it never

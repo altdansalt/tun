@@ -17,6 +17,7 @@ import (
 // goes on to start the process and later finishes it a second time: close of closed channel
 // (server panic) and svc.running driven negative / the job resurrected as "running".
 func TestReviewServiceCancelRace(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxServices: 1})
 	c := ts.client()
 	ctx := context.Background()
@@ -51,6 +52,7 @@ func TestReviewServiceCancelRace(t *testing.T) {
 // service directly, with no token. This is a documented known limitation (SPEC.md Services,
 // tun run -h); the test pins that behavior so a fix (per-job netns) flips it deliberately.
 func TestReviewServiceReachableFromOtherJobsWithoutToken(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id, _ := ts.startService("--port", "8080")
 	hp := ts.status(id).Ports[0].HostPort

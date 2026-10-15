@@ -19,6 +19,7 @@ import (
 // Server-owned files (job.json, stdout, stderr) live beside the job's sandbox dir, never in
 // it: under bwrap the job can't even see them.
 func TestBwrapJobCannotSeeServerFiles(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	r := ts.tun("", "run", "--no-workspace", "-c", `[ "$(ls -A "$HOME/../..")" = sandbox ] && [ "$(ls -A "$HOME/..")" = "$(printf 'home\ntmp\nwork')" ]`)
 	if r.code != 0 {
@@ -30,6 +31,7 @@ func TestBwrapJobCannotSeeServerFiles(t *testing.T) {
 // must still not follow links or hard links planted in place of its own files. (None mode
 // is documented as giving no isolation; this only keeps the logs API from being the leak.)
 func TestNoneModeServerFilesNotFollowed(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{Sandbox: sandbox.None})
 	target := filepath.Join(ts.data, "server-owned")
 	os.WriteFile(target, []byte("unchanged"), 0o600)
@@ -59,10 +61,11 @@ func TestNoneModeServerFilesNotFollowed(t *testing.T) {
 // The job's env (client-controlled) is applied inside the sandbox, not to the unsandboxed
 // bwrap process, and isn't visible in bwrap's argv on the host.
 func TestBwrapEnvNotOnHostProcess(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	const marker = "tun-marker-6b1f"
 	id := ts.detach("", "--no-workspace", "-e", "SECRET="+marker, "-e", "LD_PRELOAD=/nonexistent/"+marker+".so",
-		"-c", `[ "${SECRET#tun-}" = marker-6b1f ] && touch "$HOME/ready" && sleep 2`)
+		"-c", `[ "${SECRET#tun-}" = marker-6b1f ] && touch "$HOME/ready" && while [ ! -e "$HOME/release" ]; do sleep 0.01; done`)
 	ts.waitFor(id, func(j api.Job) bool {
 		_, err := os.Stat(filepath.Join(ts.data, "jobs", id, "sandbox", "home", "ready"))
 		return err == nil || api.Terminal(j.State)
@@ -83,6 +86,9 @@ func TestBwrapEnvNotOnHostProcess(t *testing.T) {
 	if found == 0 {
 		t.Error("no bwrap process found while the job ran")
 	}
+	if err := os.WriteFile(filepath.Join(ts.data, "jobs", id, "sandbox", "home", "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if j := ts.waitDone(id); j.ExitCode == nil || *j.ExitCode != 0 {
 		t.Fatalf("job didn't see its env: %+v", j)
 	}
@@ -92,6 +98,7 @@ func TestBwrapEnvNotOnHostProcess(t *testing.T) {
 }
 
 func TestBadRequests(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "--no-workspace", "-c", "printf abc")
 	ts.waitDone(id)
@@ -131,6 +138,7 @@ func TestBadRequests(t *testing.T) {
 
 // Directory modes survive the trip, and the server can still clean up read-only trees.
 func TestReadOnlyWorkspaceDir(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	ws := t.TempDir()
 	os.MkdirAll(filepath.Join(ws, "ro", "sub"), 0o755)

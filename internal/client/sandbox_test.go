@@ -20,6 +20,7 @@ func bwrapServer(t *testing.T) *testServer {
 }
 
 func TestBwrapIsolation(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	ws := t.TempDir()
 	os.WriteFile(filepath.Join(ws, "f"), []byte("ws"), 0o644)
@@ -51,6 +52,7 @@ func TestBwrapIsolation(t *testing.T) {
 }
 
 func TestBwrapGoBuild(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH")
@@ -65,6 +67,7 @@ func TestBwrapGoBuild(t *testing.T) {
 }
 
 func TestBwrapTimeoutKillsTree(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	r := ts.tun("", "run", "--timeout", "1s", "-c", "trap '' TERM; sleep 60 & sleep 60")
 	if r.code != 124 {

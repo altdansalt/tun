@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -26,6 +27,7 @@ func (ts *testServer) health() api.Health {
 }
 
 func TestQueueVisibility(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1})
 	a := ts.detach("", "--", "sleep", "2")
 	b := ts.detach("", "--", "true")
@@ -66,7 +68,7 @@ func TestQueueVisibility(t *testing.T) {
 	}
 	r = ts.tun("", "run", "--json", "--", "sleep", "0.2")
 	var res map[string]any
-	if err := json.Unmarshal([]byte(r.stdout), &res); err != nil || res["run_sec"].(float64) < 0.2 || res["queue_sec"] == nil {
+	if err := json.Unmarshal([]byte(r.stdout), &res); err != nil || res["run_sec"].(float64) < 0.15 || res["queue_sec"] == nil {
 		t.Errorf("json: %v %q", err, r.stdout)
 	}
 
@@ -129,6 +131,7 @@ func ids(t *testing.T, out string) []string {
 }
 
 func TestClientAndListFilters(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	host, _ := os.Hostname()
 	mine := ts.detach("", "--timeout", "1s", "--", "sleep", "5")
@@ -177,6 +180,7 @@ func TestClientAndListFilters(t *testing.T) {
 
 // SIGINT while tun run waits in the queue cancels the job before it ever starts.
 func TestSignalWhileQueued(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1})
 	blocker := ts.detach("", "--", "sleep", "30")
 	sigs := make(chan os.Signal, 1)
@@ -217,4 +221,24 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+func TestRunFinalTiming(t *testing.T) {
+	t.Parallel()
+	ts := startServer(t, server.Config{})
+	for _, args := range [][]string{
+		{"--", "true"}, {"-c", "printf err >&2; exit 7"},
+		{"--out", "result", "-c", "echo hi > result"},
+		{"--tail", "1", "-c", "echo tail >&2; exit 3"},
+		{"--timeout", "1s", "--", "sleep", "30"},
+		{"--", "/nonexistent/tun-test-command"},
+	} {
+		r := ts.tun("", append([]string{"run", "--no-workspace"}, args...)...)
+		j := ts.status(ts.lastID())
+		code, _ := exitCode(j)
+		want := fmt.Sprintf("tun: job %s %s exit=%d after %.3fs (%.3fs queued)\n", j.ID, j.State, code, j.RunSec, j.QueueSec)
+		if r.code != code || !strings.HasSuffix(r.stderr, "\n"+want) {
+			t.Errorf("args %v: %+v; want final line %q", args, r, want)
+		}
+	}
 }

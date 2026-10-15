@@ -19,6 +19,7 @@ import (
 
 // These are contract assertions: failures reproduce review findings on main.
 func TestReviewLogSymlinkIsolation(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{sandbox.None, sandbox.Bwrap} {
 		t.Run(mode, func(t *testing.T) {
 			if mode == sandbox.Bwrap && !sandbox.BwrapUsable() {
@@ -43,6 +44,7 @@ func TestReviewLogSymlinkIsolation(t *testing.T) {
 }
 
 func TestReviewMalformedHTTP(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "--no-workspace", "-c", "printf abc")
 	ts.waitDone(id)
@@ -73,6 +75,7 @@ func TestReviewMalformedHTTP(t *testing.T) {
 }
 
 func TestReviewTimeoutOverflow(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	j, err := ts.client().Create(context.Background(), api.CreateJob{Script: "sleep 1", TimeoutSec: 9223372036854775807})
 	if err != nil {
@@ -85,6 +88,7 @@ func TestReviewTimeoutOverflow(t *testing.T) {
 }
 
 func TestReviewLogOffsetsAtCompletion(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "--no-workspace", "-c", `printf abc; sleep 0.1; printf def; printf err >&2`)
 	for _, offset := range []int64{0, 3, 6, 100} {
@@ -105,6 +109,7 @@ func TestReviewLogOffsetsAtCompletion(t *testing.T) {
 }
 
 func TestReviewPersistenceSymlinkIsolation(t *testing.T) {
+	t.Parallel()
 	ts := bwrapServer(t)
 	target := filepath.Join(ts.data, "server-owned")
 	if err := os.WriteFile(target, []byte("unchanged"), 0600); err != nil {

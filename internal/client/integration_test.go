@@ -51,7 +51,7 @@ func startServer(t *testing.T, cfg server.Config) *testServer {
 	if cfg.MaxUpload == 0 {
 		cfg.MaxUpload = 64 << 20
 	}
-	cfg.KillGrace = 2 * time.Second
+	cfg.KillGrace = 50 * time.Millisecond
 	s, err := server.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func (ts *testServer) waitFor(id string, ok func(api.Job) bool) api.Job {
 		if time.Now().After(deadline) {
 			ts.t.Fatalf("job %s stuck in %+v", id, j)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -148,17 +148,19 @@ func (ts *testServer) detach(cwd string, args ...string) string {
 	return strings.TrimSpace(r.stdout)
 }
 
-// cmdStderr strips tun's own leading "tun: job <id>" and "tun: workspace <root>" lines.
+// cmdStderr removes CLI diagnostics, preserving the command's stderr bytes.
 func cmdStderr(s string) string {
-	for _, p := range []string{"tun: job ", "tun: workspace "} {
-		if strings.HasPrefix(s, p) {
-			_, s, _ = strings.Cut(s, "\n")
+	var out strings.Builder
+	for _, line := range strings.SplitAfter(s, "\n") {
+		if !strings.HasPrefix(line, "tun: job ") && !strings.HasPrefix(line, "tun: workspace ") && !strings.HasPrefix(line, "tun: uploaded ") {
+			out.WriteString(line)
 		}
 	}
-	return s
+	return out.String()
 }
 
 func TestExitCodes(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	cases := []struct {
 		args []string
@@ -201,6 +203,7 @@ func TestExitCodes(t *testing.T) {
 }
 
 func TestStdoutStderrAndEnv(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	r := ts.tun("", "run", "-c", "echo out; echo err >&2; echo out2")
 	if r.code != 0 || r.stdout != "out\nout2\n" || cmdStderr(r.stderr) != "err\n" || !strings.HasPrefix(r.stderr, "tun: job ") {
@@ -245,6 +248,7 @@ func gitRepo(t *testing.T) string {
 }
 
 func TestCwdAndWorkspace(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	root := gitRepo(t)
 	r := ts.tun(filepath.Join(root, "sub", "dir"), "run", "-c", "pwd; cat f.txt; ls -a ../..")
@@ -269,6 +273,7 @@ func TestCwdAndWorkspace(t *testing.T) {
 }
 
 func TestUploadLimit(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxUpload: 4 << 10})
 	dir := t.TempDir()
 	big := make([]byte, 64<<10)
@@ -281,6 +286,7 @@ func TestUploadLimit(t *testing.T) {
 }
 
 func TestTimeout(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	start := time.Now()
 	// The trap ignores SIGTERM in the shell; the background sleep proves the whole group dies.
@@ -298,6 +304,7 @@ func TestTimeout(t *testing.T) {
 }
 
 func TestCancel(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "--", "sleep", "60")
 	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Running })
@@ -324,7 +331,7 @@ func TestCancel(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("job never started")
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	sigs <- syscall.SIGINT
 	if code := <-done; code != 130 {
@@ -336,6 +343,7 @@ func TestCancel(t *testing.T) {
 }
 
 func TestConcurrencyAndIsolation(t *testing.T) {
+	t.Parallel()
 	const n = 4
 	ts := startServer(t, server.Config{MaxJobs: n})
 	ws := t.TempDir()
@@ -367,6 +375,7 @@ func TestConcurrencyAndIsolation(t *testing.T) {
 }
 
 func TestQueueing(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1})
 	a := ts.detach("", "--", "sleep", "1")
 	b := ts.detach("", "--", "true")
@@ -393,6 +402,7 @@ func TestQueueing(t *testing.T) {
 }
 
 func TestLogsReattach(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "-c", "for i in 1 2 3; do echo line$i; sleep 0.3; done; echo bye >&2")
 	if r := ts.tun("", "logs", "-f", id); r.code != 0 || r.stdout != "line1\nline2\nline3\n" {
@@ -412,6 +422,7 @@ func TestLogsReattach(t *testing.T) {
 }
 
 func TestJSONOutput(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	r := ts.tun("", "run", "--json", "-c", "echo hi; echo oops >&2; exit 4")
 	if r.code != 4 || r.stderr != "" {
@@ -425,12 +436,15 @@ func TestJSONOutput(t *testing.T) {
 }
 
 func TestRestartRecovery(t *testing.T) {
+	t.Parallel()
 	data := t.TempDir()
 	ts := startServer(t, server.Config{DataDir: data, MaxJobs: 1})
 	running := ts.detach("", "-c", "echo before; sleep 60")
 	queued := ts.detach("", "--", "true")
 	ts.waitFor(running, func(j api.Job) bool { return j.State == api.Running })
-	time.Sleep(200 * time.Millisecond)
+	eventually(t, "job output before restart", func() bool {
+		return ts.tun("", "logs", running).stdout == "before\n"
+	})
 	token := ts.srv.Token()
 	ts.stop()
 

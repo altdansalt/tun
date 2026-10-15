@@ -14,6 +14,7 @@ import (
 )
 
 func TestLogsTail(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "-c", "seq 1 5; printf partial; printf 'e1\\ne2\\n' >&2")
 	ts.waitDone(id)
@@ -68,6 +69,7 @@ func TestLogsTail(t *testing.T) {
 }
 
 func TestRunTail(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	r := ts.tun("", "run", "--tail", "2", "-c", "seq 1 10; printf 'e1\\ne2\\ne3' >&2; exit 3")
 	id := ts.lastID()
@@ -104,6 +106,7 @@ func TestRunTail(t *testing.T) {
 }
 
 func TestLineTail(t *testing.T) {
+	t.Parallel()
 	lt := &lineTail{n: 2}
 	for _, p := range []string{"a\nb", "\nc\n", "", "d"} {
 		lt.Write([]byte(p))
@@ -121,6 +124,7 @@ func TestLineTail(t *testing.T) {
 // TestCIScript runs scripts/ci.sh through tun run -e TEST_FLAGS=..., the way agents do, with a
 // fake go that records its arguments and prints canned go test output.
 func TestCIScript(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	ci, err := os.ReadFile("../../scripts/ci.sh")
 	if err != nil {

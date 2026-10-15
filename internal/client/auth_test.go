@@ -10,6 +10,7 @@ import (
 // Proxies in front of tun (exe.dev's) consume the Authorization header, so the token
 // must also work as X-Tun-Token, and a wrong X-Tun-Token must not fall back to Authorization.
 func TestAuthHeaders(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	tok := ts.srv.Token()
 	cases := []struct {

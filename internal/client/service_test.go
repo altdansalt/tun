@@ -43,10 +43,16 @@ func TestServiceHelper(t *testing.T) {
 		sort.Strings(vars)
 		fmt.Fprint(w, strings.Join(vars, " "))
 	})
+	streamRelease := make(chan struct{})
+	mux.HandleFunc("/stream-release", func(w http.ResponseWriter, r *http.Request) { close(streamRelease) })
 	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "tick1")
 		w.(http.Flusher).Flush()
-		time.Sleep(3 * time.Second)
+		select {
+		case <-streamRelease:
+		case <-r.Context().Done():
+			return
+		}
 		fmt.Fprintln(w, "tick2")
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +141,7 @@ func listening(port int) bool {
 }
 
 func TestService(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1, MaxServices: 1})
 	start := time.Now()
 	id, urls := ts.startService("--port", "8080", "-e", "SERVICE_DELAY=700ms")
@@ -189,17 +196,25 @@ func TestService(t *testing.T) {
 		t.Errorf("status: %+v", r)
 	}
 
-	// Streaming: the first chunk arrives long before the response ends.
-	req, _ := http.NewRequest("GET", u+"stream", nil)
+	// Streaming: the first chunk must arrive before we release the second.
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStream()
+	req, _ := http.NewRequestWithContext(streamCtx, "GET", u+"stream", nil)
 	req.Header.Set("Authorization", "Bearer "+ts.srv.Token())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t0 := time.Now()
-	line, err := bufio.NewReader(resp.Body).ReadString('\n')
-	if err != nil || line != "tick1\n" || time.Since(t0) > 2*time.Second {
-		t.Errorf("stream first chunk %q %v after %v", line, err, time.Since(t0))
+	streamReader := bufio.NewReader(resp.Body)
+	line, err := streamReader.ReadString('\n')
+	if err != nil || line != "tick1\n" {
+		t.Fatalf("stream first chunk %q %v", line, err)
+	}
+	if code, _ := ts.get(u+"stream-release", true); code != 200 {
+		t.Fatalf("release stream: %d", code)
+	}
+	if line, err := streamReader.ReadString('\n'); err != nil || line != "tick2\n" {
+		t.Errorf("stream second chunk %q %v", line, err)
 	}
 	resp.Body.Close()
 
@@ -249,6 +264,7 @@ func TestService(t *testing.T) {
 }
 
 func TestServiceMultiPortAndJSON(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	r := ts.tun("", append([]string{"run", "--service", "--json", "--port", "80", "--port", "5432"}, helperArgs(t)...)...)
 	var j api.Job
@@ -273,6 +289,7 @@ func TestServiceMultiPortAndJSON(t *testing.T) {
 }
 
 func TestServiceFailures(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	r := ts.tun("", "run", "--service", "--port", "80", "--no-workspace", "-c", "echo starting; echo boom >&2; exit 3")
 	if r.code != 3 || r.stdout != "starting\n" || !strings.Contains(r.stderr, "boom\n") || !strings.Contains(r.stderr, "before it was ready") {
@@ -304,6 +321,7 @@ func TestServiceFailures(t *testing.T) {
 }
 
 func TestServiceKilledOnShutdown(t *testing.T) {
+	t.Parallel()
 	data := t.TempDir()
 	ts := startServer(t, server.Config{DataDir: data})
 	id, _ := ts.startService("--port", "8080")
@@ -320,6 +338,7 @@ func TestServiceKilledOnShutdown(t *testing.T) {
 
 // TestServiceBwrap runs a python3 http.server under the real sandbox.
 func TestServiceBwrap(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
 	}
@@ -344,6 +363,7 @@ func TestServiceBwrap(t *testing.T) {
 // TestCancelStartRace: plain jobs canceled right as the scheduler hands them to run() (here
 // with MaxJobs 1 and a stream of quick jobs) must end canceled and never start.
 func TestCancelStartRace(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1})
 	c := ts.client()
 	ctx := context.Background()
@@ -365,6 +385,7 @@ func TestCancelStartRace(t *testing.T) {
 }
 
 func TestServiceJSONFailureAndEarlyLimit(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxServices: 1})
 	r := ts.tun("", "run", "--service", "--json", "--port", "80", "--no-workspace", "-c", "echo out; echo err >&2; exit 4")
 	var res map[string]any
@@ -388,6 +409,7 @@ func TestServiceJSONFailureAndEarlyLimit(t *testing.T) {
 // even with retention far shorter than its lifetime, while sweeping services that ended,
 // including ones canceled before they started.
 func TestServiceSurvivesGC(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{KeepWork: time.Millisecond, GCInterval: 20 * time.Millisecond, MaxServices: 2})
 	ws := t.TempDir()
 	os.WriteFile(ws+"/f", []byte("x"), 0o644)

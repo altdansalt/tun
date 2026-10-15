@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,7 @@ func readFile(t *testing.T, p string) string {
 }
 
 func TestRunOut(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	ws := gitRepo(t) // the workspace root is the git toplevel, not the cwd
 	os.WriteFile(filepath.Join(ws, "src.txt"), []byte("src"), 0o644)
@@ -85,6 +87,7 @@ func TestRunOut(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	id := ts.detach("", "-c", "mkdir -p out && echo 1 > out/one && echo 2 > two")
 	ts.waitDone(id)
@@ -112,6 +115,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestFilesPathSafety(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	secret := filepath.Join(t.TempDir(), "secret")
 	os.WriteFile(secret, []byte("SECRET"), 0o644)
@@ -184,6 +188,7 @@ func TestFilesPathSafety(t *testing.T) {
 
 // TestExtractHostileTar feeds the client a tar a malicious server might send.
 func TestExtractHostileTar(t *testing.T) {
+	t.Parallel()
 	outside := t.TempDir()
 	cases := map[string][]tar.Header{
 		"dotdot":   {{Name: "../evil", Typeflag: tar.TypeReg}},
@@ -210,6 +215,7 @@ func TestExtractHostileTar(t *testing.T) {
 }
 
 func TestFilesSizeLimit(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{MaxDownload: 1000})
 	ws := t.TempDir()
 	r := ts.tun(ws, "run", "--out", "big", "--out", "small", "-c", "head -c 2000 /dev/zero > big; echo s > small")
@@ -231,6 +237,7 @@ func TestFilesSizeLimit(t *testing.T) {
 // The client requires the server's completion trailer: a tar that ends cleanly at an entry
 // boundary without it is an error, not success.
 func TestFilesRequiresCompleteTrailer(t *testing.T) {
+	t.Parallel()
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tw := tar.NewWriter(w)
 		tw.WriteHeader(&tar.Header{Name: "a", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644})
@@ -245,10 +252,42 @@ func TestFilesRequiresCompleteTrailer(t *testing.T) {
 }
 
 func TestRunPrintsWorkspace(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, server.Config{})
 	ws := gitRepo(t)
 	r := ts.tun(filepath.Join(ws, "sub"), "run", "--", "true")
 	if real, _ := filepath.EvalSymlinks(ws); !strings.Contains(r.stderr, "\ntun: workspace "+real+"\n") {
 		t.Errorf("stderr %q lacks the workspace root %s", r.stderr, real)
+	}
+}
+
+func TestRunWorkspaceCosts(t *testing.T) {
+	t.Parallel()
+	ts := startServer(t, server.Config{})
+	ws := t.TempDir()
+	os.WriteFile(filepath.Join(ws, "input"), []byte("workspace contents"), 0o600)
+	for i, format := range []string{"tun: uploaded %dB workspace\n", "tun: workspace %dB (already on server)\n"} {
+		r := ts.tun(ws, "run", "--", "true")
+		if r.code != 0 {
+			t.Fatalf("run: %+v", r)
+		}
+		j := ts.status(ts.lastID())
+		info, err := os.Stat(filepath.Join(ts.data, "blobs", j.Workspace+".tar.gz"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf(format, info.Size()); !strings.Contains(r.stderr, want) {
+			t.Errorf("run %d missing %q: %q", i, want, r.stderr)
+		}
+	}
+
+	if ts.puts.Load() != 1 {
+		t.Errorf("uploads = %d, want 1", ts.puts.Load())
+	}
+	for _, flags := range [][]string{{"--json"}, {"--no-workspace"}} {
+		r := ts.tun(ws, append(append([]string{"run"}, flags...), "--", "true")...)
+		if r.code != 0 || strings.Contains(r.stderr, "workspace") || strings.Contains(r.stderr, "uploaded") {
+			t.Errorf("flags %v: %+v", flags, r)
+		}
 	}
 }

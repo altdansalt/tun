@@ -44,6 +44,7 @@ usage:
 tun run ships the workspace (the git toplevel of the cwd, else the cwd; tracked + untracked
 non-ignored files, no .git) to the server, runs the command there in the same relative
 directory, streams stdout/stderr, and exits with the command's exit status.
+Stderr reports compressed workspace bytes (uploaded or cached) and final job run/queue times.
 
 exit status of tun run: the command's exit code; 128+N if it was killed by signal N;
 124 if it hit --timeout; 125 for tun's own errors (bad flags, server unreachable, upload
@@ -76,6 +77,8 @@ chance to cancel, the job keeps running and 'tun logs -f <id>' reattaches. SIGIN
 cancel the job and exit 128+signal.
 If the server is busy (it runs --max-jobs jobs at once, FIFO), tun run prints once
 "tun: queued (N ahead, M running)" and, when the job starts, "tun: started after Xs in queue".
+On completion stderr ends with "tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)".
+Workspace diagnostics show compressed bytes uploaded or already on the server.
 The job object's queue_sec and run_sec (tun status, and in --json) show where time went.
 
 The job's environment is minimal: PATH, LANG, TERM=dumb, USER, HOME and TMPDIR (private to
@@ -263,8 +266,9 @@ func runCmd(args []string, e Env) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := newClient(e)
+	var uploadNote bytes.Buffer
 	if !*noWS {
-		ws, cwd, err := upload(ctx, c, e.Cwd)
+		ws, cwd, err := upload(ctx, c, e.Cwd, &uploadNote)
 		if err != nil {
 			return errorf(e, "%v", err)
 		}
@@ -288,6 +292,7 @@ func runCmd(args []string, e Env) int {
 			fmt.Fprintf(e.Stderr, "tun: job %s\n", j.ID)
 		}
 		if !*noWS {
+			e.Stderr.Write(uploadNote.Bytes())
 			if root, err := localRoot(e.Cwd); err == nil {
 				fmt.Fprintf(e.Stderr, "tun: workspace %s\n", root)
 			}
@@ -296,16 +301,23 @@ func runCmd(args []string, e Env) int {
 	if j.Service {
 		return waitReady(ctx, c, j, *svc.readyTimeout, *jsonOut, e)
 	}
-	code := wait(ctx, cancel, c, j, *jsonOut, *tailN, e)
+	code, final := wait(ctx, cancel, c, j, *jsonOut, *tailN, e)
 	if len(outs) > 0 {
 		code = fetchOuts(c, j.ID, outs, outDir, code, e)
+	}
+	if final != nil && !*jsonOut {
+		printCompletion(e.Stderr, *final, code)
 	}
 	return code
 }
 
+func printCompletion(w io.Writer, j api.Job, code int) {
+	fmt.Fprintf(w, "tun: job %s %s exit=%d after %.3fs (%.3fs queued)\n", j.ID, j.State, code, j.RunSec, j.QueueSec)
+}
+
 // upload packs the workspace containing cwd and uploads it unless the server already has it.
 // It returns the blob sha and cwd relative to the workspace root.
-func upload(ctx context.Context, c *Client, cwd string) (sha, rel string, err error) {
+func upload(ctx context.Context, c *Client, cwd string, report io.Writer) (sha, rel string, err error) {
 	real, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return "", "", err
@@ -326,7 +338,8 @@ func upload(ctx context.Context, c *Client, cwd string) (sha, rel string, err er
 		return "", "", err
 	}
 	defer os.Remove(tmp.Name())
-	sha, _, err = workspace.Pack(root, files, tmp)
+	var size int64
+	sha, size, err = workspace.Pack(root, files, tmp)
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -339,6 +352,11 @@ func upload(ctx context.Context, c *Client, cwd string) (sha, rel string, err er
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("uploading workspace %s: %v", root, err)
+	}
+	if has {
+		fmt.Fprintf(report, "tun: workspace %dB (already on server)\n", size)
+	} else {
+		fmt.Fprintf(report, "tun: uploaded %dB workspace\n", size)
 	}
 	return sha, filepath.ToSlash(rel), nil
 }
@@ -473,15 +491,30 @@ func waitQueued(ctx context.Context, c *Client, j api.Job, e Env) (code int, don
 	return 0, false
 }
 
+// newlineWriter records whether streamed stderr needs a newline before diagnostics.
+type newlineWriter struct {
+	io.Writer
+	partial bool
+}
+
+func (w *newlineWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n > 0 {
+		w.partial = p[n-1] != '\n'
+	}
+	return n, err
+}
+
 // wait streams (or collects) the job's output until it ends and maps the result to an exit code.
 // With tailN >= 0 it prints only the last tailN lines of each stream once the job has ended.
-func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, tailN int, e Env) int {
+func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, tailN int, e Env) (int, *api.Job) {
 	if j.QueuePosition != nil && !jsonOut {
 		if code, done := waitQueued(ctx, c, j, e); done {
-			return code
+			return code, nil
 		}
 	}
-	var out, errw io.Writer = e.Stdout, e.Stderr
+	stderr := &newlineWriter{Writer: e.Stderr}
+	var out, errw io.Writer = e.Stdout, stderr
 	tOut, tErr := &tail{max: 64 << 10}, &tail{max: 64 << 10}
 	lOut, lErr := &lineTail{n: tailN}, &lineTail{n: tailN}
 	if jsonOut {
@@ -504,17 +537,20 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 		if tailN >= 0 {
 			printTails(e, j.ID, lOut, lErr)
 		}
-		return cancelOnSignal(c, j.ID, sig, e)
+		return cancelOnSignal(c, j.ID, sig, e), nil
 	}
 	if tailN >= 0 {
 		printTails(e, j.ID, lOut, lErr)
 	}
 	if err := errors.Join(errOut, errErr); err != nil {
-		return errorf(e, "%v; job %s may still be running: reattach with 'tun logs -f %s'", err, j.ID, j.ID)
+		return errorf(e, "%v; job %s may still be running: reattach with 'tun logs -f %s'", err, j.ID, j.ID), nil
 	}
 	final, err := c.Get(ctx, j.ID)
 	if err != nil {
-		return errorf(e, "getting status of job %s: %v", j.ID, err)
+		return errorf(e, "getting status of job %s: %v", j.ID, err), nil
+	}
+	if !jsonOut && tailN < 0 && stderr.partial {
+		fmt.Fprintln(e.Stderr)
 	}
 	code, msg := exitCode(final)
 	if jsonOut {
@@ -531,7 +567,7 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 	} else if msg != "" {
 		fmt.Fprintf(e.Stderr, "tun: job %s %s\n", final.ID, msg)
 	}
-	return code
+	return code, &final
 }
 
 // exitCode maps a finished job to tun run's exit status and an optional explanation.
