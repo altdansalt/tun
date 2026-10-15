@@ -909,10 +909,12 @@ actions use the 2 CPUs).
   results go to the client's own namespace.
 - Real-Bazel tests (TestBazelReal, TestBazelRemoteExecution, reapi's TestBazelCache and
   TestBazelExecution, server's TestBazelRunnerExecution, e2e.sh's Bazel part) skip inside a
-  Bazel test unless `TUN_TEST_REAL_BAZEL=1` (bazel-ci.sh sets it): in a session or on an
-  executor bazelisk can't download Bazel. `//internal/client:client_test`,
-  `//internal/reapi:reapi_test` and `//scripts:e2e_test` stay out of the session benchmark
-  (client_test alone runs for minutes; the others still need a Bazel binary as test data).
+  Bazel test unless `TUN_TEST_REAL_BAZEL=1`: bazelisk can't download Bazel in Bazel's test
+  sandbox (not in `bazel-ci.sh` in a tun job either: job 20261015T153933551805-6a66cffd,
+  "network is unreachable" / "Bad Gateway"), so they failed after 16-95s each; `scripts/ci.sh`
+  runs them. Passing a Bazel binary as test data would let Bazel run them.
+  `//internal/client:client_test` (minutes on its own), `//internal/reapi:reapi_test` and
+  `//scripts:e2e_test` stay out of the session benchmark.
 
 ### Deploying on the shared server
 

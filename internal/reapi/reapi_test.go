@@ -475,9 +475,9 @@ func TestStoreRestartBudget(t *testing.T) {
 }
 
 // skipWithoutRealBazel skips a test that runs a real Bazel unless one can run: bazel on PATH,
-// and not inside a Bazel test action (a tun bazel session or remote executor: no Bazel
-// download, no DNS) unless TUN_TEST_REAL_BAZEL is set (scripts/bazel-ci.sh sets it: in a tun
-// job the test finds bazelisk's cached Bazel).
+// and not inside a Bazel test action (bazel test in a tun job, a session or an executor:
+// bazelisk can't download Bazel there) unless TUN_TEST_REAL_BAZEL is set (--test_env, for a
+// sandbox that can). scripts/ci.sh runs them.
 func skipWithoutRealBazel(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("bazel"); err != nil {

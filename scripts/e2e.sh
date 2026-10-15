@@ -50,8 +50,8 @@ grep -Eq '"state":[[:space:]]*"canceled"' status
 tun ls > jobs
 grep -q "$job" jobs
 # tun bazel: a genrule workspace (no downloads); the second command finds the server warm.
-# Not inside a Bazel test action (a tun bazel session or remote executor can't download Bazel)
-# unless TUN_TEST_REAL_BAZEL is set (scripts/bazel-ci.sh sets it).
+# Not inside a Bazel test action (bazelisk can't download Bazel there) unless
+# TUN_TEST_REAL_BAZEL is set.
 if command -v bazel >/dev/null && { [ -z "${TEST_TMPDIR:-}" ] || [ -n "${TUN_TEST_REAL_BAZEL:-}" ]; }; then
   mkdir "$tmp/bz" && cd "$tmp/bz"
   echo 'module(name = "smoke")' > MODULE.bazel
