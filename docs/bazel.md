@@ -225,3 +225,20 @@ index mutex. Partial uploads keep incremental SHA-256 state in memory and rehash
 only on first resume after restart. Failed eviction removals are logged and skipped,
 without failing committed writes. Bazel test invocations have bounded contexts,
 WaitDelay and shutdown cleanup; CI has an explicit ten-minute Go test timeout.
+
+Review validation (2026-10-15): full vet/build/race tests, real Bazel cache checks,
+and both CLI smoke suites passed in job `20261015T082314203271-b9f1367f`
+(87.666s; REAPI package 57.694s). The explicit incremental-hash regression also
+passed in `20261015T082226870100-792525f3`: a 3MiB upload keeps the same hash state
+through 192 chunks. HTTP/2 deadline/auth/routing regressions passed in
+`20261015T082040636635-1aa817bd`.
+
+`BenchmarkStoreWrite` (300 replacements per case, job
+`20261015T082115698248-7206b4c0`) measured 350.901us/op with 10 existing entries,
+119.072us/op with 10,000, and 79.213us/op with 100,000. Each case creates real files
+before Open and excludes startup indexing from timing. The decreasing times show
+shared-host noise; the useful result is absence of growth with entry count.
+An earlier superseded full CI job (`20261015T082110926143-4d167784`) stopped
+producing package results after REAPI/sandbox; it was canceled after the final full
+run passed. Its stall cause was not established. Separate server/workspace race
+tests passed in `20261015T082410099198-c3a8b234` (4.655s job time).
