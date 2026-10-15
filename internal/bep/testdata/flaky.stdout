@@ -1,0 +1,5 @@
+//:flaky                                                                  FLAKY, failed in 1 out of 2 in 0.0s
+  Stats over 2 runs: max = 0.0s, min = 0.0s, avg = 0.0s, dev = 0.0s
+  /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-bazel/fa30a403a25b1a61894207d8bc49966e/execroot/_main/bazel-out/k8-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+
+Executed 1 out of 1 test: 1 test passes.
