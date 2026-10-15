@@ -64,7 +64,7 @@ client works with zero config.
 For testing, `tun serve --ephemeral` uses a random loopback port and a fresh temporary
 data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
 it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
-stdout contains exactly three lines: `TUN_URL=http://127.0.0.1:PORT` `TUN_TOKEN=TOKEN`, and `TUN_RUNNER_TOKEN=TOKEN`;
+stdout contains exactly three lines: `TUN_URL=http://127.0.0.1:PORT`, `TUN_TOKEN=TOKEN`, and `TUN_RUNNER_TOKEN=TOKEN`;
 diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
 `scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server

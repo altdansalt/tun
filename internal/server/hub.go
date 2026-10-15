@@ -296,6 +296,7 @@ func (s *Server) reconcile(rn *runnerState, held map[string]bool, arrival time.T
 				s.requeue(j) // the poll answer carrying it never reached the runner
 			}
 		default:
+			j.ActionStatus = 14
 			s.finish(j, api.Failed, nil, nil, fmt.Sprintf("runner %s no longer has the job (did it restart?)", rn.name))
 		}
 	}

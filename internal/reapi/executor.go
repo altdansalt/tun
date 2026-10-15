@@ -506,7 +506,10 @@ func SweepExecRoots(dir string) error {
 func BlobSize(d []byte) uint64 { return get(d, 2).v }
 
 func (s *RemoteStore) copyInput(ctx context.Context, d []byte, dst io.Writer) error {
-	if !s.Local.has(d) {
+	if err := s.Local.copyInput(ctx, d, io.Discard); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if _, err := s.read("cas-", d); err != nil {
 			return err
 		}
