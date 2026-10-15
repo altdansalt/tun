@@ -51,6 +51,7 @@ tun token [--data DIR] new NAME   issue a client token on the server host
 tun runners                       (JSON lines: the server's live runners)
 tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
 tun sessions [--client NAME | --mine]   (JSON lines: the server's Bazel sessions)
+tun sessions stop [--id ID] [NAME]      stop your sessions (NAME: this workspace's; none: all)
 tun serve ... [--max-sessions 2] [--session-idle 30m]
 ```
 `tun logs --tail N`: only the last N lines (a final line without a newline counts); with `-f`,
@@ -540,7 +541,24 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `--max-sessions` (default 2) exist; a bazel job for a new session when that many exist
   evicts the least recently used idle one (one eviction at a time) and waits for it. Sessions
   survive a server restart on disk (`bazel_server: false` until the next command starts a new
-  sandbox).
+  sandbox). Under disk pressure idle sessions are deleted too (see Disk).
+- **Cold starts say why.** The server remembers (in memory, for a day) why each session
+  ended: evicted (naming the client, session and job it made room for), idle expiry, low
+  disk, `tun sessions stop`. A command that starts a session's Bazel server says why on the
+  start line ("started a new session sandbox (Bazel server starts with this command; cold:
+  WHY)") and appends `; cold start: WHY` to its summary line; WHY is "its session ended 4m0s
+  ago: evicted (least recently used of 2 sessions) for client C's session S (job J)", "first
+  command of a new session", "--cold", "the tun server restarted since the session's last
+  command", or "the session's sandbox (and Bazel server) had exited". A command whose new
+  session evicted another appends `; evicted client C's session S (idle for D) to make room`.
+  (Both come before the `; logs: ...` part.)
+- `POST /v1/sessions/stop` / `tun sessions stop`: body `{id, name, root}` (all optional)
+  selects the caller's sessions (by id: admin may name anyone's; else name and root filter;
+  empty: all of the caller's). Idle ones are stopped like an expired session (`stopping`, then
+  deleted); ones running or with a queued command are left alone. Answer `{stopped:
+  [Session], busy: [Session]}`, 404 if nothing matched. The CLI sends the cwd's workspace
+  root with NAME, prints each stopped session as a JSON line, a stderr line per busy one, and
+  exits 1 if any was busy.
 - `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root,
   created_at, last_used, commands, last_job, state (idle|busy|stopping), job, bazel_server,
   expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.

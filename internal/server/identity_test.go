@@ -97,6 +97,10 @@ func TestClientTokens(t *testing.T) {
 	}
 	request(b, "GET", "/v1/jobs/"+alice.ID+"/stdout", "", 403)
 	request(b, "POST", "/v1/jobs/"+alice.ID+"/cancel", "", 403)
+	// Only one's own sessions can be stopped (admin: any, by id).
+	request(b, "POST", "/v1/sessions/stop", `{"id":"`+alice.SessionID+`"}`, 404)
+	request(b, "POST", "/v1/sessions/stop", `{"id":"`+own.SessionID+`"}`, 200)
+	request(s.Token(), "POST", "/v1/sessions/stop", `{"id":"`+alice.SessionID+`"}`, 200)
 	request(a, "GET", "/v1/jobs/"+alice.ID+"/stdout", "", 200)
 	request(b, "POST", "/v1/runner/leave", `{}`, 403)
 	var mine []api.Job

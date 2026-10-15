@@ -93,6 +93,7 @@ type Server struct {
 	runners  map[string]*runnerState // the current instance of each runner name
 	retired  map[string]*runnerState // by instance id: superseded or dropped instances
 	sessions map[string]*session     // tun bazel sessions by id
+	ended    map[string]sessionEnd   // why sessions ended, by id, until the id is used again
 	drainMu  sync.RWMutex
 	draining bool
 	closed   bool
@@ -121,6 +122,8 @@ type job struct {
 	exited     *api.RunnerDone // what it reported then
 	logMu      sync.Mutex      // serializes log chunk writes
 	bz         *api.BazelJob   // a tun bazel job (kept in memory only: after a restart it has failed)
+	evicted    string          // bazel job: the session it evicted to get one, for its summary
+	coldNote   string          // bazel job: why its session's Bazel server started with it
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`
 	OutSkipped []string `json:"out_skipped,omitempty"`
@@ -199,7 +202,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{},
-		sessions: map[string]*session{}, quit: make(chan struct{})}
+		sessions: map[string]*session{}, ended: map[string]sessionEnd{}, quit: make(chan struct{})}
 	s.gc.fails = map[string]int{}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
@@ -417,6 +420,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/{stream}", auth(s.runnerLog))
 	mux.HandleFunc("POST /v1/cas", auth(s.putCAS))
 	mux.HandleFunc("GET /v1/sessions", auth(s.listSessions))
+	mux.HandleFunc("POST /v1/sessions/stop", auth(s.stopSessions))
 	mux.HandleFunc("POST /v1/jobs", auth(func(w http.ResponseWriter, r *http.Request) {
 		s.drainMu.RLock()
 		defer s.drainMu.RUnlock()

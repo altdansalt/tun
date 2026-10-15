@@ -162,6 +162,22 @@ type MissingBlobs struct {
 	Missing []string `json:"missing"`
 }
 
+// StopSessions is the body of POST /v1/sessions/stop (tun sessions stop): which of the
+// caller's sessions to stop. ID selects one session; else Name (and Root, if set) filter;
+// all empty: all of the caller's sessions.
+type StopSessions struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+	Root string `json:"root,omitempty"`
+}
+
+// StoppedSessions answers POST /v1/sessions/stop: the sessions being stopped now, and the
+// matching ones left alone because a command runs or waits in them.
+type StoppedSessions struct {
+	Stopped []Session `json:"stopped"`
+	Busy    []Session `json:"busy"`
+}
+
 // Session is a warm Bazel session (GET /v1/sessions, tun sessions).
 type Session struct {
 	ID        string    `json:"id"`

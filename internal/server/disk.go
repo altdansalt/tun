@@ -133,8 +133,7 @@ func (s *Server) reclaimDisk() {
 			s.mu.Unlock()
 			break
 		}
-		victim.stopping = true
-		log.Printf("tun: session %s (%s, client %s): deleted: disk space is low (tun serve --min-free %v)", victim.ID, victim.Name, victim.Client, s.cfg.MinFree)
+		s.endSession(victim, fmt.Sprintf("deleted: disk space is low (tun serve --min-free %v)", s.cfg.MinFree))
 		s.mu.Unlock()
 		s.dropSession(victim)
 		sessions++

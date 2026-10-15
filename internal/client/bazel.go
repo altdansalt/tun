@@ -177,6 +177,15 @@ func printBazelJSON(ctx context.Context, c *Client, id string, final *api.Job, e
 	printJSON(e, out)
 }
 
+// bazelRoot is the workspace root a tun bazel command in the cwd would use (the session's Root).
+func bazelRoot(e Env) (string, error) {
+	real, err := filepath.EvalSymlinks(e.Cwd)
+	if err != nil {
+		return "", err
+	}
+	return workspace.Root(real)
+}
+
 // bazelManifest lists the workspace containing the cwd and builds its manifest. It returns
 // the workspace root and the cwd relative to it.
 func bazelManifest(e Env) (root, rel string, m []api.ManifestEntry, err error) {
@@ -316,16 +325,28 @@ func (c *Client) putBlobs(ctx context.Context, root string, files map[string]str
 }
 
 const sessionsUsage = `usage: tun sessions [--client NAME | --mine]
+       tun sessions stop [--id ID] [NAME]
 
 Print the server's tun bazel sessions, most recently used first, one JSON object per line:
 {id, name, client, root (the client's workspace path), created_at, last_used, commands,
 last_job, state (idle|busy|stopping), job (the running job, if busy), bazel_server (whether
 its Bazel server is up), expires_at (deleted then unless used again)}.
 
+tun sessions stop frees your own sessions: their Bazel servers shut down and their dirs
+(workspace copy, output base) are deleted, so their slots go to other sessions at once (the
+server holds only a few). With NAME, this workspace's session NAME (as in tun bazel
+--session NAME); with --id, the session with that id (admin: anyone's); without either,
+all of your sessions. A session that is running a command, or has one queued, is left
+alone (cancel the job first). It prints each stopped session as a JSON line; exit 1 if some
+matching session was busy. Your caches (repository cache, remote cache) stay.
+
 flags:
 `
 
 func sessionsCmd(args []string, e Env) int {
+	if len(args) > 0 && args[0] == "stop" {
+		return sessionsStop(args[1:], e)
+	}
 	fs := newFlags("sessions", sessionsUsage, e)
 	client := fs.String("client", "", "only sessions of client `NAME`")
 	mine := fs.Bool("mine", false, "only this host's sessions")
@@ -349,6 +370,43 @@ func sessionsCmd(args []string, e Env) int {
 	}
 	for _, s := range list {
 		printJSON(e, s)
+	}
+	return 0
+}
+
+func sessionsStop(args []string, e Env) int {
+	fs := newFlags("sessions stop", sessionsUsage, e)
+	id := fs.String("id", "", "the session with id `ID` (tun sessions lists ids)")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return flagErr(e, err)
+	}
+	if len(pos) > 1 || (len(pos) == 1 && *id != "") {
+		return errorf(e, "usage: tun sessions stop [--id ID] [NAME]")
+	}
+	req := api.StopSessions{ID: *id}
+	if len(pos) == 1 {
+		req.Name = pos[0]
+		if req.Root, err = bazelRoot(e); err != nil {
+			return errorf(e, "%v", err)
+		}
+	}
+	var res api.StoppedSessions
+	if err := newClient(e).doJSON(context.Background(), "POST", "/v1/sessions/stop", req, &res); err != nil {
+		return errorf(e, "%v", err)
+	}
+	for _, s := range res.Stopped {
+		printJSON(e, s)
+	}
+	for _, s := range res.Busy {
+		job := s.Job
+		if job == "" {
+			job = "queued"
+		}
+		fmt.Fprintf(e.Stderr, "tun: session %s (%s) is busy (job %s): not stopped; cancel its jobs first\n", s.Name, s.ID, job)
+	}
+	if len(res.Busy) > 0 {
+		return 1
 	}
 	return 0
 }

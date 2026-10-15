@@ -60,6 +60,14 @@ type session struct {
 	cache       *cacheSocket        // the session's REAPI socket while it has a sandbox
 	state       workspace.SyncState // owned by whoever holds the session; nil: load sync.json
 	loaded      bool
+	startNote   string // why a new session's first command starts cold (a previous one ended)
+}
+
+// sessionEnd records why a session ended, so that a later command for the same session can
+// say why it starts cold (Server.ended; dropped once used, or after a day).
+type sessionEnd struct {
+	why string
+	at  time.Time
 }
 
 // sessionID is the id of the session (client, root, name).
@@ -242,13 +250,20 @@ func (s *Server) claimSession(j *job) bool {
 			}
 		}
 		if victim != nil {
-			s.stopSession(victim, fmt.Sprintf("evicted (least recently used of %d sessions) for a new session", s.cfg.MaxSessions))
+			s.stopSession(victim, fmt.Sprintf("evicted (least recently used of %d sessions) for client %s's session %s (job %s)",
+				s.cfg.MaxSessions, j.Client, j.bz.Session, j.ID))
+			j.evicted = fmt.Sprintf("evicted client %s's session %s (idle for %s) to make room",
+				victim.Client, victim.Name, roundDur(time.Since(victim.LastUsed)))
 		}
 		return false
 	}
 	now := time.Now().UTC()
 	b := j.bz
 	sess := &session{Session: api.Session{ID: j.SessionID, Name: b.Session, Client: j.Client, Root: b.Root, CreatedAt: now, LastUsed: now}, loaded: true}
+	if e, ok := s.ended[sess.ID]; ok {
+		sess.startNote = fmt.Sprintf("its session ended %s ago: %s", roundDur(now.Sub(e.at)), e.why)
+		delete(s.ended, sess.ID)
+	}
 	s.sessions[sess.ID] = sess
 	sess.job = j
 	return true
@@ -263,13 +278,33 @@ func (s *Server) queuedFor(sess *session) bool {
 // stopSession shuts down sess's Bazel server and sandbox and deletes it, in the background.
 // Caller holds s.mu; sess must be idle.
 func (s *Server) stopSession(sess *session, why string) {
-	sess.stopping = true
-	log.Printf("tun: session %s (%s, client %s): %s", sess.ID, sess.Name, sess.Client, why)
+	s.endSession(sess, why)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		s.dropSession(sess)
 	}()
+}
+
+// endSession marks sess stopping and records why (Server.ended). Caller holds s.mu.
+func (s *Server) endSession(sess *session, why string) {
+	sess.stopping = true
+	log.Printf("tun: session %s (%s, client %s): %s", sess.ID, sess.Name, sess.Client, why)
+	now := time.Now()
+	for id, e := range s.ended {
+		if now.Sub(e.at) > 24*time.Hour {
+			delete(s.ended, id)
+		}
+	}
+	s.ended[sess.ID] = sessionEnd{why, now}
+}
+
+// roundDur is d rounded for messages: whole seconds, or minutes from an hour on.
+func roundDur(d time.Duration) time.Duration {
+	if d >= time.Hour {
+		return d.Round(time.Minute)
+	}
+	return d.Round(time.Second)
 }
 
 // dropSession does the work of stopSession: sess (marked stopping) is shut down and deleted.
@@ -332,6 +367,43 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	sort.Slice(list, func(a, b int) bool { return list[a].LastUsed.After(list[b].LastUsed) })
 	writeJSON(w, 200, list)
+}
+
+// stopSessions serves POST /v1/sessions/stop: stops the caller's idle sessions that match
+// the body (api.StopSessions). Busy ones (a command running or queued) are listed, not
+// stopped. Admin may stop any session by id. 404 if nothing matches.
+func (s *Server) stopSessions(w http.ResponseWriter, r *http.Request) {
+	var req api.StopSessions
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && err != io.EOF {
+		writeErr(w, 400, "bad request body: "+err.Error())
+		return
+	}
+	client := clientOf(r)
+	p, _ := r.Context().Value(identityKey{}).(principal)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := api.StoppedSessions{Stopped: []api.Session{}, Busy: []api.Session{}}
+	for _, sess := range s.sessions {
+		switch {
+		case req.ID != "" && sess.ID != req.ID,
+			sess.Client != client && !(p.admin && req.ID != ""),
+			req.Name != "" && sess.Name != req.Name,
+			req.Root != "" && sess.Root != req.Root,
+			sess.stopping:
+			continue
+		}
+		if sess.job != nil || s.queuedFor(sess) {
+			res.Busy = append(res.Busy, s.sessionView(sess))
+			continue
+		}
+		s.stopSession(sess, fmt.Sprintf("stopped by client %s (tun sessions stop)", client))
+		res.Stopped = append(res.Stopped, s.sessionView(sess))
+	}
+	if len(res.Stopped)+len(res.Busy) == 0 {
+		writeErr(w, 404, "no such session (tun sessions --mine lists yours)")
+		return
+	}
+	writeJSON(w, 200, res)
 }
 
 // sessionView is sess's public object. Caller holds s.mu.
@@ -895,11 +967,30 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		endLogs()
 		return procResult{State: api.Canceled}
 	}
+	s.mu.Lock()
+	hadSandbox := sess.sb != nil
+	s.mu.Unlock()
 	started, err := s.ensureSandbox(sess, spec)
 	if err != nil {
 		return fail("%v", err)
 	}
 	if started {
+		why := "first command of a new session"
+		switch {
+		case sess.startNote != "":
+			why = sess.startNote
+		case b.Cold:
+			why = "--cold"
+		case sess.Commands == 0:
+		case hadSandbox:
+			why = "the session's sandbox (and Bazel server) had exited; see its agent.log"
+		default:
+			why = "the tun server restarted since the session's last command"
+		}
+		sess.startNote = ""
+		s.mu.Lock()
+		j.coldNote = why
+		s.mu.Unlock()
 		remote := "no remote cache (tun serve --cache-dir)"
 		if r := s.remoteSetup(p); r.note != "" {
 			remote = r.note
@@ -909,7 +1000,7 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 				remote += fmt.Sprintf("; remote execution on %d slots", r.executors)
 			}
 		}
-		say("session %s: started a new session sandbox (Bazel server starts with this command); %s", sess.Name, remote)
+		say("session %s: started a new session sandbox (Bazel server starts with this command; cold: %s); %s", sess.Name, why, remote)
 	}
 	args, useBEP := b.Args, bepCommands[b.Args[0]]
 	if useBEP {
@@ -1004,6 +1095,14 @@ func (s *Server) bazelSummary(j *job, out, inOut string, useBEP bool, r sandbox.
 		return
 	}
 	line := sum.Line()
+	s.mu.Lock()
+	if j.coldNote != "" {
+		line += "; cold start: " + j.coldNote
+	}
+	if j.evicted != "" {
+		line += "; " + j.evicted
+	}
+	s.mu.Unlock()
 	if c := j.bz.Args[0]; c == "test" || c == "coverage" {
 		n, err := s.stageTestLogs(j.ID, out, inOut, sum.Tests)
 		if err != nil {

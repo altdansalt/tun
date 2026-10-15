@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -439,12 +440,16 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 func TestBazelSessionLimits(t *testing.T) {
 	ts := bazelServer(t, server.Config{MaxSessions: 1, SessionIdle: 2 * time.Second}, false)
 	ws := bazelWS(t, map[string]string{})
-	ts.tun(ws, "bazel", "build")
+	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "after ") || !strings.Contains(r.stderr, "; cold start: first command of a new session\n") {
+		t.Fatalf("first command's summary: %+v", r)
+	}
 	first := ts.sessions()[0]
 	pid, _ := os.ReadFile(filepath.Join(ts.data, "sessions", first.ID, "sandbox/out/base/server/server.pid.txt"))
-	if r := ts.tun(ws, "bazel", "--session", "b", "build"); r.code != 0 {
-		t.Fatal(r)
+	r := ts.tun(ws, "bazel", "--session", "b", "build")
+	if r.code != 0 || !regexp.MustCompile(`; evicted client \S+'s session default \(idle for \d+s\) to make room\n`).MatchString(r.stderr) {
+		t.Fatalf("evicting command's summary: %+v", r)
 	}
+	evictor := jobOf(t, r)
 	if ss := ts.sessions(); len(ss) != 1 || ss[0].Name != "b" {
 		t.Fatalf("LRU eviction: %+v", ss)
 	}
@@ -454,7 +459,82 @@ func TestBazelSessionLimits(t *testing.T) {
 	if exec.Command("kill", "-0", strings.TrimSpace(string(pid))).Run() == nil {
 		t.Fatal("evicted session's server still running (no bazel shutdown)")
 	}
+	// The evicted session's next command says why it is cold, on its start line and summary.
+	r = ts.tun(ws, "bazel", "build")
+	want := regexp.MustCompile(`cold: its session ended \d+s ago: evicted \(least recently used of 1 sessions\) for client \S+'s session b \(job ` + evictor + `\)\); `)
+	if r.code != 0 || !want.MatchString(r.stderr) || !strings.Contains(r.stderr, "; cold start: its session ended ") {
+		t.Fatalf("evicted session's next command: %+v", r)
+	}
 	eventually(t, "idle session expires", func() bool { return len(ts.sessions()) == 0 })
+	r = ts.tun(ws, "bazel", "build")
+	if !strings.Contains(r.stderr, "; cold start: its session ended ") || !strings.Contains(r.stderr, "idle for 2s (tun serve --session-idle)") {
+		t.Fatalf("expired session's next command: %+v", r)
+	}
+}
+
+func TestBazelSessionStop(t *testing.T) {
+	ts := bazelServer(t, server.Config{}, false)
+	ws := bazelWS(t, map[string]string{})
+	for _, name := range []string{"default", "b", "c"} {
+		if r := ts.tun(ws, "bazel", "--session", name, "build"); r.code != 0 {
+			t.Fatal(r)
+		}
+	}
+	other := bazelWS(t, map[string]string{})
+	if r := ts.tun(other, "bazel", "--session", "b", "build"); r.code != 0 {
+		t.Fatal(r)
+	}
+	names := func() (n []string) {
+		for _, s := range ts.sessions() {
+			n = append(n, s.Name+"@"+map[bool]string{true: "ws", false: "other"}[s.Root == ws])
+		}
+		sort.Strings(n)
+		return n
+	}
+	// NAME: only this workspace's session of that name.
+	r := ts.tun(ws, "sessions", "stop", "b")
+	var stopped api.Session
+	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &stopped) != nil || stopped.Name != "b" || stopped.Root != ws || stopped.State != "stopping" {
+		t.Fatalf("stop b: %+v", r)
+	}
+	eventually(t, "session b stopped", func() bool { return fmt.Sprint(names()) == "[b@other c@ws default@ws]" })
+	if r := ts.tun(ws, "sessions", "stop", "b"); r.code != 125 || !strings.Contains(r.stderr, "no such session") {
+		t.Fatalf("stop b again: %+v", r)
+	}
+	r = ts.tun(ws, "bazel", "--session", "b", "build")
+	if !strings.Contains(r.stderr, "; cold start: its session ended ") || !strings.Contains(r.stderr, "stopped by client ") {
+		t.Fatalf("stopped session's next command: %+v", r)
+	}
+	// --id; a busy session is left alone.
+	c := ts.sessions()
+	idOf := map[string]string{}
+	for _, s := range c {
+		idOf[s.Name+"@"+map[bool]string{true: "ws", false: "other"}[s.Root == ws]] = s.ID
+	}
+	if r := ts.tun("", "sessions", "stop", "--id", idOf["c@ws"]); r.code != 0 || !strings.Contains(r.stdout, idOf["c@ws"]) {
+		t.Fatalf("stop --id: %+v", r)
+	}
+	done := make(chan result)
+	go func() { done <- ts.tun(ws, "bazel", "sleep", "30") }()
+	eventually(t, "default busy", func() bool {
+		for _, s := range ts.sessions() {
+			if s.Name == "default" && s.State == "busy" {
+				return true
+			}
+		}
+		return false
+	})
+	// No arguments: all of this client's sessions (any workspace), except the busy one.
+	r = ts.tun("", "sessions", "stop")
+	if r.code != 1 || strings.Count(r.stdout, "\n") != 2 || !strings.Contains(r.stderr, "session default ("+idOf["default@ws"]+") is busy (job ") {
+		t.Fatalf("stop all: %+v", r)
+	}
+	eventually(t, "only the busy session left", func() bool { return fmt.Sprint(names()) == "[default@ws]" })
+	ts.tun("", "cancel", ts.lastID())
+	<-done
+	if r := ts.tun("", "sessions", "stop", "extra", "args"); r.code != 125 {
+		t.Fatalf("usage: %+v", r)
+	}
 }
 
 func TestBazelSessionRestart(t *testing.T) {
@@ -470,7 +550,8 @@ func TestBazelSessionRestart(t *testing.T) {
 	}
 	// Without bwrap the old daemon (a host process) is still valid and reused.
 	r := ts.tun(ws, "bazel", "build")
-	if r.code != 0 || !strings.Contains(r.stderr, "started a new session sandbox") || !strings.Contains(r.stderr, "0 added, 0 updated, 0 deleted, 2 unchanged") {
+	if r.code != 0 || !strings.Contains(r.stderr, "started a new session sandbox") || !strings.Contains(r.stderr, "0 added, 0 updated, 0 deleted, 2 unchanged") ||
+		!strings.Contains(r.stderr, "; cold start: the tun server restarted since the session's last command") {
 		t.Fatalf("after restart: %+v", r)
 	}
 }

@@ -35,6 +35,8 @@ usage:
                                      workspace is synced (only changed files sent) and
                                      the Bazel server stays up between commands (tun bazel -h)
   tun sessions [--mine]              the server's Bazel sessions as JSON lines
+  tun sessions stop [NAME]           stop your sessions (NAME: this workspace's), freeing
+                                     their slots on the server
   tun status <id>                    print the job as one JSON object
   tun logs [-f] [--stderr] [--tail N] <id>
                                      print a job's stdout (or stderr); -f follows until it
