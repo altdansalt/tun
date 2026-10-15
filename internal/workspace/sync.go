@@ -450,8 +450,9 @@ func WriteBlobs(w io.Writer, root string, files map[string]string) error {
 
 // ReadBlobs stores the blobs of a WriteBlobs tar (gzip-compressed if gz) in dir, verifying
 // each digest, and returns how many it stored. More than max content bytes in total is
-// ErrBlobsTooLarge.
-func ReadBlobs(r io.Reader, gz bool, max int64, dir string) (int, error) {
+// ErrBlobsTooLarge. A non-nil store moves each verified temp file (in dir) into place
+// instead of renaming it to dir/sha.
+func ReadBlobs(r io.Reader, gz bool, max int64, dir string, store func(tmp, sha string) error) (int, error) {
 	if gz {
 		z, err := gzip.NewReader(r)
 		if err != nil {
@@ -489,7 +490,11 @@ func ReadBlobs(r io.Reader, gz bool, max int64, dir string) (int, error) {
 			err = fmt.Errorf("entry %s: content hashes to %x", hdr.Name, h.Sum(nil))
 		}
 		if err == nil {
-			err = os.Rename(tmp.Name(), filepath.Join(dir, hdr.Name))
+			if store != nil {
+				err = store(tmp.Name(), hdr.Name)
+			} else {
+				err = os.Rename(tmp.Name(), filepath.Join(dir, hdr.Name))
+			}
 		}
 		if err != nil {
 			os.Remove(tmp.Name())

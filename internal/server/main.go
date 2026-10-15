@@ -26,7 +26,9 @@ const serveUsage = `usage: tun serve [flags]
 
 Run the tun server: accepts workspace uploads and jobs over HTTP (see SPEC.md for the API),
 runs each job in a fresh per-job directory and sandbox, and keeps job state and logs under
-the data dir. On first start it writes a bearer token to $DATA/token (0600); local clients
+the data dir. Issue client identities on this host with tun token [--data DIR] new NAME.
+Client tokens ignore identity headers; the shared token remains admin and gives no isolation.
+On first start it writes a bearer token to $DATA/token (0600); local clients
 using the default data dir find it automatically. Jobs left queued/running by a previous
 server process are marked failed on startup.
 
@@ -109,6 +111,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache in this directory (relative to the data dir); empty disables it")
+	sharedMax := fs.String("max-shared-cache", "5GB", "budget of the shared tool caches (Go build and module caches, XDG caches; not Bazel disk caches), least recently used first; 0: none")
+	clientMax := fs.String("max-client-cache", "1GB", "budget of each client's Bazel repository cache (its disk cache has Bazel's own GC); 0: none")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
 	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
@@ -182,6 +186,20 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *keepWork < 0 || *keepJobs < 0 || *keepBlobs < 0 {
 		return fail("--keep-work, --keep-jobs and --keep-blobs must not be negative")
 	}
+	sharedLimit, err := parseSize(*sharedMax)
+	if *sharedMax == "0" {
+		sharedLimit, err = 0, nil
+	}
+	if err != nil {
+		return fail("--max-shared-cache: %v", err)
+	}
+	clientLimit, err := parseSize(*clientMax)
+	if *clientMax == "0" {
+		clientLimit, err = 0, nil
+	}
+	if err != nil {
+		return fail("--max-client-cache: %v", err)
+	}
 	mf, err := ParseMinFree(*minFree)
 	if err != nil {
 		return fail("--min-free: %v", err)
@@ -222,7 +240,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
-		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf,
+		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf, MaxSharedCache: sharedLimit, MaxClientCache: clientLimit,
 		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed, Cache: store, CacheReadOnly: !*cacheWrites})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
