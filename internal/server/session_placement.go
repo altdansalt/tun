@@ -184,7 +184,7 @@ func (s *Server) sessionCapacity(host string) int {
 			mem = rn.memoryAvailable
 		}
 	}
-	if mem == 0 {
+	if mem == 0 || s.cfg.SessionMemory < 0 {
 		return s.cfg.MaxSessions
 	}
 	live, pending := 0, 0

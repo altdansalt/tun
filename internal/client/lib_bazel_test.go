@@ -86,6 +86,7 @@ func bazelServer(t *testing.T, cfg server.Config, real bool) *testServer {
 			t.Fatal(err)
 		}
 		cfg.BazelCommand = p
+		cfg.SessionMemory = -1 // no JVM: host memory must not limit sessions
 		if cfg.Sandbox == sandbox.Bwrap {
 			cfg.BazelCommand = "/work/fake-bazel" // the host's /tmp is not visible in the session
 		}

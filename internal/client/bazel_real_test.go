@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
@@ -102,6 +103,8 @@ func TestRunnerSessionCacheAcrossHosts(t *testing.T) {
 	}
 	cfg := hubConfig("")
 	cfg.Cache = store
+	// A runner busy starting a cold Bazel polled more than 1s late and was dropped.
+	cfg.RunnerDeadAfter = 5 * time.Second
 	ts := startServer(t, cfg)
 	seed := bazeliskSeed(t)
 	runner := func(name string) *testRunner {

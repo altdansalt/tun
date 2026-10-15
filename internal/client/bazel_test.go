@@ -361,7 +361,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 		}
 		return j.ID
 	}
-	a := start("", "sleep", "300") // canceled below; it must outlast "other" on a loaded host
+	a := start("", "sleep", "30")
 	ts.waitFor(a, func(j api.Job) bool { return j.State == api.Running })
 	// Running is set before the command starts. Wait until the fake daemon has
 	// detached and published its pid, so cancellation actually exercises a warm

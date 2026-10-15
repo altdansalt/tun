@@ -58,9 +58,12 @@ type Config struct {
 	RunnerStartTimeout time.Duration
 
 	// Bazel sessions (see session.go).
-	MaxSessions  int           // sessions at once (each may hold a Bazel server); default 2
-	SessionIdle  time.Duration // a session without a command for this long is deleted; default 30m
-	BazelCommand string        // default "bazel" (tests use a fake; relative = in the workspace)
+	MaxSessions int // sessions at once (each may hold a Bazel server); default 2
+	// SessionMemory: -1 places sessions without the per-JVM memory reservation (tests with a
+	// fake bazel); otherwise new sessions need 1.5GiB of available memory each (see sessionCapacity).
+	SessionMemory int64
+	SessionIdle   time.Duration // a session without a command for this long is deleted; default 30m
+	BazelCommand  string        // default "bazel" (tests use a fake; relative = in the workspace)
 	// BazelCaches holds each client's Bazel caches (bazelisk downloads, repository cache,
 	// disk cache) in <dir>/<sha256(client)[:16 hex]>/; default $DATA/bazel. Never inside a
 	// tree a job can write (bind mount sources must not be replaceable by a job).
