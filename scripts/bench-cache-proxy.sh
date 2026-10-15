@@ -9,6 +9,9 @@ cleanup() {
  if [ "$result" -ne 0 ]; then cat "$tmp/runner.log" "$tmp/proxy.log" >&2; fi
  for p in "$runner_pid" "$proxy_pid"; do [ -z "$p" ] || kill "$p" 2>/dev/null || true; done
  wait || true
+ # Bazel makes output directories read-only. Fix directories only: unlinking
+ # files needs no chmod, and artifact hard links must keep their original modes.
+ find "$tmp" -type d -exec chmod u+w {} +
  rm -rf "$tmp"
 }
 trap cleanup EXIT

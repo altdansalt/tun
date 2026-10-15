@@ -841,3 +841,29 @@ The upload test gates the remaining request on the backend ingesting the first c
 Gazelle ran in `20261015T150636471159-24c1fcb9` on tun-r3: 110.504s execution,
 377.997s queued, 64 disk cache hits; only BUILD source ordering changed.
 RBE audit above is against branch tip `20c1a73`.
+
+### Cold-session cache comparison
+
+Outer job `20261015T150412969517-4b3feddf` ran on tun-r2. All three private
+runner-hosted commands passed, using Bazel 9.3.0 and this checkout's workspace test.
+Each discarded the JVM, analysis state and output base (`--cold`). The measured
+duration includes Bazel startup and execution, excludes workspace sync/admission;
+Bazel's own elapsed time is shown separately.
+
+| Cache state | Command duration | Bazel elapsed | Actions | Private job |
+|---|---:|---:|---|---|
+| Empty remote cache (seed) | 489.104s | 484.195s | 12 linux-sandbox | `20261015T150437467915-00b7f7c6` |
+| Warm remote cache | **102.107s** | 100.292s | **12 remote cache hits**, no local actions | `20261015T151247373624-065c3ddc` |
+| Remote and disk caches disabled | **448.003s** | 446.385s | 12 linux-sandbox | `20261015T151434678287-42fe2ccf` |
+
+Warm remote cache took **77.2% less command time (4.39× faster)** than no cache.
+This is one shared-host sample per state, not a throughput/SLA result or a comparison
+against a warm disk cache. Cold analysis, extraction and JVM startup still cost about
+100s on this loaded host. The seed and uncached run both spent about 354s on their
+critical paths compiling the Go toolchain/stdlib. No heavy Bazel work ran on the VM.
+
+The outer job's final exit was 1 **after all three successful commands** because its
+benchmark cleanup tried to remove Bazel's read-only output directories. The harness
+now makes only its private directories writable before unlinking their contents;
+it does not chmod artifact files or follow directory symlinks. The measured cache
+commands were not rerun for this cleanup-only correction.
