@@ -320,3 +320,36 @@ func TestFrames(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestStoreRestartBudget(t *testing.T) {
+	dir := t.TempDir()
+	s, e := Open(dir, 100)
+	if e != nil {
+		t.Fatal(e)
+	}
+	unrelated := filepath.Join(dir, "keep-me")
+	os.WriteFile(unrelated, bytes.Repeat([]byte("x"), 200), 0600)
+	data := []byte("resumable")
+	d := digest(data)
+	name := "uploads/id/blobs/" + string(get(d, 1).b) + "/9"
+	if _, e = s.appendUpload(name, d, 0, data[:3], false); e != nil {
+		t.Fatal(e)
+	}
+	s, e = Open(dir, 100)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.appendUpload(name, d, 3, data[3:], true); e != nil {
+		t.Fatal(e)
+	}
+	s, e = Open(dir, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if s.has(d) {
+		t.Fatal("startup did not enforce smaller budget")
+	}
+	if _, e = os.Stat(unrelated); e != nil {
+		t.Fatalf("evicted unrelated file: %v", e)
+	}
+}

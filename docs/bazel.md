@@ -209,3 +209,10 @@ shared-server load mean these are end-to-end observations, not a controlled cach
 implementation throughput comparison. A failed first tun benchmark
 (`20261015T080037454959-c1928e5c`) exposed the Unix socket path length issue, now fixed
 by binding through a directory FD alias. Tun's rebuild mean was 6.836s versus 27.352s.
+
+Validation: full vet/build/race tests plus both CLI smoke suites passed in job
+`20261015T080720200161-56b3e1c6` (75.251s). This includes real Bazel with 3MiB
+artifacts exercising multi-message ByteStream uploads/downloads, Unix proxy, and an
+assertion that minimal downloads leave intermediate output bytes absent. Final storage
+restart/budget, concurrency, protocol, and serve-flag checks passed with vet/build in
+`20261015T080907179208-0fe8e4b8` (7.837s).

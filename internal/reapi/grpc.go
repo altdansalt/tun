@@ -3,6 +3,7 @@ package reapi
 import (
 	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -294,7 +295,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			count, err := h.Store.appendUpload(name, d, get(b, 2).v, get(b, 10).b, get(b, 3).v != 0)
 			if err != nil {
-				fail(3, err)
+				c := 3
+				if errors.Is(err, errOffset) {
+					c = 11
+				}
+				fail(c, err)
 				return
 			}
 			if get(b, 3).v != 0 {

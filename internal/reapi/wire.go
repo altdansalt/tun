@@ -9,6 +9,10 @@ import (
 
 // Field numbers follow https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto
 // and https://github.com/googleapis/googleapis/blob/master/google/bytestream/bytestream.proto.
+// google.rpc.Status uses code=1, message=2:
+// https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
+// SemVer uses major=1, minor=2, patch=3:
+// https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/semver/semver.proto
 // Unknown fields are skipped, preserving opaque ActionResult messages verbatim.
 type field struct {
 	n int

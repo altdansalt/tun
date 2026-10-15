@@ -3,6 +3,7 @@ package reapi
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"time"
 )
+
+var errOffset = errors.New("write offset mismatch")
 
 type Store struct {
 	mu  sync.Mutex
@@ -145,7 +148,7 @@ func (s *Store) appendUpload(name string, d []byte, offset uint64, chunk []byte,
 		return 0, e
 	}
 	if uint64(info.Size()) != offset {
-		return 0, fmt.Errorf("write offset mismatch")
+		return 0, errOffset
 	}
 	size := info.Size() + int64(len(chunk))
 	if size > s.max || uint64(size) > get(d, 2).v {
