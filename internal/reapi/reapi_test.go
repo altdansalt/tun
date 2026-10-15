@@ -271,11 +271,17 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 			t.Logf("bazel shutdown: %v: %s", err, out)
 		}
 	})
+	// Each run gets a fresh output base (no local action cache or outputs, so hits must come
+	// from the remote cache) under one output root, so Bazel's install base is extracted once.
+	runs := 0
 	run := func(extra ...string) string {
 		t.Helper()
-		args := []string{"--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
+		runs++
+		base := filepath.Join(root, fmt.Sprint("base", runs))
+		args := []string{"--output_user_root=" + root, "--output_base=" + base, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
 		args = append(args, extra...)
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		// A cold Bazel in --batch mode took over 90s on a loaded 2-CPU host.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "bazel", args...)
 		cmd.WaitDelay = 3 * time.Second
@@ -288,7 +294,6 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 	}
 	run()
 	for _, flags := range [][]string{nil, {"--remote_proxy=unix:" + socket}, {"--remote_download_minimal"}} {
-		os.RemoveAll(root)
 		out := run(flags...)
 		if !strings.Contains(out, "remote cache hit") {
 			t.Fatalf("no remote cache hit:\n%s", out)

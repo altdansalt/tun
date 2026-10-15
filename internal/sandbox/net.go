@@ -61,6 +61,10 @@ var selfExe = sync.OnceValues(func() (*os.File, error) {
 // EgressDial makes the egress proxy's outbound TCP connections to host:port. Tests replace it.
 var EgressDial = dialOut
 
+// upstreamProxy is the server's own HTTPS proxy, if any (it reads the environment once per
+// process; tests replace it).
+var upstreamProxy = http.ProxyFromEnvironment
+
 // NetUsable reports (as an error, with bwrap's output) whether jobs can get a private network
 // namespace here: it starts a real sandboxed job with the helper and asks for its egress listener.
 func NetUsable() error {
@@ -225,7 +229,7 @@ var dialer = &net.Dialer{Timeout: 30 * time.Second}
 // dialOut connects to addr, through a CONNECT tunnel if the server's own environment names an
 // HTTPS_PROXY for it (e.g. a tun server running inside a tun job).
 func dialOut(ctx context.Context, addr string) (net.Conn, error) {
-	pu, err := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: "https", Host: addr}})
+	pu, err := upstreamProxy(&http.Request{URL: &url.URL{Scheme: "https", Host: addr}})
 	if err != nil || pu == nil {
 		return dialer.DialContext(ctx, "tcp", addr)
 	}

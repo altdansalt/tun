@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -46,7 +47,12 @@ func TestEgressChainsThroughUpstreamProxy(t *testing.T) {
 			}()
 		}
 	}()
-	t.Setenv("HTTPS_PROXY", "http://u:pw@"+ln.Addr().String()) // before the first ProxyFromEnvironment
+	// Not t.Setenv: ProxyFromEnvironment reads the environment once per process, so a second
+	// run (-count) would dial the first run's closed listener.
+	pu, _ := url.Parse("http://u:pw@" + ln.Addr().String())
+	orig := upstreamProxy
+	upstreamProxy = http.ProxyURL(pu)
+	defer func() { upstreamProxy = orig }()
 	c, err := dialOut(context.Background(), "example.invalid:443")
 	if err != nil {
 		t.Fatal(err)
