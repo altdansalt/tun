@@ -52,6 +52,14 @@ type Config struct {
 	RunnerBackstop time.Duration
 	// RunnerStartTimeout: an assigned job not started by then is requeued; default 10m.
 	RunnerStartTimeout time.Duration
+
+	// Bazel sessions (see session.go).
+	MaxSessions    int           // sessions at once (each may hold a Bazel server); default 2
+	SessionIdle    time.Duration // a session without a command for this long is deleted; default 30m
+	BazelCommand   string        // default "bazel" (tests use a fake; relative = in the workspace)
+	BazeliskHome   string        // bazelisk's download cache; default $DATA/cache/xdg/bazelisk (as v0 jobs)
+	BazelRepoCache string        // Bazel's --repository_cache, shared; default $DATA/cache/bazel-repo
+	DiskCacheMax   string        // --experimental_disk_cache_gc_max_size of each client's disk cache; default 5G
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
@@ -59,17 +67,18 @@ type Server struct {
 	cfg   Config
 	token string
 
-	mu      sync.Mutex
-	jobs    map[string]*job
-	queue   []*job // FIFO of queued jobs
-	running int    // local non-service jobs
-	svc     services
-	runners map[string]*runnerState // the current instance of each runner name
-	retired map[string]*runnerState // by instance id: superseded or dropped instances
-	closed  bool
-	quit    chan struct{} // closed by Close
-	wg      sync.WaitGroup
-	gc      gcState
+	mu       sync.Mutex
+	jobs     map[string]*job
+	queue    []*job // FIFO of queued jobs
+	running  int    // local non-service jobs
+	svc      services
+	runners  map[string]*runnerState // the current instance of each runner name
+	retired  map[string]*runnerState // by instance id: superseded or dropped instances
+	sessions map[string]*session     // tun bazel sessions by id
+	closed   bool
+	quit     chan struct{} // closed by Close
+	wg       sync.WaitGroup
+	gc       gcState
 }
 
 type job struct {
@@ -90,6 +99,7 @@ type job struct {
 	exitedAt   time.Time       // the runner reported the command ended (.../exited)
 	exited     *api.RunnerDone // what it reported then
 	logMu      sync.Mutex      // serializes log chunk writes
+	bz         *api.BazelJob   // a tun bazel job (kept in memory only: after a restart it has failed)
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`
 	OutSkipped []string `json:"out_skipped,omitempty"`
@@ -128,21 +138,43 @@ func New(cfg Config) (*Server, error) {
 	if cfg.KillGrace == 0 {
 		cfg.KillGrace = 10 * time.Second
 	}
+	if cfg.MaxSessions < 1 {
+		cfg.MaxSessions = 2
+	}
+	if cfg.SessionIdle <= 0 {
+		cfg.SessionIdle = 30 * time.Minute
+	}
+	if cfg.BazelCommand == "" {
+		cfg.BazelCommand = "bazel"
+	}
+	if cfg.DiskCacheMax == "" {
+		cfg.DiskCacheMax = "5G"
+	}
 	dir, err := filepath.Abs(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
 	cfg.DataDir = dir
-	for _, d := range []string{"", "blobs", "jobs", "cache/go-build", "cache/gomod", "cache/xdg"} {
+	if cfg.BazeliskHome == "" {
+		cfg.BazeliskHome = filepath.Join(dir, "cache", "xdg", "bazelisk")
+	}
+	if cfg.BazelRepoCache == "" {
+		cfg.BazelRepoCache = filepath.Join(dir, "cache", "bazel-repo")
+	}
+	for _, d := range []string{"", "blobs", "cas", "jobs", "cache/go-build", "cache/gomod", "cache/xdg"} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, err
 		}
 	}
-	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{}, quit: make(chan struct{})}
+	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{},
+		sessions: map[string]*session{}, quit: make(chan struct{})}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
 	}
 	if err := s.recover(); err != nil {
+		return nil, err
+	}
+	if err := s.loadSessions(); err != nil {
 		return nil, err
 	}
 	s.startGC()
@@ -229,8 +261,10 @@ func (s *Server) Close() {
 		}
 	}
 	s.mu.Unlock()
+	s.closeSessions()
 	s.stopGC()
 	s.wg.Wait()
+	s.closeSessions() // any a stopping session's goroutine started meanwhile
 }
 
 // jobDir holds the server's files for a job (job.json, stdout, stderr) and its sandbox dir.
@@ -281,7 +315,7 @@ func (s *Server) Handler() http.Handler {
 		slots, running, runners := s.runnerInfo()
 		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, NetworkIsolation: s.cfg.PrivateNet, MaxJobs: s.cfg.MaxJobs + slots,
 			MaxServices: s.cfg.MaxServices, Running: s.running + running, Queued: len(s.queue), Services: s.svc.running,
-			LocalSlots: s.cfg.MaxJobs, Runners: runners}
+			LocalSlots: s.cfg.MaxJobs, Runners: runners, Sessions: len(s.sessions), MaxSessions: s.cfg.MaxSessions}
 		s.mu.Unlock()
 		writeJSON(w, 200, h)
 	})
@@ -309,6 +343,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runner/leave", auth(s.runnerLeave))
 	mux.HandleFunc("PUT /v1/runner/jobs/{id}/outputs", auth(s.runnerOutputs))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/{stream}", auth(s.runnerLog))
+	mux.HandleFunc("POST /v1/cas", auth(s.putCAS))
+	mux.HandleFunc("GET /v1/sessions", auth(s.listSessions))
 	mux.HandleFunc("POST /v1/jobs", auth(s.createJob))
 	mux.HandleFunc("GET /v1/jobs", auth(s.listJobs))
 	mux.HandleFunc("GET /v1/jobs/{id}", auth(s.getJob))

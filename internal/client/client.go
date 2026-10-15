@@ -28,8 +28,9 @@ type Client struct {
 
 // StatusError is a non-2xx response from the server.
 type StatusError struct {
-	Code int
-	Msg  string
+	Code    int
+	Msg     string
+	missing []string // a 409 to a bazel job: file contents to upload first
 }
 
 func (e *StatusError) Error() string {
@@ -40,9 +41,17 @@ func (e *StatusError) Error() string {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body io.Reader, size int64) (*http.Response, error) {
+	return c.requestH(ctx, method, path, body, size, nil)
+}
+
+// requestH is request with extra request headers.
+func (c *Client) requestH(ctx context.Context, method, path string, body io.Reader, size int64, hdr map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
 	if err != nil {
 		return nil, err
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
 	}
 	if body != nil {
 		req.ContentLength = size
@@ -65,15 +74,15 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	}
 	if resp.StatusCode >= 300 {
 		defer resp.Body.Close()
-		var e api.Error
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		var e api.MissingBlobs
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		if json.Unmarshal(b, &e) != nil || e.Error == "" {
-			e.Error = strings.TrimSpace(string(b))
+			e.Error = strings.TrimSpace(string(b[:min(len(b), 64<<10)]))
 			if e.Error == "" {
 				e.Error = resp.Status
 			}
 		}
-		return nil, &StatusError{resp.StatusCode, e.Error}
+		return nil, &StatusError{resp.StatusCode, e.Error, e.Missing}
 	}
 	return resp, nil
 }

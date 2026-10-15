@@ -323,9 +323,13 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 		}
 	}
 	var out []*job
-	for free := rn.slots - busy; free > 0 && len(s.queue) > 0 && !s.closed; free-- {
-		j := s.queue[0]
-		s.queue = s.queue[1:]
+	for free := rn.slots - busy; free > 0 && !s.closed; free-- {
+		i := slices.IndexFunc(s.queue, func(j *job) bool { return j.bz == nil }) // bazel jobs run here
+		if i < 0 {
+			break
+		}
+		j := s.queue[i]
+		s.queue = slices.Delete(s.queue, i, i+1)
 		j.Runner, j.rn, j.assignedAt = rn.name, rn, time.Now()
 		rn.jobs[j.ID] = j
 		out = append(out, j)
@@ -612,6 +616,7 @@ func (s *Server) startReaper() {
 				return
 			case now := <-t.C:
 				s.reap(now)
+				s.expireSessions(now)
 			}
 		}
 	}()

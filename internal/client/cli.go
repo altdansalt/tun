@@ -133,6 +133,7 @@ func Main(args []string, e Env) int {
 	cmd, args := args[0], args[1:]
 	run := map[string]func([]string, Env) int{
 		"run": runCmd, "status": statusCmd, "logs": logsCmd, "cancel": cancelCmd, "ls": lsCmd, "get": getCmd, "runners": runnersCmd,
+		"bazel": bazelCmd, "sessions": sessionsCmd,
 	}[cmd]
 	switch {
 	case cmd == "help" || cmd == "-h" || cmd == "--help":

@@ -52,6 +52,13 @@ it; it never connects to them). Queued jobs go FIFO to any free slot: one of the
 --local-slots or a runner's. --local-slots 0 makes a pure hub. Services always run here.
 A runner job keeps only the files declared with tun run --out (uploaded when it ends).
 
+Bazel sessions (tun bazel): each (client, workspace, session name) gets a persistent dir
+under $DATA/sessions with the synced workspace and Bazel's output base, and a long-lived
+sandbox in which the Bazel server stays up between commands. A session is deleted after
+--session-idle without a command; at most --max-sessions exist (a Bazel server takes 1GB+ of
+memory): a new one evicts the least recently used idle one. tun bazel commands take local
+slots like other jobs. Shared caches: Bazel's repository cache, and a disk cache per client.
+
 flags:
 `
 
@@ -89,6 +96,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	keepWork := fs.Duration("keep-work", time.Hour, "delete a finished job's sandbox dir (work, home, tmp) this long after it ends (0: never)")
 	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
 	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
+	maxSessions := fs.Int("max-sessions", 2, "tun bazel sessions at once (each can hold a Bazel server, 1GB+ of memory); a new one evicts the least recently used idle one")
+	sessionIdle := fs.Duration("session-idle", 30*time.Minute, "delete a tun bazel session (its Bazel server, output base and workspace copy) after this long without a command")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -160,11 +169,15 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	} else if *maxJobs < 1 {
 		return fail("--max-jobs must be at least 1 (for a hub that only dispatches to runners: --local-slots 0)")
 	}
+	if *maxSessions < 1 || *sessionIdle <= 0 {
+		return fail("--max-sessions must be at least 1 and --session-idle positive")
+	}
 	if *runnerTimeout < time.Second {
 		return fail("--runner-timeout must be at least 1s")
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
-		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
+		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs,
+		MaxSessions: *maxSessions, SessionIdle: *sessionIdle})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}

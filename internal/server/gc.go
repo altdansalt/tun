@@ -133,6 +133,26 @@ func (s *Server) sweep(now time.Time) {
 	}
 	if s.cfg.KeepBlobs > 0 {
 		s.sweepBlobs(now, inUse)
+		s.sweepCAS(now)
+	}
+}
+
+// sweepCAS deletes file contents uploaded for tun bazel's sync (and abandoned partial
+// uploads) unused for KeepBlobs. A job's sync that needs one deleted meanwhile fails and
+// says to run the command again.
+func (s *Server) sweepCAS(now time.Time) {
+	dir := filepath.Join(s.cfg.DataDir, "cas")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("tun: gc: %v", err)
+		return
+	}
+	s.gc.blobMu.Lock()
+	defer s.gc.blobMu.Unlock()
+	for _, e := range ents {
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > s.cfg.KeepBlobs {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
 	}
 }
 

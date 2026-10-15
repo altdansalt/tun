@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -80,7 +82,16 @@ func (s *Server) tooBig(n int64) string {
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var req api.CreateJob
-	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
+	body := io.Reader(http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload))
+	if r.Header.Get("Content-Encoding") == "gzip" { // tun bazel's manifests
+		z, err := gzip.NewReader(body)
+		if err != nil {
+			writeErr(w, 400, "bad job JSON: "+err.Error())
+			return
+		}
+		body = z
+	}
+	dec := json.NewDecoder(io.LimitReader(body, 256<<20))
 	if err := dec.Decode(&req); err != nil {
 		writeErr(w, 400, "bad job JSON: "+err.Error())
 		return
@@ -89,7 +100,16 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad job JSON: unexpected data after the job object")
 		return
 	}
-	if (len(req.Argv) == 0) == (req.Script == "") {
+	if req.Bazel != nil {
+		if code, err := s.checkBazelJob(&req, clientOf(r)); err != nil {
+			writeErr(w, code, err.Error())
+			return
+		}
+		if missing := s.missingBlobs(req.Bazel.Manifest); len(missing) > 0 {
+			writeJSON(w, 409, api.MissingBlobs{Error: fmt.Sprintf("%d file contents are not on the server: upload them (POST /v1/cas) and create the job again", len(missing)), Missing: missing})
+			return
+		}
+	} else if (len(req.Argv) == 0) == (req.Script == "") {
 		writeErr(w, 400, "exactly one of argv or script is required")
 		return
 	}
@@ -138,6 +158,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		Cwd: cwd, TimeoutSec: req.TimeoutSec, Workspace: req.Workspace, Sandbox: s.cfg.Sandbox,
 		Service: req.Service, Client: clientOf(r), Outputs: req.Outputs,
 	}}
+	if b := req.Bazel; b != nil {
+		j.bz, j.Argv = b, append([]string{"bazel"}, b.Args...)
+		j.Session, j.SessionID = b.Session, sessionID(j.Client, b.Root, b.Session)
+	}
 	if j.Service {
 		j.Runner = api.LocalRunner // services always run on the hub
 		// Cheap early check so a full server doesn't unpack a workspace it will reject.
@@ -257,15 +281,23 @@ func openOwn(name string, flag int, perm os.FileMode) (*os.File, error) {
 // schedule starts queued jobs while there are free local slots, and wakes runners waiting
 // for work. Caller holds s.mu.
 func (s *Server) schedule() {
-	for !s.closed && s.running < s.cfg.MaxJobs && len(s.queue) > 0 {
-		j := s.queue[0]
-		s.queue = s.queue[1:]
+	for i := 0; !s.closed && s.running < s.cfg.MaxJobs && i < len(s.queue); {
+		j := s.queue[i]
+		if j.bz != nil && !s.claimSession(j) {
+			i++ // its session is busy (or full): later jobs may go first
+			continue
+		}
+		s.queue = slices.Delete(s.queue, i, i+1)
 		j.Runner = api.LocalRunner
 		s.running++
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.run(j)
+			if j.bz != nil {
+				s.runBazel(j)
+			} else {
+				s.run(j)
+			}
 			s.mu.Lock()
 			s.running--
 			s.schedule()
