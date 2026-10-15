@@ -420,7 +420,8 @@ func (s *Server) run(j *job) {
 	s.finish(j, endState, code, sig, msg)
 }
 
-// logs serves GET /v1/jobs/{id}/stdout|stderr?offset=N&follow=1.
+// logs serves GET /v1/jobs/{id}/stdout|stderr?offset=N&follow=1&tail=N. With tail, the
+// response starts at the last N lines (instead of offset); X-Tun-Offset is the start offset.
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	stream := r.PathValue("stream")
 	if stream != "stdout" && stream != "stderr" {
@@ -437,6 +438,18 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		var err error
 		if offset, err = strconv.ParseInt(v, 10, 64); err != nil || offset < 0 {
 			writeErr(w, 400, fmt.Sprintf("offset %q must be a non-negative integer", v))
+			return
+		}
+	}
+	tail := -1
+	if v := q.Get("tail"); v != "" {
+		var err error
+		if tail, err = strconv.Atoi(v); err != nil || tail < 0 {
+			writeErr(w, 400, fmt.Sprintf("tail %q must be a non-negative integer", v))
+			return
+		}
+		if q.Has("offset") {
+			writeErr(w, 400, "give offset or tail, not both")
 			return
 		}
 	}
@@ -458,10 +471,17 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	if tail >= 0 {
+		if offset, err = tailStart(f, tail); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	w.Header().Set("X-Tun-Offset", strconv.FormatInt(offset, 10))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(200)
 	rc := http.NewResponseController(w)
@@ -486,4 +506,34 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// tailStart returns the offset where the last n lines of f start. A final line without a
+// trailing newline counts as a line.
+func tailStart(f *os.File, n int) (int64, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	end := fi.Size()
+	if n == 0 {
+		return end, nil
+	}
+	buf := make([]byte, 32<<10)
+	for pos := end; pos > 0; {
+		k := min(int64(len(buf)), pos)
+		pos -= k
+		if _, err := f.ReadAt(buf[:k], pos); err != nil {
+			return 0, err
+		}
+		for i := k - 1; i >= 0; i-- {
+			if buf[i] != '\n' || pos+i == end-1 {
+				continue // the newline ending the last line doesn't start one
+			}
+			if n--; n == 0 {
+				return pos + i + 1, nil
+			}
+		}
+	}
+	return 0, nil
 }

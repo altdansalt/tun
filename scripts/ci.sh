@@ -1,6 +1,11 @@
 #!/bin/bash
 # ci.sh: build + test tun. Runs anywhere (bb remote runner, tun itself, a laptop).
 # Installs Go into ~/.cache/tun-go if no suitable go is on PATH.
+#
+# TEST_FLAGS: extra `go test` flags, parsed with shell quoting rules (so
+#   TEST_FLAGS='-run "TestA|TestB" -v' works). With -run, the separate vet and build steps are
+#   skipped (go test compiles everything it tests) unless CI_FULL=1, and the run fails if the
+#   pattern matched no test in any package.
 set -euo pipefail
 GOVER=${GOVER:-1.27.2}
 if ! command -v go >/dev/null || ! go version | grep -q "go1.2[5-9]"; then
@@ -12,7 +17,39 @@ if ! command -v go >/dev/null || ! go version | grep -q "go1.2[5-9]"; then
   export PATH=$d/go/bin:$PATH
 fi
 cd "$(dirname "$0")/.."
+
+# Plain ${TEST_FLAGS} would split on spaces and keep quote characters literally:
+# '-run "A|B"' became the regexp `"A|B"`, which matches nothing. Let the shell parse it.
+flags=()
+if ! eval "flags=(${TEST_FLAGS:-})"; then
+  echo "ci.sh: cannot parse TEST_FLAGS=${TEST_FLAGS:-} (shell quoting)" >&2
+  exit 2
+fi
+run=0 check=1
+for f in "${flags[@]}"; do
+  case $f in
+    -run|-run=*|--run|--run=*|-test.run|-test.run=*) run=1 ;;
+    -bench*|--bench*|-json|--json|-list*|--list*) check=0 ;; # output we don't parse / no tests by design
+  esac
+done
+
 go version
-go vet ./...
-go build ./...
-go test -race -count=1 ${TEST_FLAGS:-} ./...
+if [ "$run" = 0 ] || [ "${CI_FULL:-}" = 1 ]; then
+  go vet ./...
+  go build ./...
+fi
+if [ "$run" = 0 ] || [ "$check" = 0 ]; then
+  exec go test -race -count=1 "${flags[@]}" ./...
+fi
+
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+status=0
+go test -race -count=1 "${flags[@]}" ./... 2>&1 | tee "$out" || status=$?
+# A package whose tests ran prints "ok  pkg  1.2s" without "[no tests to run]" (or FAIL lines).
+if [ "$status" = 0 ] && ! awk '/^(ok[[:space:]]|--- |FAIL)/ && !/\[no tests to run\]/ {f=1} END {exit !f}' "$out"; then
+  echo "ci.sh: FAIL: TEST_FLAGS=${TEST_FLAGS} matched no tests in any package" >&2
+  echo "ci.sh: (go test -list '.*' ./... lists the test names; quote alternations: -run 'A|B')" >&2
+  exit 1
+fi
+exit "$status"

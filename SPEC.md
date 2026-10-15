@@ -27,10 +27,17 @@ tun run [flags] -c '<shell script>' run via bash -c
     --service       long-running service (see Services); tun run exits once it is ready
     --port N        with --service: expose port N (repeatable)
     --ready-timeout DUR  with --service: default 2m
-tun status <id>   (JSON)          tun logs [-f] <id> [--stderr]       tun cancel <id>
+    --tail N        don't stream; after the job ends print only the last N lines of its stdout (to
+                    stdout) and stderr (to stderr), then one "tun: job <id>: showed the last a of b
+                    stdout lines and c of d stderr lines; full logs: tun logs <id>, tun logs --stderr
+                    <id>" line. The opening "tun: job <id> (--tail N: ...)" line says the same.
+                    Exit status as without it. Not with --json, --detach or --service.
+tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>       tun cancel <id>
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 ```
+`tun logs --tail N`: only the last N lines (a final line without a newline counts); with `-f`,
+start at the last N lines present when it connects, then follow until the job ends.
 `tun run --out PATH` (repeatable): after the job ends (any state), download PATH (relative to the
 workspace root; file, dir, or `path.Match` glob) from the job's work dir into the same relative path
 of the local workspace root (`tun get`: or under `-o DIR`), replacing existing files (temp + rename),
@@ -162,6 +169,8 @@ database, test fixture):
   unknown states are a 400). `POST /v1/jobs/{id}/cancel`.
 - `GET /v1/jobs/{id}/stdout?offset=N&follow=1` (and `/stderr`): raw bytes from offset; with follow,
   streams (flush as written) until the job ends and all bytes are sent. Reattachable at any offset.
+  `tail=N` instead of `offset` starts at the last N lines present at request time. Every 200 has
+  `X-Tun-Offset: <start offset>`, so a client can reconnect at start + bytes received.
 - `GET /v1/jobs/{id}/files?path=P&path=Q...` -> `application/x-tar` of those paths (dirs recursive)
   relative to the work dir. 409 while the job is not terminal; 400 for absolute paths, `..`, bad
   globs; 413 if regular files total more than `--max-download` (default 1GB). All reads go through an
@@ -185,7 +194,7 @@ database, test fixture):
 - `GET /v1/healthz` (no auth) -> `{ok, sandbox, max_jobs, max_services, running, queued, services}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
-`offset` must be plain decimal integers, `follow` a boolean) are a 400.
+`offset`, `tail` must be plain decimal integers, `follow` a boolean; `offset` with `tail`) are a 400.
 
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).
