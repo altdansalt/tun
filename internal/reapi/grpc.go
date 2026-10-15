@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -135,7 +136,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rc := http.NewResponseController(w)
-	var readDeadline time.Time
+	// The idle limit is our own timer, reset for each message; when it fires it closes the
+	// request body, which ends a pending read. Moving the HTTP/2 read deadline for every
+	// message instead sometimes ended an active stream under load ("i/o timeout" well before
+	// the limit; HTTP/2 applies deadline updates asynchronously, which may be why).
+	var (
+		timerMu sync.Mutex
+		timer   *time.Timer
+		gen     int
+		expired bool
+	)
+	stopTimer := func() {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		gen++
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+	defer stopTimer()
 	refresh := func() error {
 		now := time.Now()
 		if !deadline.IsZero() && !now.Before(deadline) {
@@ -145,16 +164,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !deadline.IsZero() && deadline.Before(next) {
 			next = deadline
 		}
-		readDeadline = next
-		return rc.SetReadDeadline(next)
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		gen++
+		g := gen
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(next.Sub(now), func() {
+			timerMu.Lock()
+			defer timerMu.Unlock()
+			if g == gen {
+				expired = true
+				r.Body.Close() // ends a pending read
+			}
+		})
+		return nil
 	}
 	read := func() ([]byte, error) {
 		if e := refresh(); e != nil {
 			return nil, e
 		}
 		b, err := frameRead(r.Body)
+		timerMu.Lock()
+		timedOut := expired
+		timerMu.Unlock()
 		// HTTP/2 may return an opaque timeout error without net.Error.
-		if err != nil && !time.Now().Before(readDeadline) {
+		if err != nil && timedOut {
 			return nil, os.ErrDeadlineExceeded
 		}
 		return b, err
@@ -186,7 +222,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Unary input is complete; Read/GetTree may keep producing output for hours.
 	if method != "/google.bytestream.ByteStream/Write" {
-		_ = rc.SetReadDeadline(time.Time{})
+		stopTimer()
 	}
 	var out []byte
 	switch method {
