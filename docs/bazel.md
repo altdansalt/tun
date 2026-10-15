@@ -426,8 +426,8 @@ from bytestream files).
 handler for that listener (`reapi.Handler.ForClient`) needs no token and uses the session's
 client as the action cache namespace, whatever the request says. The sandbox never sees the
 server token. On the token-authenticated endpoints (TCP, `DATA/cache.sock`) the namespace is
-the request's client identity, as for jobs (exe.dev source VM, else `X-Tun-Client`, else the
-remote address). `instance_name` is ignored everywhere. The CAS is shared (verified on write);
+the token-bound client identity, as for jobs. Only the legacy admin token accepts
+exe.dev source VM / `X-Tun-Client` / remote-address identities; it provides no isolation. `instance_name` is ignored everywhere. The CAS is shared (verified on write);
 action results live in `acc-<sha256(client NUL digest)>`, the shared namespace in `ac-<digest>`
 (what reapi-exec's executors write). Lookups read the client's own result, then the shared one;
 nothing reachable over gRPC writes the shared namespace. `--cache-action-writes=false` makes
@@ -504,3 +504,16 @@ no cached Bazel binary and can't download one (Bad Gateway through the session's
 `latest` needs DNS for the version lookup). That is M0's tests' environment (they pass under
 `go test` in tun run), not the session cache; fix in M0 by passing a Bazel binary as test data
 or tagging them `manual`.
+
+## Client identity and tool cache retention
+
+Client tokens now bind a server-issued name to jobs, warm sessions and REAPI action-cache
+namespaces (see SPEC.md and docs/deploy.md). The legacy shared token remains admin during
+migration and provides no isolation. This implements the trust boundary assumed by M1/M2;
+it does not change the Bazel-native direction. Shared v0 tool caches still allow poisoning.
+
+The hub trims disposable Go/XDG and per-client Bazel tool caches to a combined soft 6GB
+budget and under min-free pressure. Oldest mtime first approximates LRU; a one-hour write
+grace and live-session cache exclusion avoid disrupting active sessions. Session output
+bases retain their existing session lifecycle; REAPI retains its separate verified LRU.
+No milestone deviation is required.

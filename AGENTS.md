@@ -64,3 +64,9 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 ## Deploy
 See [docs/deploy.md](docs/deploy.md): atomic binary replacement, client retries,
 SIGTERM draining, and required systemd KillMode/TimeoutStopSec overrides.
+
+- Client identity: use `tun token [--data DIR] new NAME` on the server host, then install the
+  secret as `~/.config/tun/token` on its agent VM. `$DATA/token` remains admin and provides
+  no client isolation. Never put it on new agent VMs. See docs/deploy.md for migration.
+- Tool caches have a soft combined `--max-shared-cache` budget (default 6GB); files changed
+  in the last hour and live-session clients' Bazel caches are protected during trimming.

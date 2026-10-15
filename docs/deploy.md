@@ -87,3 +87,37 @@ TestBazelCache, scripts/e2e_test); the standard CI above passes these real-Bazel
 checks. That environment limitation remains unresolved. Bazel setup on this runner
 spent about 52s building its Go toolchain helper and 86s building its standard
 library before project tests. No Bazel architecture deviation was needed.
+
+## Migrating agent identities
+
+After deploying a server with client tokens, issue one identity per agent VM on the hub:
+
+```sh
+tun token --help
+tun token --data "$HOME/.local/share/tun" new agent-vm-name
+```
+
+Copy the printed secret securely to `~/.config/tun/token` on that agent VM (directory
+0700, file 0600). Unset any old `TUN_TOKEN` environment override: it takes precedence over
+the file. Verify `tun run --no-workspace -- true` and `tun ls --mine`. Keep the same client
+name used previously to preserve session/cache ownership. Deploy clients normally; existing
+clients already send tokens and need no protocol change. REAPI users use that same token
+in `x-tun-token` or `authorization: Bearer TOKEN` metadata.
+
+The original `$DATA/token` is an admin credential, with unrestricted job access and legacy
+header-selected identity. **Sharing this token gives no isolation**, including to clients
+already migrated. Remove it from every agent VM and retain it only for trusted operators
+and existing runner authentication. Client tokens cannot act as runners. Issue a replacement
+token with the same name to rotate, then remove the old `DATA/clients/<sha256(token)>` file
+to revoke; issuance/revocation does not require restart. The files contain names, never raw
+tokens. Back up this directory with the server data.
+
+For a 25GB hub, the default `--max-shared-cache 6GB` supplements the independent
+`--cache-max-size` REAPI budget and `--min-free` reserve. Account for both budgets, session
+output bases and retained jobs when configuring disk. Tool cache trimming protects files
+modified in the last hour and all live session clients' Bazel caches, so caps are soft.
+It runs periodically and before disk-pressure retention; inspect `tun: trimmed ...` logs.
+
+Extracted Go modules are evicted as whole directories, only when no local job/service is
+running; individual module source files are never trimmed. Go download-cache entries and
+other tool cache files use the ordinary age grace.

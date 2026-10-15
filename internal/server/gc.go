@@ -62,7 +62,7 @@ func (c *Config) gcInterval() time.Duration {
 
 // startGC runs the first sweep now and then every gcInterval until stopGC.
 func (s *Server) startGC() {
-	if s.cfg.KeepWork <= 0 && s.cfg.KeepJobs <= 0 && s.cfg.KeepBlobs <= 0 && !s.cfg.MinFree.set() {
+	if s.cfg.KeepWork <= 0 && s.cfg.KeepJobs <= 0 && s.cfg.KeepBlobs <= 0 && !s.cfg.MinFree.set() && s.cfg.MaxSharedCache <= 0 {
 		return
 	}
 	s.gc.stop, s.gc.done = make(chan struct{}), make(chan struct{})
@@ -72,6 +72,7 @@ func (s *Server) startGC() {
 		defer t.Stop()
 		for {
 			s.sweep(time.Now())
+			s.trimSharedCaches()
 			s.reclaimDisk()
 			select {
 			case <-s.gc.stop:

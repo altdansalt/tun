@@ -20,7 +20,7 @@ tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N]
           [--ephemeral] [--exit-on-eof] [--drain-timeout 15m]
           [--cache-dir reapi] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
-          [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
+          [--min-free 10%] [--max-shared-cache 6GB] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -46,6 +46,7 @@ tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: re
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
            [--net auto|private|host] [--min-free 10%] [--drain-timeout 15m]
+tun token [--data DIR] new NAME   issue a client token on the server host
 tun runners                       (JSON lines: the server's live runners)
 tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
 tun sessions [--client NAME | --mine]   (JSON lines: the server's Bazel sessions)
@@ -113,14 +114,44 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
 - `runner`: where the job runs or ran, set when it leaves the queue: `local` (the server
   itself; always for services) or a runner's name (see Runners). `outputs`: the `--out`
   paths the client declared.
-- `client`: who submitted the job, recorded at creation: the `X-Exedev-Source-Vm` request header
-  (set by the exe.dev proxy, which callers can't forge through it), else the client-sent
-  `X-Tun-Client` (the CLI sends its hostname on every request), else the remote IP. Values are
-  stripped to printable non-space ASCII, at most 128 bytes. Without the exe.dev proxy in front
-  any token holder can claim any name: it is for visibility, not access control.
-- `tun ls --state S` (comma-separated for several), `--client NAME`, `--mine` filter on the
-  server before `--limit`. `--mine` means "client = what the server would record for this
-  request", so it matches the source VM behind the exe.dev proxy and the hostname otherwise.
+- `client`: the name bound to the authenticated client token. Headers cannot override it.
+  Run `tun token [--data DIR] new NAME` on the server host to issue a 256-bit random token.
+  Only its SHA256 hash is stored, as a 0600 file under `$DATA/clients/` containing the name.
+  Tokens work immediately; deleting a hash file revokes that token without restart. Several
+  tokens can name the same client (useful for rotation); names are 1-128 printable non-space
+  ASCII characters. Keep names unique per trust boundary.
+- The original `$DATA/token` remains an **admin** token for compatibility. It can access every
+  job and select any client identity through `X-Exedev-Source-Vm`, then `X-Tun-Client`, then
+  remote IP, as before. **This mode gives no client isolation.** Keep it off agent VMs once
+  migrated. Runner authentication is unchanged; client tokens cannot call runner endpoints.
+- All authenticated clients can list jobs and read job status/metadata, useful for spotting
+  load. Logs, files/outputs, BEP results, service proxying and cancellation require the owner
+  or admin. Sessions listed to client tokens are restricted to that client; session identity
+  and reuse always include the authenticated client. Shared CAS/workspace content is not a
+  confidentiality boundary (digests are capabilities); downloading workspace blobs directly
+  is reserved for admin/runner credentials.
+- `tun ls --state S` (comma-separated), `--client NAME`, `--mine` filter before `--limit`.
+  `--mine` uses the token's client name, or the legacy header identity for admin requests.
+- REAPI TCP and authenticated Unix endpoints use the same tokens, via `x-tun-token` or
+  `authorization: Bearer TOKEN` metadata. Action-cache writes and lookups use the token's
+  client namespace regardless of headers or `instance_name`. Session sockets keep their
+  fixed client identity. CAS is shared and verified by digest.
+
+### Shared cache disk budget
+
+`--max-shared-cache` (default 6GB; 0 disables the size cap) trims the combined
+`$DATA/cache/{go-build,gomod,xdg}` and per-client Bazel tool caches, on each GC sweep
+(at most ten minutes apart). Under `--min-free` pressure these caches are trimmed before
+finished workspaces and idle sessions. Files are removed oldest-mtime first; files modified
+within the last hour and Bazel caches belonging to any live session are protected. This is
+an approximate LRU and a soft cap: reads do not necessarily update mtime, and protected or
+unremovable files can keep usage over budget. Open files survive unlink on Linux; tools
+must tolerate cache misses. Trimming never follows symlinks outside each cache root.
+Shared v0 tool caches remain writable by every job and provide no integrity isolation.
+
+Extracted Go modules are evicted as whole directories, only when no local job/service is
+running; individual module source files are never trimmed. Go download-cache entries and
+other tool cache files use the ordinary age grace.
 
 ## Workspace
 - Root = `git rev-parse --show-toplevel` of the client's cwd; if not in git, the cwd itself.
@@ -346,8 +377,8 @@ client API is unchanged. Job state, logs and outputs live on the hub.
 - `GET /v1/healthz` adds `local_slots` and `runners: [{name, slots, running, last_seen,
   sandbox, network_isolation, source}]`; `tun runners` prints them as JSON lines.
 - Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
-  workspace; a runner-only credential (any token holder can act as a runner, and read any
-  blob by sha with `GET /v1/blobs/{sha}`, though every token holder is already fully trusted).
+  workspace; a runner-only credential (the legacy admin credential still authenticates runners and can
+  read blobs by sha with `GET /v1/blobs/{sha}`; client tokens cannot).
 
 ## Bazel sessions (tun bazel)
 First step of docs/bazel.md (M1, hub-local only). `tun bazel [--session NAME] [--cold]
@@ -536,8 +567,8 @@ Bazel flags.
   results are not: an UpdateActionResult is stored in the namespace of the request's client
   and answers only that client's GetActionResult; a lookup tries the client's own namespace,
   then the shared one, which only tun's executors write (none yet: no gRPC request can).
-  The client is the server's identity of the request (as `client` for jobs: the exe.dev
-  source VM header, else `X-Tun-Client`, else the remote address); REAPI `instance_name` is
+  The client is the token-bound identity (legacy admin requests retain header-selected
+  identity as described under Visibility); REAPI `instance_name` is
   ignored. Capabilities advertise action updates only to requests with a namespace.
 - **Sessions.** Every `tun bazel` session gets the cache without asking: while its sandbox
   lives, the server listens on the session's own socket `sessions/<id>/sock/cache.sock`
