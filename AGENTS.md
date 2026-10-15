@@ -5,7 +5,7 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 ## Building and testing
 - **Build and test with tun itself** (a shared tun server is at $TUN_URL, or the default local address; the
   `tun` binary is on PATH, built from main):
-  - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race`, in a sandboxed copy of your working tree.
+  - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race -timeout=10m`, in a sandboxed copy of your working tree.
   - Subsets: `tun run -e TEST_FLAGS='-run TestX -v' -- ./scripts/ci.sh` (env is NOT forwarded unless `-e`).
     ci.sh splits TEST_FLAGS like xargs (quotes group, nothing is evaluated), so alternations work as
     `tun run -e TEST_FLAGS='-run "TestA|TestB" -v' -- ./scripts/ci.sh` (or `-e TEST_FLAGS="-run 'A|B'"`).
@@ -29,6 +29,10 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
   "tun friction" — that's the most valuable feedback for what to build next.
 - Run long commands in the foreground and let the tool call wait; don't background + poll.
 - Don't run `go test` directly on the host; `go build`/`go vet`/`gofmt` are fine.
+
+- REAPI integration tests run real Bazel when installed (skip otherwise). Keep every
+  Bazel output root under TMPDIR, never the shared XDG cache. `scripts/bench-reapi.sh`
+  measures 200 actions; BuildBuddy measurements run on the VM host because jobs lack DNS.
 
 ## Conventions
 - Keep it small and readable. Stdlib only. `gofmt` everything.

@@ -18,6 +18,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
           [--net auto|private|host] [--local-slots N] [--runner-timeout 30s]
           [--ephemeral] [--exit-on-eof]
+          [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
@@ -456,6 +457,17 @@ command other than tun's flags (a Bazel startup option) is a usage error.
 - `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
 `offset`, `tail` must be plain decimal integers, `follow` a boolean; `offset` with `tail`) are a 400.
+
+## Bazel remote cache (opt-in)
+
+`--cache-dir DIR` enables stdlib-only REAPI gRPC over h2c on the existing HTTP listener
+and `DATA/cache.sock` (override with `--cache-socket`). Relative DIR is under DATA.
+Both endpoints accept `x-tun-token` or `authorization: Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS
+(FindMissingBlobs, BatchUpdateBlobs, BatchReadBlobs, GetTree), ActionCache and ByteStream
+(Read, Write, QueryWriteStatus), SHA256 and identity compression. No execution service.
+`--cache-max-size` bounds disk storage with LRU eviction, including partial uploads;
+`--cache-action-writes=false` denies action updates (default allow). Socket permissions
+are 0600. See docs/bazel.md for protocol limits and Bazel flags.
 
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).

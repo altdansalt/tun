@@ -1,0 +1,13 @@
+INFO: Analyzed target //:compile_error (0 packages loaded, 1 target configured).
+ERROR: /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-work/BUILD.bazel:3:8: Executing genrule //:compile_error failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:compile_error) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''int main( {'\'' > broken.c; /usr/bin/cc -c broken.c -o bazel-out/k8-fastbuild/bin/bad.o'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+broken.c:1:11: error: expected declaration specifiers or '...' before '{' token
+    1 | int main( {
+      |           ^
+Target //:compile_error failed to build
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 0.612s, Critical Path: 0.05s
+INFO: 2 processes: 2 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

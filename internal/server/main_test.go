@@ -3,8 +3,11 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -127,5 +130,92 @@ func TestNetFlag(t *testing.T) {
 		if net == "host" && !strings.Contains(stderr.String(), "warning: --net host") {
 			t.Errorf("--net host: no warning: %s", &stderr)
 		}
+	}
+}
+
+func TestServeCache(t *testing.T) {
+	stdin, input := io.Pipe()
+	output, stdout := io.Pipe()
+	var stderr bytes.Buffer
+	done := make(chan int, 1)
+	dir := t.TempDir()
+	fd, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	socket := fmt.Sprintf("/proc/%d/fd/%d/cache.sock", os.Getpid(), fd.Fd())
+	go func() {
+		done <- serve([]string{"--ephemeral", "--exit-on-eof", "--sandbox=none", "--cache-dir=reapi", "--cache-max-size=1MB", "--cache-socket=" + socket, "--cache-action-writes=false"}, stdin, stdout, &stderr)
+		stdout.Close()
+	}()
+	defer input.Close()
+	lines := bufio.NewReader(output)
+	url, err := lines.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := lines.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimSpace(strings.TrimPrefix(url, "TUN_URL="))
+	auth := strings.TrimSpace(strings.TrimPrefix(token, "TUN_TOKEN="))
+	for _, unix := range []bool{false, true} {
+		p := new(http.Protocols)
+		p.SetUnencryptedHTTP2(true)
+		tr := &http.Transport{Protocols: p}
+		if unix {
+			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+			}
+		}
+		for _, tok := range []string{auth, "wrong"} {
+			req, _ := http.NewRequest("POST", base+"/build.bazel.remote.execution.v2.Capabilities/GetCapabilities", bytes.NewReader(make([]byte, 5)))
+			req.Header.Set("Content-Type", "application/grpc")
+			req.Header.Set("X-Tun-Token", tok)
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "0"
+			if tok != auth {
+				want = "16"
+			}
+			if resp.Trailer.Get("grpc-status") != want {
+				t.Fatalf("unix=%v status=%v body=%x", unix, resp.Trailer, body)
+			}
+		}
+		tr.CloseIdleConnections()
+	}
+	// gRPC content types on service routes must remain in the HTTP router.
+	req, _ := http.NewRequest("POST", base+"/v1/jobs/missing/ports/8080/service.Method", bytes.NewReader(make([]byte, 5)))
+	req.Header.Set("Content-Type", "application/grpc")
+	req.Header.Set("X-Tun-Token", auth)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusNotFound || strings.HasPrefix(resp.Header.Get("Content-Type"), "application/grpc") {
+		t.Fatalf("service routing: status=%d headers=%v body=%s err=%v", resp.StatusCode, resp.Header, body, err)
+	}
+	input.Close()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, &stderr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not stop")
+	}
+	if _, err := os.Stat(socket); !os.IsNotExist(err) {
+		t.Fatalf("socket not removed: %v", err)
 	}
 }

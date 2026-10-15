@@ -53,7 +53,7 @@ e2e() {
   fi
 }
 if [ "$run" = 0 ] || [ "$check" = 0 ]; then
-  go test -race -count=1 "${flags[@]}" ./...
+  go test -timeout=10m -race -count=1 "${flags[@]}" ./...
   e2e
   exit 0
 fi
@@ -61,7 +61,7 @@ fi
 out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 status=0
-go test -race -count=1 "${flags[@]}" ./... 2>&1 | tee "$out" || status=$?
+go test -timeout=10m -race -count=1 "${flags[@]}" ./... 2>&1 | tee "$out" || status=$?
 # A package whose tests ran prints "ok  pkg  1.2s" without "[no tests to run]" (or FAIL lines).
 if [ "$status" = 0 ] && ! awk '/^(ok[[:space:]]|--- |FAIL)/ && !/\[no tests to run\]/ {f=1} END {exit !f}' "$out"; then
   echo "ci.sh: FAIL: TEST_FLAGS=${TEST_FLAGS} matched no tests in any package" >&2
