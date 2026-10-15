@@ -228,6 +228,33 @@ func TestStdoutStderrAndEnv(t *testing.T) {
 	}
 }
 
+func TestSharedCacheEnv(t *testing.T) {
+	t.Parallel()
+	ts := startServer(t, server.Config{})
+	// Every shared cache var points at a dir under $DATA/cache that a later job sees again;
+	// npm's debug logs stay in the job's own home.
+	r := ts.tun("", "run", "-c", `echo $TUN_JOB_ID; for d in "$GOCACHE" "$GOMODCACHE" "$XDG_CACHE_HOME" "$npm_config_cache"; do
+		echo "$d"; echo $TUN_JOB_ID > "$d/from-first"; done; echo "$npm_config_logs_dir"`)
+	lines := strings.Split(strings.TrimSpace(r.stdout), "\n")
+	if r.code != 0 || len(lines) != 6 {
+		t.Fatalf("got %+v", r)
+	}
+	id := lines[0]
+	for i, dir := range []string{"go-build", "gomod", "xdg", "npm"} {
+		if want := filepath.Join(ts.data, "cache", dir); lines[i+1] != want {
+			t.Errorf("cache var %d = %q, want %q", i, lines[i+1], want)
+		}
+	}
+	if want := filepath.Join(ts.data, "jobs", id, "sandbox", "home", ".npm", "_logs"); lines[5] != want {
+		t.Errorf("npm_config_logs_dir = %q, want %q", lines[5], want)
+	}
+	r2 := ts.tun("", "run", "-e", "npm_config_cache=/elsewhere", "-c",
+		`cat "$GOCACHE/from-first" "$GOMODCACHE/from-first" "$XDG_CACHE_HOME/from-first"; echo "$npm_config_cache"`)
+	if want := strings.Repeat(id+"\n", 3) + "/elsewhere\n"; r2.code != 0 || r2.stdout != want {
+		t.Errorf("second job: %+v, want stdout %q", r2, want)
+	}
+}
+
 func gitRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

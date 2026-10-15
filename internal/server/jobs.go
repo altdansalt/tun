@@ -269,9 +269,25 @@ func (s *Server) schedule() {
 	}
 }
 
+// sharedCaches are the dirs under $DATA/cache that every job gets read-write, and the env var
+// pointing tools at each. Only tools that are safe under concurrent use belong here.
+var sharedCaches = []struct{ env, dir string }{
+	{"GOCACHE", "go-build"},
+	{"GOMODCACHE", "gomod"},
+	{"XDG_CACHE_HOME", "xdg"}, // pip, uv, yarn, ...
+	{"npm_config_cache", "npm"},
+}
+
+func (s *Server) cacheDirs() []string {
+	var dirs []string
+	for _, c := range sharedCaches {
+		dirs = append(dirs, filepath.Join(s.cfg.DataDir, "cache", c.dir))
+	}
+	return dirs
+}
+
 func (s *Server) env(j *job) []string {
 	dir := s.sandboxDir(j.ID)
-	cache := filepath.Join(s.cfg.DataDir, "cache")
 	pathEnv := os.Getenv("PATH")
 	if pathEnv == "" {
 		pathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -283,9 +299,12 @@ func (s *Server) env(j *job) []string {
 	user := os.Getenv("USER")
 	m := map[string]string{
 		"PATH": pathEnv, "LANG": lang, "TERM": "dumb", "USER": user,
-		"HOME": filepath.Join(dir, "home"), "TMPDIR": filepath.Join(dir, "tmp"),
-		"GOCACHE": filepath.Join(cache, "go-build"), "GOMODCACHE": filepath.Join(cache, "gomod"),
-		"XDG_CACHE_HOME": filepath.Join(cache, "xdg"), "TUN_JOB_ID": j.ID,
+		"HOME": filepath.Join(dir, "home"), "TMPDIR": filepath.Join(dir, "tmp"), "TUN_JOB_ID": j.ID,
+		// npm writes its debug logs into its cache by default; keep them private to the job.
+		"npm_config_logs_dir": filepath.Join(dir, "home", ".npm", "_logs"),
+	}
+	for i, c := range s.cacheDirs() {
+		m[sharedCaches[i].env] = c
 	}
 	for k, v := range j.Env {
 		m[k] = v
@@ -305,11 +324,10 @@ func (s *Server) run(j *job) {
 	if j.Script != "" {
 		argv = []string{"bash", "-c", j.Script}
 	}
-	cache := filepath.Join(s.cfg.DataDir, "cache")
 	spec := sandbox.Spec{
 		Mode: s.cfg.Sandbox, Argv: argv, Env: s.env(j), Dir: filepath.Join(sb, "work", j.Cwd),
 		Root: sb, Tmp: filepath.Join(sb, "tmp"), DataDir: s.cfg.DataDir, PrivateNet: s.cfg.PrivateNet,
-		Caches: []string{filepath.Join(cache, "go-build"), filepath.Join(cache, "gomod"), filepath.Join(cache, "xdg")},
+		Caches: s.cacheDirs(),
 	}
 	fail := func(msg string) {
 		s.mu.Lock()

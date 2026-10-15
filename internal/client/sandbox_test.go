@@ -37,7 +37,7 @@ func TestBwrapIsolation(t *testing.T) {
 		"blobs hidden":         "! ls " + ts.data + "/blobs",
 		"only own job visible": `[ "$(ls ` + ts.data + `/jobs)" = "$TUN_JOB_ID" ]`,
 		"root read-only":       "! touch /etc/tun-test 2>/dev/null && ! touch /usr/tun-test 2>/dev/null",
-		"writable dirs":        `touch "$HOME/h" "$TMPDIR/t" /tmp/t2 "$GOCACHE/t" "$XDG_CACHE_HOME/t" ./w`,
+		"writable dirs":        `touch "$HOME/h" "$TMPDIR/t" /tmp/t2 "$GOCACHE/t" "$XDG_CACHE_HOME/t" "$npm_config_cache/t" ./w`,
 		"tmp is private":       `touch /tmp/t3 && [ -e "$TMPDIR/t3" ]`,
 		"pid namespace":        `[ "$(ls /proc | grep -c '^[0-9]')" -lt 10 ]`,
 		"workspace present":    `[ "$(cat f)" = ws ]`,

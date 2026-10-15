@@ -89,12 +89,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	cfg.DataDir = dir
-	for _, d := range []string{"", "blobs", "jobs", "cache/go-build", "cache/gomod", "cache/xdg"} {
-		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+	s := &Server{cfg: cfg, jobs: map[string]*job{}}
+	for _, d := range append([]string{dir, filepath.Join(dir, "blobs"), filepath.Join(dir, "jobs")}, s.cacheDirs()...) {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
-	s := &Server{cfg: cfg, jobs: map[string]*job{}}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
 	}

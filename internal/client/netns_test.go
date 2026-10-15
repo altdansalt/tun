@@ -45,12 +45,13 @@ func TestNetIsolation(t *testing.T) {
 	// Jobs reach the host (and through it the internet) only via HTTP_PROXY/HTTPS_PROXY.
 	proxyReq := `exec 3<>/dev/tcp/127.0.0.1/${HTTP_PROXY##*:} && printf "$REQ" >&3 && cat <&3`
 	checks := map[string]struct{ env, script, want string }{
-		"host port unreachable": {"", `! (exec 3<>/dev/tcp/127.0.0.1/` + port + `) 2>/dev/null`, ""},
-		"proxy env":             {"", `echo "$HTTP_PROXY $HTTPS_PROXY $https_proxy $NO_PROXY"`, ""},
-		"proxy env overridable": {"HTTPS_PROXY=x", `echo "$HTTPS_PROXY"`, "x\n"},
-		"absolute-URI request":  {"REQ=GET http://127.0.0.1:" + port + "/a HTTP/1.0\\r\\n\\r\\n", proxyReq, "hello /a"},
-		"CONNECT tunnel":        {"REQ=CONNECT 127.0.0.1:" + port + " HTTP/1.1\\r\\nHost: x\\r\\n\\r\\nGET /b HTTP/1.0\\r\\n\\r\\n", proxyReq, "hello /b"},
-		"CONNECT refused":       {"REQ=CONNECT 127.0.0.1:1 HTTP/1.1\\r\\n\\r\\n", proxyReq, "502 Bad Gateway"},
+		"host port unreachable":  {"", `! (exec 3<>/dev/tcp/127.0.0.1/` + port + `) 2>/dev/null`, ""},
+		"proxy env":              {"", `echo "$HTTP_PROXY $HTTPS_PROXY $https_proxy $NO_PROXY"`, ""},
+		"proxy env overridable":  {"HTTPS_PROXY=x", `echo "$HTTPS_PROXY"`, "x\n"},
+		"empty -e drops one var": {"http_proxy=", `[ -z "$http_proxy" ] && [ -n "$HTTP_PROXY" ] && echo ok`, "ok\n"},
+		"absolute-URI request":   {"REQ=GET http://127.0.0.1:" + port + "/a HTTP/1.0\\r\\n\\r\\n", proxyReq, "hello /a"},
+		"CONNECT tunnel":         {"REQ=CONNECT 127.0.0.1:" + port + " HTTP/1.1\\r\\nHost: x\\r\\n\\r\\nGET /b HTTP/1.0\\r\\n\\r\\n", proxyReq, "hello /b"},
+		"CONNECT refused":        {"REQ=CONNECT 127.0.0.1:1 HTTP/1.1\\r\\n\\r\\n", proxyReq, "502 Bad Gateway"},
 	}
 	// None of the server's up interfaces (other than loopback) exist in the job's namespace.
 	r := ts.tun("", "run", "--no-workspace", "--", "cat", "/proc/net/dev")

@@ -82,13 +82,16 @@ Workspace diagnostics show compressed bytes uploaded or already on the server.
 The job object's queue_sec and run_sec (tun status, and in --json) show where time went.
 
 The job's environment is minimal: PATH, LANG, TERM=dumb, USER, HOME and TMPDIR (private to
-the job), GOCACHE/GOMODCACHE/XDG_CACHE_HOME (caches shared across jobs), TUN_JOB_ID, plus -e.
+the job), TUN_JOB_ID, plus -e, and caches shared across jobs: GOCACHE, GOMODCACHE,
+XDG_CACHE_HOME (pip, uv, yarn, ...) and npm_config_cache (npm's logs stay in HOME).
 
 Network: on a server with network isolation (healthz "network_isolation": true) each job has
 its own network namespace with only loopback. Outbound HTTP(S) goes through a proxy the server
 runs (HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy and NO_PROXY=localhost,127.0.0.1,::1 are
 set unless given with -e), which go, git, curl, pip and npm honor; raw TCP/UDP (ssh, DNS
-lookups) can't leave the job. Ports a job listens on are reachable only inside the job (and,
+lookups) can't leave the job. Tests that set HTTP_PROXY or NO_PROXY themselves can be
+overridden by the lowercase copies (Go's x/net prefers them): -e http_proxy= -e no_proxy=
+(empty) leaves only the uppercase ones. Ports a job listens on are reachable only inside the job (and,
 for services, through the server's proxy). Without isolation jobs share the server's network.
 
 --out PATH (repeatable) gets build outputs back: after the job ends, in any state, PATH
