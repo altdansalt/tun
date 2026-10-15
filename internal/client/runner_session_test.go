@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,12 +157,33 @@ func TestRunnerSessionCacheAcrossHosts(t *testing.T) {
 	cfg := hubConfig("")
 	cfg.Cache = store
 	ts := startServer(t, cfg)
+	target, _ := url.Parse(ts.url)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	transport := &http.Transport{Protocols: protocols}
+	defer transport.CloseIdleConnections()
+	proxy.Transport = transport
+	var webCalls atomic.Int64
+	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 1 {
+			t.Error("runner did not use HTTP/1")
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/session-cache/") {
+			if r.Header.Get("Content-Type") != "application/grpc-web+proto" {
+				t.Error("native gRPC crossed proxy")
+			}
+			webCalls.Add(1)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer edge.Close()
 	seed := ""
 	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
 		seed = filepath.Join(x, "bazelisk")
 	}
 	runner := func(name string) *testRunner {
-		return ts.startRunnerCfg(server.RunnerConfig{Name: name, Slots: 1, Sandbox: sandbox.Bwrap, BazeliskSeed: seed, PrivateNet: sandbox.NetUsable() == nil})
+		return ts.startRunnerCfg(server.RunnerConfig{Hub: edge.URL, Name: name, Slots: 1, Sandbox: sandbox.Bwrap, BazeliskSeed: seed, PrivateNet: sandbox.NetUsable() == nil})
 	}
 	a := runner("a")
 	b := runner("b")
@@ -199,6 +224,9 @@ func TestRunnerSessionCacheAcrossHosts(t *testing.T) {
 	r = run("bazel", "build", "//:hello")
 	if r.code != 0 || !strings.Contains(r.stderr, "1 remote cache hit") {
 		t.Fatalf("cross-host cache: %+v", r)
+	}
+	if webCalls.Load() == 0 {
+		t.Fatal("no cache traffic through HTTP/1 proxy")
 	}
 	if after := ts.sessions()[0]; after.Host == before.Host || after.Commands != 1 {
 		t.Fatalf("recreated session: %+v", after)

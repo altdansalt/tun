@@ -5,6 +5,8 @@ set -euo pipefail
 tmp=$(mktemp -d)
 runner_pid= proxy_pid=
 cleanup() {
+ local result=$?
+ if [ "$result" -ne 0 ]; then cat "$tmp/runner.log" "$tmp/proxy.log" >&2; fi
  for p in "$runner_pid" "$proxy_pid"; do [ -z "$p" ] || kill "$p" 2>/dev/null || true; done
  wait || true
  rm -rf "$tmp"
@@ -12,10 +14,11 @@ cleanup() {
 trap cleanup EXIT
 cat > "$tmp/proxy.go" <<'GO'
 package main
-import ("fmt"; "net"; "net/http"; "net/http/httputil"; "net/url"; "os")
+import ("fmt"; "net"; "net/http"; "net/http/httputil"; "net/url"; "os"; "log")
 func main() {
  u,err:=url.Parse(os.Args[1]);if err!=nil {panic(err)}
  p:=httputil.NewSingleHostReverseProxy(u)
+ p.ErrorLog=log.New(os.Stderr,"proxy: ",0)
  protocols:=new(http.Protocols);protocols.SetHTTP1(true)
  p.Transport=&http.Transport{Protocols:protocols}
  ln,err:=net.Listen("tcp","127.0.0.1:0");if err!=nil {panic(err)}

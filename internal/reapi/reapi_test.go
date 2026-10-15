@@ -606,3 +606,39 @@ func TestGRPCWebHTTP1Proxy(t *testing.T) {
 	}
 }
 func http1Protocols() *http.Protocols { p := new(http.Protocols); p.SetHTTP1(true); return p }
+
+func TestGRPCWebRejectsBrokenResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"missing trailers", []byte{0, 0, 0, 0, 0}},
+		{"truncated header", []byte{0, 0}},
+		{"truncated message", []byte{0, 0, 0, 0, 2, 8}},
+		{"compressed message", []byte{1, 0, 0, 0, 0}},
+		{"trailers without status", append([]byte{128, 0, 0, 0, 2}, []byte("\r\n")...)},
+		{"truncated trailers", []byte{128, 0, 0, 0, 10}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/grpc-web+proto")
+				w.Write(tc.body)
+			}))
+			defer upstream.Close()
+			req, _ := http.NewRequest("POST", upstream.URL, nil)
+			tr := &http.Transport{Protocols: http1Protocols()}
+			defer tr.CloseIdleConnections()
+			resp, err := (WebTransport{Base: tr}).RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if _, err = io.ReadAll(resp.Body); err == nil {
+				t.Fatal("broken response accepted")
+			}
+			if resp.Trailer.Get("Grpc-Status") == "0" {
+				t.Fatal("fabricated success")
+			}
+		})
+	}
+}

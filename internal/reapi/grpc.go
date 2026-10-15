@@ -137,7 +137,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ns = h.Client(r)
 	}
 	if r.Method != "POST" || (!web && r.ProtoMajor != 2) {
-		fail(3, fmt.Errorf("gRPC requires HTTP/2 POST"))
+		fail(3, fmt.Errorf("gRPC requires POST over HTTP/2 or binary gRPC-Web"))
 		return
 	}
 	idle := h.idleTimeout

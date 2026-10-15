@@ -50,7 +50,10 @@ func (ts *testServer) startRunnerCfg(cfg server.RunnerConfig) *testRunner {
 	t.Helper()
 	dir := t.TempDir()
 	t.Cleanup(func() { workspace.RemoveAll(dir) })
-	cfg.Hub, cfg.Token, cfg.DataDir, cfg.KillGrace, cfg.Logf = ts.url, ts.srv.Token(), dir, 50*time.Millisecond, t.Logf
+	if cfg.Hub == "" {
+		cfg.Hub = ts.url
+	}
+	cfg.Token, cfg.DataDir, cfg.KillGrace, cfg.Logf = ts.srv.Token(), dir, 50*time.Millisecond, t.Logf
 	r, err := server.NewRunner(cfg)
 	if err != nil {
 		t.Fatal(err)
