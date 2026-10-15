@@ -28,6 +28,7 @@ go_test(
         "auth_test.go",
         "bazel_test.go",
         "bazelci_test.go",
+        "cache_test.go",
         "fast_test.go",
         "files_review_test.go",
         "files_test.go",

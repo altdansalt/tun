@@ -19,11 +19,29 @@ const maxMessage = 4 << 20
 
 // Handler serves uncompressed protobuf gRPC. AllowActionWrites is the policy seam
 // for restricting ActionCache updates to executor credentials in M3.
+//
+// The CAS is shared (content is verified). The action cache has namespaces: results a client
+// uploads go to that client's own namespace and only answer its lookups; the shared namespace
+// ("") is read by everyone after their own and written only by tun's executors (not over
+// gRPC). So no client can poison another's builds. A request's namespace comes from the
+// server, never from the request's instance_name.
 type Handler struct {
 	Store             *Store
 	Token             string
 	AllowActionWrites bool
-	idleTimeout       time.Duration // zero uses two minutes
+	// Client names the action cache namespace of an authenticated request (its client).
+	// Nil or "": the shared namespace, read-only.
+	Client      func(*http.Request) string
+	trusted     bool          // authenticated by the listener (ForClient): no token
+	idleTimeout time.Duration // zero uses two minutes
+}
+
+// ForClient returns a handler for a listener that only client can reach (a session's own
+// socket): requests need no token and use client's action cache namespace.
+func (h *Handler) ForClient(client string) *Handler {
+	c := *h
+	c.trusted, c.Client = true, func(*http.Request) string { return client }
+	return &c
 }
 
 func Protocols() *http.Protocols {
@@ -81,9 +99,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token, _ = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	if subtle.ConstantTimeCompare([]byte(token), []byte(h.Token)) != 1 {
+	if !h.trusted && subtle.ConstantTimeCompare([]byte(token), []byte(h.Token)) != 1 {
 		fail(16, fmt.Errorf("missing or wrong x-tun-token"))
 		return
+	}
+	ns := ""
+	if h.Client != nil {
+		ns = h.Client(r)
 	}
 	if r.Method != "POST" || r.ProtoMajor != 2 {
 		fail(3, fmt.Errorf("gRPC requires HTTP/2 POST"))
@@ -166,7 +188,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch method {
 	case "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities":
 		enabled := int64(0)
-		if h.AllowActionWrites {
+		if h.AllowActionWrites && ns != "" {
 			enabled = 1
 		}
 		out = msg(bytesField(1, msg(intField(1, 1), bytesField(2, intField(1, enabled)), intField(4, 2<<20), intField(8, h.Store.max))), bytesField(4, intField(1, 2)), bytesField(5, intField(1, 2)))
@@ -225,22 +247,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out = append(out, bytesField(1, msg(bytesField(1, d), bytesField(2, data), bytesField(3, intField(1, c))))...)
 		}
 	case "/build.bazel.remote.execution.v2.ActionCache/GetActionResult":
-		d := get(b, 2).b
-		if _, e = key(d); e != nil {
+		k, e := key(get(b, 2).b)
+		if e != nil {
 			fail(3, e)
 			return
 		}
-		out, e = h.Store.read("ac-", d)
-		if e == nil && !h.Store.actionAvailable(out) {
-			e = os.ErrNotExist
+		// The client's own result first, then the shared (executor-written) one.
+		e = os.ErrNotExist
+		for _, n := range []string{ns, ""} {
+			if out, e = h.Store.readName(actionName(n, k)); e == nil && !h.Store.actionAvailable(out) {
+				e = os.ErrNotExist
+			}
+			if e == nil || n == "" {
+				break
+			}
 		}
 		if e != nil {
 			fail(5, e)
 			return
 		}
 	case "/build.bazel.remote.execution.v2.ActionCache/UpdateActionResult":
-		if !h.AllowActionWrites {
+		if !h.AllowActionWrites || ns == "" {
 			fail(7, fmt.Errorf("action cache writes disabled"))
+			return
+		}
+		k, e := key(get(b, 2).b)
+		if e != nil {
+			fail(3, e)
 			return
 		}
 		out = get(b, 3).b
@@ -248,7 +281,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(3, err)
 			return
 		}
-		if e = h.Store.put("ac-", get(b, 2).b, out); e != nil {
+		if e = h.Store.putName(actionName(ns, k), out); e != nil {
 			fail(3, e)
 			return
 		}

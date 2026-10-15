@@ -7,6 +7,7 @@ package server
 //	sync.json      the workspace.SyncState of the last sync into sandbox/work
 //	tun.bazelrc    the flags tun adds (caches); read-only in the sandbox
 //	agent.log      output of the session sandbox itself (bwrap, agent)
+//	sock/          cache.sock: the session's own REAPI socket (with Config.Cache)
 //	sandbox/       work (the synced workspace), home, tmp, out (Bazel's output user root)
 //
 // Under bwrap the session sandbox sees them at fixed paths (/work, /tun/home, /tmp,
@@ -26,6 +27,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -40,6 +42,7 @@ import (
 
 	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/bep"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
 )
@@ -54,6 +57,7 @@ type session struct {
 	job         *job                // the job holding the session (running, or about to)
 	stopping    bool                // being stopped and deleted; no new commands until then
 	sb          *sandbox.Session    // the live sandbox (and Bazel server), if any
+	cache       *cacheSocket        // the session's REAPI socket while it has a sandbox
 	state       workspace.SyncState // owned by whoever holds the session; nil: load sync.json
 	loaded      bool
 }
@@ -355,8 +359,11 @@ func (s *Server) queueReason(j *job) string {
 
 // sessionPaths are a session's directories as the bazel command sees them.
 type sessionPaths struct {
-	work, home, tmp, out, repo, disk, bazelisk, rc, exe string
+	work, home, tmp, out, repo, disk, bazelisk, rc, exe, sock string
 }
+
+// cacheSock is the name of a session's REAPI socket in its sock dir.
+const cacheSock = "cache.sock"
 
 // sessionLayout returns the session's paths as the bazel command sees them (in) and on the
 // host, and the spec of its sandbox.
@@ -367,18 +374,22 @@ func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandb
 	host = sessionPaths{
 		work: filepath.Join(sb, "work"), home: filepath.Join(sb, "home"), tmp: filepath.Join(sb, "tmp"),
 		out: filepath.Join(sb, "out"), repo: filepath.Join(caches, "repo"), disk: filepath.Join(caches, "disk"),
-		bazelisk: filepath.Join(caches, "bazelisk"), rc: filepath.Join(dir, "tun.bazelrc"),
+		bazelisk: filepath.Join(caches, "bazelisk"), rc: filepath.Join(dir, "tun.bazelrc"), sock: filepath.Join(dir, "sock"),
 	}
 	in = host
 	spec = sandbox.Spec{Mode: s.cfg.Sandbox, Tmp: host.tmp, DataDir: s.cfg.DataDir}
 	if s.cfg.Sandbox == sandbox.Bwrap {
 		in = sessionPaths{work: "/work", home: "/tun/home", tmp: "/tmp", out: "/tun/out", repo: "/tun/cache/repo",
-			disk: "/tun/cache/disk", bazelisk: "/tun/cache/bazelisk", rc: "/tun/tun.bazelrc", exe: "/tun/bin/tun"}
+			disk: "/tun/cache/disk", bazelisk: "/tun/cache/bazelisk", rc: "/tun/tun.bazelrc", exe: "/tun/bin/tun", sock: "/tun/sock"}
 		spec.FixedRoot, spec.PrivateNet, spec.ExePath = true, s.cfg.PrivateNet, in.exe
 		spec.Mounts = []sandbox.Mount{
 			{Src: host.work, Dst: in.work}, {Src: host.home, Dst: in.home}, {Src: host.out, Dst: in.out},
 			{Src: host.repo, Dst: in.repo}, {Src: host.disk, Dst: in.disk}, {Src: host.bazelisk, Dst: in.bazelisk},
 			{Src: host.rc, Dst: in.rc, RO: true},
+		}
+		if s.cache != nil {
+			// The socket's dir, read-only: connecting needs no write access to the mount.
+			spec.Mounts = append(spec.Mounts, sandbox.Mount{Src: host.sock, Dst: in.sock, RO: true})
 		}
 	}
 	spec.Argv, spec.Dir = sandbox.AgentArgv(in.exe), in.work
@@ -407,7 +418,7 @@ func (s *Server) startupOptions(p sessionPaths) []string {
 // prepareSession creates the session's dirs and files if needed.
 func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 	dir := s.sessionDir(sess.ID)
-	for _, d := range []string{"", "sandbox", "sandbox/work", "sandbox/home", "sandbox/tmp", "sandbox/out"} {
+	for _, d := range []string{"", "sock", "sandbox", "sandbox/work", "sandbox/home", "sandbox/tmp", "sandbox/out"} {
 		if err := os.Mkdir(filepath.Join(dir, d), 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
 		}
@@ -424,13 +435,124 @@ func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 	} else if err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	rc := fmt.Sprintf("# Written by tun for session %s; tun passes it with --bazelrc.\n"+
-		"common --repository_cache=%s\ncommon --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n",
-		sess.Name, in.repo, in.disk, s.cfg.DiskCacheMax)
-	if err := writeOwn(host.rc, []byte(rc)); err != nil {
+	if err := writeOwn(host.rc, []byte(s.bazelrc(sess.Name, in, s.remoteSetup(in)))); err != nil {
 		return err
 	}
 	return s.persistSession(sess)
+}
+
+// remoteSetup is how a session's Bazel uses tun's REAPI services.
+type remoteSetup struct {
+	socket string // the session's cache socket as Bazel sees it; "": no remote cache
+	// executors: execution slots (hub and runners) when the server executes actions; 0 runs
+	// actions in the session. (Execution is not part of this server yet: always 0. Once it is,
+	// the same socket serves Execute and executors write the shared action cache namespace.)
+	executors int
+	readOnly  bool // the session may not upload action results (tun serve --cache-action-writes=false)
+	note      string
+}
+
+// maxSocketPath is the longest unix socket path connect(2) takes (sun_path holds 108 bytes).
+const maxSocketPath = 107
+
+// remoteSetup says which remote flags a session with paths in gets.
+func (s *Server) remoteSetup(in sessionPaths) remoteSetup {
+	if s.cache == nil {
+		return remoteSetup{}
+	}
+	sock := path.Join(in.sock, cacheSock)
+	if len(sock) > maxSocketPath { // sandbox none: the host path, which may be long
+		return remoteSetup{note: fmt.Sprintf("no remote cache: its socket path %s is over %d bytes (tun serve --data with a shorter path, or bwrap)", sock, maxSocketPath)}
+	}
+	return remoteSetup{socket: sock, executors: s.executionSlots(), readOnly: s.cfg.CacheReadOnly}
+}
+
+// executionSlots is the number of actions the server can execute at once for sessions
+// (remote execution); 0 until the REAPI Execution service is part of the server.
+func (s *Server) executionSlots() int { return 0 }
+
+// bazelrc is a session's tun.bazelrc (the "user" rc: the workspace's .bazelrc still applies):
+// the client's repository cache, and either its disk cache or (with r.socket) tun's remote cache through the
+// session's own socket (no token, no network), plus remote execution when r.executors > 0.
+func (s *Server) bazelrc(name string, in sessionPaths, r remoteSetup) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Written by tun for session %s; tun passes it with --bazelrc.\n", name)
+	fmt.Fprintf(&b, "common --repository_cache=%s\n", in.repo)
+	if r.note != "" {
+		fmt.Fprintf(&b, "# %s\n", r.note)
+	}
+	if r.socket == "" {
+		fmt.Fprintf(&b, "common --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n", in.disk, s.cfg.DiskCacheMax)
+		return b.String()
+	}
+	// No --disk_cache with the remote cache: it is on the same host, and a --cold session
+	// with only the remote cache was as fast as with both (docs/bazel.md), so a disk cache
+	// would only be a second copy.
+	// grpc:// with a unix proxy: plaintext HTTP/2 over the socket; the host name is unused.
+	fmt.Fprintf(&b, "common --remote_cache=grpc://tun\ncommon --remote_proxy=unix:%s\n", r.socket)
+	// Keep file:// URIs in the BEP (tun's summary and later lookups by label read local
+	// files); with a remote cache Bazel would report bytestream:// ones.
+	b.WriteString("common --experimental_build_event_upload_strategy=local\n")
+	if r.readOnly {
+		b.WriteString("common --noremote_upload_local_results\n")
+	}
+	if r.executors > 0 {
+		// Execute goes through the same socket; results come from the shared, executor-written
+		// action cache namespace. As many actions in flight as there are slots.
+		// If the executors can't be reached, Bazel runs the action itself.
+		fmt.Fprintf(&b, "common --remote_executor=grpc://tun\ncommon --jobs=%d\ncommon --remote_local_fallback\n", r.executors)
+	}
+	return b.String()
+}
+
+// cacheSocket serves the REAPI cache on a session's own unix socket (sock/cache.sock in the
+// session dir, bound read-only into the sandbox). Only that session's sandbox can reach it,
+// so the connection itself authenticates the session's client: no token, and action results
+// go to that client's namespace.
+type cacheSocket struct {
+	srv *http.Server
+	dir *os.File // the sock dir; the listener's path goes through it
+}
+
+// startCacheSocket starts sess's cache socket unless it is running. Caller holds the session.
+func (s *Server) startCacheSocket(sess *session) error {
+	s.mu.Lock()
+	running := sess.cache != nil
+	s.mu.Unlock()
+	if s.cache == nil || running {
+		return nil
+	}
+	dir, err := os.OpenFile(filepath.Join(s.sessionDir(sess.ID), "sock"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	// Through the dir's descriptor: the data dir's path may exceed sun_path's 108 bytes.
+	p := fmt.Sprintf("/proc/self/fd/%d/%s", dir.Fd(), cacheSock)
+	os.Remove(p) // a previous server's
+	ln, err := net.Listen("unix", p)
+	if err != nil {
+		dir.Close()
+		return fmt.Errorf("session cache socket: %v", err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	srv := &http.Server{Handler: s.cache.ForClient(sess.Client), Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
+	go srv.Serve(ln)
+	s.mu.Lock()
+	sess.cache = &cacheSocket{srv: srv, dir: dir}
+	s.mu.Unlock()
+	return nil
+}
+
+// stopCacheSocket closes sess's cache socket, if any.
+func (s *Server) stopCacheSocket(sess *session) {
+	s.mu.Lock()
+	c := sess.cache
+	sess.cache = nil
+	s.mu.Unlock()
+	if c != nil {
+		c.srv.Close()
+		c.dir.Close()
+	}
 }
 
 // copyTree copies the directories and regular files under src (symlinks and anything else
@@ -490,6 +612,9 @@ func (s *Server) ensureSandbox(sess *session, spec sandbox.Spec) (bool, error) {
 			root.Close()
 		}
 	}
+	if err := s.startCacheSocket(sess); err != nil {
+		return false, err
+	}
 	// A new log per sandbox (O_TRUNC), written by the server through a pipe and capped: the
 	// sandbox must never get a descriptor of a server-owned file (it could reach it through
 	// /proc/<pid>/fd and write without limit).
@@ -530,6 +655,7 @@ func (s *Server) agentLogMax() int64 {
 
 // shutdownSandbox asks the session's Bazel server to shut down and ends the sandbox.
 func (s *Server) shutdownSandbox(sess *session) {
+	defer s.stopCacheSocket(sess)
 	sb := sess.sb
 	if sb == nil {
 		return
@@ -756,7 +882,16 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		return fail("%v", err)
 	}
 	if started {
-		say("session %s: started a new session sandbox (Bazel server starts with this command)", sess.Name)
+		remote := "no remote cache (tun serve --cache-dir)"
+		if r := s.remoteSetup(p); r.note != "" {
+			remote = r.note
+		} else if r.socket != "" {
+			remote = "remote cache: tun's, through " + r.socket
+			if r.executors > 0 {
+				remote += fmt.Sprintf("; remote execution on %d slots", r.executors)
+			}
+		}
+		say("session %s: started a new session sandbox (Bazel server starts with this command); %s", sess.Name, remote)
 	}
 	args, useBEP := b.Args, bepCommands[b.Args[0]]
 	if useBEP {
@@ -908,13 +1043,20 @@ func (s *Server) getBEP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) closeSessions() {
 	s.mu.Lock()
 	var sbs []*sandbox.Session
+	var socks []*session
 	for _, sess := range s.sessions {
 		if sess.sb != nil {
 			sbs = append(sbs, sess.sb)
+		}
+		if sess.cache != nil {
+			socks = append(socks, sess)
 		}
 	}
 	s.mu.Unlock()
 	for _, sb := range sbs {
 		sb.Kill()
+	}
+	for _, sess := range socks {
+		s.stopCacheSocket(sess)
 	}
 }

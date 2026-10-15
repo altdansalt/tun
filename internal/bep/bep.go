@@ -121,7 +121,9 @@ func files(fs []rawFile, output bool) []File {
 	var r []File
 	for _, f := range fs {
 		u, e := url.Parse(f.URI)
-		if e != nil || u.Scheme != "file" {
+		// An output's workspace path comes from its prefix and name, also when the URI
+		// points to a remote cache (bytestream://).
+		if e != nil || u.Scheme != "file" && !(output && u.Scheme == "bytestream") {
 			continue
 		}
 		name := u.Path

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/server"
 )
@@ -443,7 +444,9 @@ func TestBazelSessionCancelLeftover(t *testing.T) {
 }
 
 func TestBazelSessionQueueAndCancel(t *testing.T) {
-	ts := bazelServer(t, server.Config{MaxJobs: 4}, false)
+	// The session sandbox is killed if a canceled command hasn't ended after twice the grace:
+	// not 50ms, which a loaded host can exceed.
+	ts := bazelServer(t, server.Config{MaxJobs: 4, KillGrace: 500 * time.Millisecond}, false)
 	ws := bazelWS(t, map[string]string{})
 	c := newClient(ts.env(ws, nil, nil, nil, nil)) // the same client name as the CLI's
 	start := func(session string, args ...string) string {
@@ -484,7 +487,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	if r := ts.tun("", "logs", "--stderr", b); !strings.Contains(r.stdout, "warm server") {
 		t.Fatalf("b after a canceled command: %+v", r)
 	}
-	time.Sleep(200 * time.Millisecond) // past the cancel's escalation (KillGrace is 50ms here)
+	time.Sleep(1100 * time.Millisecond) // past the cancel's escalation (twice KillGrace)
 	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "warm server") {
 		t.Fatalf("a cancel that Bazel obeyed must not end the session's server: %+v", r)
 	}
@@ -553,7 +556,11 @@ func TestBazelReal(t *testing.T) {
 	if !sandbox.BwrapUsable() {
 		t.Skip("bwrap unusable (without it a Bazel server would outlive the test)")
 	}
-	cfg := server.Config{Sandbox: sandbox.Bwrap}
+	store, err := reapi.Open(t.TempDir(), 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := server.Config{Sandbox: sandbox.Bwrap, Cache: store}
 	if sandbox.NetUsable() == nil {
 		cfg.PrivateNet = true
 	}
@@ -605,5 +612,11 @@ func TestBazelReal(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &sum); err != nil || !sum.Success || len(sum.Targets) != 1 || len(sum.Targets[0].Outputs) != 1 ||
 		sum.Targets[0].Outputs[0].Path != "bazel-bin/hello.txt" {
 		t.Fatalf("--json: %v: %+v", err, r)
+	}
+	// A new session (as on a new host): with a remote cache sessions have no disk cache, so the
+	// hit comes through the session's socket.
+	r = ts.tun(ws, "bazel", "--cold", "build", "//:hello")
+	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || !strings.Contains(r.stderr, "1 remote cache hit") || out() != "two\n" {
+		t.Fatalf("--cold with a warm remote cache: %+v", r)
 	}
 }

@@ -117,21 +117,37 @@ func (s *Store) read(kind string, d []byte) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	lock := s.fileLock(kind + k)
-	lock.Lock()
-	defer lock.Unlock()
-	p := filepath.Join(s.dir, kind+k)
-	b, e := os.ReadFile(p)
-	if e == nil {
-		s.touch(kind + k)
-		now := time.Now()
-		_ = os.Chtimes(p, now, now)
-	}
-
+	b, e := s.readName(kind + k)
 	if e == nil && kind == "cas-" && uint64(len(b)) != get(d, 2).v {
 		return nil, os.ErrNotExist
 	}
 	return b, e
+}
+
+// readName reads the cache file name and marks it used.
+func (s *Store) readName(name string) ([]byte, error) {
+	lock := s.fileLock(name)
+	lock.Lock()
+	defer lock.Unlock()
+	p := filepath.Join(s.dir, name)
+	b, e := os.ReadFile(p)
+	if e == nil {
+		s.touch(name)
+		now := time.Now()
+		_ = os.Chtimes(p, now, now)
+	}
+	return b, e
+}
+
+// actionName is the cache file of action digest k in namespace ns: "ac-<k>" for the shared
+// namespace (""), else "acc-<sha256(ns NUL k)>", so one client's results never answer another's
+// lookups.
+func actionName(ns, k string) string {
+	if ns == "" {
+		return "ac-" + k
+	}
+	h := sha256.Sum256([]byte(ns + "\x00" + k))
+	return "acc-" + hex.EncodeToString(h[:])
 }
 func (s *Store) put(kind string, d, b []byte) error {
 	k, e := key(d)
@@ -141,11 +157,16 @@ func (s *Store) put(kind string, d, b []byte) error {
 	if kind == "cas-" && (string(get(digest(b), 1).b) != k || uint64(len(b)) != get(d, 2).v) {
 		return fmt.Errorf("digest mismatch")
 	}
+	return s.putName(kind+k, b)
+}
+
+// putName atomically writes the cache file name.
+func (s *Store) putName(name string, b []byte) error {
 	if int64(len(b)) > s.max {
 		return errCapacity
 	}
 	defer s.evict()
-	lock := s.fileLock(kind + k)
+	lock := s.fileLock(name)
 	lock.Lock()
 	defer lock.Unlock()
 	f, e := os.CreateTemp(s.dir, ".write-")
@@ -160,10 +181,10 @@ func (s *Store) put(kind string, d, b []byte) error {
 	if e = f.Close(); e != nil {
 		return e
 	}
-	if e = os.Rename(f.Name(), filepath.Join(s.dir, kind+k)); e != nil {
+	if e = os.Rename(f.Name(), filepath.Join(s.dir, name)); e != nil {
 		return e
 	}
-	s.record(kind+k, int64(len(b)), nil)
+	s.record(name, int64(len(b)), nil)
 	return nil
 }
 
@@ -351,7 +372,7 @@ func cacheFile(name string) bool {
 	if strings.HasPrefix(name, ".write-") {
 		return true
 	}
-	for _, prefix := range []string{"cas-", "ac-", "partial-"} {
+	for _, prefix := range []string{"cas-", "ac-", "acc-", "partial-"} {
 		if rest, ok := strings.CutPrefix(name, prefix); ok {
 			raw, e := hex.DecodeString(rest)
 			return e == nil && len(raw) == 32 && hex.EncodeToString(raw) == rest

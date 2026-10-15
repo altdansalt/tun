@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -120,6 +122,9 @@ func (c *Client) requestOnce(ctx context.Context, method, path string, body io.R
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		if json.Unmarshal(b, &e) != nil || e.Error == "" {
 			e.Error = strings.TrimSpace(string(b[:min(len(b), 64<<10)]))
+			if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || strings.HasPrefix(strings.ToLower(e.Error), "<!doctype html") {
+				e.Error = "not tun but an HTML page (a proxy in front of tun; is the server down or restarting?): " + htmlText(e.Error, 300)
+			}
 			if e.Error == "" {
 				e.Error = resp.Status
 			}
@@ -127,6 +132,20 @@ func (c *Client) requestOnce(ctx context.Context, method, path string, body io.R
 		return nil, &StatusError{resp.StatusCode, e.Error, e.Missing}
 	}
 	return resp, nil
+}
+
+var (
+	htmlHidden = regexp.MustCompile(`(?is)<(head|style|script)\b.*?</(head|style|script)>`)
+	htmlTag    = regexp.MustCompile(`(?s)<[^>]*>`)
+)
+
+// htmlText is the visible text of an HTML page, whitespace collapsed, at most max bytes.
+func htmlText(page string, max int) string {
+	t := strings.Join(strings.Fields(html.UnescapeString(htmlTag.ReplaceAllString(htmlHidden.ReplaceAllString(page, " "), " "))), " ")
+	if len(t) > max {
+		t = t[:max] + "..."
+	}
+	return t
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) error {

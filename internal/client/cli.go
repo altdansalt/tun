@@ -91,6 +91,7 @@ chance to cancel, the job keeps running and 'tun logs -f <id>' reattaches. SIGIN
 cancel the job and exit 128+signal.
 If the server is busy (it runs --max-jobs jobs at once, FIFO), tun run prints once
 "tun: queued (N ahead, M running)" and, when the job starts, "tun: started after Xs in queue".
+Then "tun: running on hub" (the server itself) or "tun: running on runner NAME" says where.
 On completion stderr ends with "tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)".
 Workspace diagnostics show compressed bytes uploaded or already on the server.
 The job object's queue_sec and run_sec (tun status, and in --json) show where time went.
@@ -502,7 +503,7 @@ var queuePoll = 500 * time.Millisecond
 
 // waitQueued reports on stderr that job j is queued, then polls until it leaves the queue
 // and reports how long it waited. done is true if a signal canceled the job meanwhile.
-func waitQueued(ctx context.Context, c *Client, j api.Job, e Env) (code int, done bool) {
+func waitQueued(ctx context.Context, c *Client, j api.Job, e Env) (_ api.Job, code int, done bool) {
 	msg := fmt.Sprintf("%d ahead", *j.QueuePosition-1)
 	if h, err := c.Health(ctx); err == nil {
 		msg += fmt.Sprintf(", %d running", h.Running)
@@ -514,18 +515,31 @@ func waitQueued(ctx context.Context, c *Client, j api.Job, e Env) (code int, don
 	for j.State == api.Queued {
 		select {
 		case sig := <-e.Signals:
-			return cancelOnSignal(c, j.ID, sig, e), true
+			return j, cancelOnSignal(c, j.ID, sig, e), true
 		case <-time.After(queuePoll):
 		}
-		var err error
-		if j, err = c.Get(ctx, j.ID); err != nil {
-			return 0, false // the log streams retry and report errors
+		next, err := c.Get(ctx, j.ID)
+		if err != nil {
+			return j, 0, false // the log streams retry and report errors
 		}
+		j = next
 	}
 	if j.StartedAt != nil {
 		fmt.Fprintf(e.Stderr, "tun: started after %.1fs in queue\n", j.QueueSec)
 	}
-	return 0, false
+	return j, 0, false
+}
+
+// whereLine says where job j runs: "tun: running on hub" (the server itself) or "tun: running
+// on runner NAME"; "" while that isn't decided.
+func whereLine(j api.Job) string {
+	switch j.Runner {
+	case "":
+		return ""
+	case "local":
+		return "tun: running on hub\n"
+	}
+	return "tun: running on runner " + j.Runner + "\n"
 }
 
 // newlineWriter records whether streamed stderr needs a newline before diagnostics.
@@ -546,9 +560,14 @@ func (w *newlineWriter) Write(p []byte) (int, error) {
 // With tailN >= 0 it prints only the last tailN lines of each stream once the job has ended.
 func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, tailN int, e Env) (int, *api.Job) {
 	if j.QueuePosition != nil && !jsonOut {
-		if code, done := waitQueued(ctx, c, j, e); done {
+		var code int
+		var done bool
+		if j, code, done = waitQueued(ctx, c, j, e); done {
 			return code, nil
 		}
+	}
+	if !jsonOut {
+		io.WriteString(e.Stderr, whereLine(j))
 	}
 	stderr := &newlineWriter{Writer: e.Stderr}
 	var out, errw io.Writer = e.Stdout, stderr

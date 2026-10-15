@@ -14,7 +14,8 @@ cleanup() {
 }
 trap cleanup EXIT
 cd "$tmp"
-[ "$(tun run -- echo hi)" = hi ]
+[ "$(tun run -- echo hi 2>"$tmp/where")" = hi ]
+grep -q "^tun: running on hub$" "$tmp/where"
 code=0
 tun run -- sh -c 'exit 7' || code=$?
 [ "$code" -eq 7 ]
@@ -57,6 +58,7 @@ if command -v bazel >/dev/null; then
   echo 'genrule(name = "g", outs = ["g.txt"], cmd = "echo hi > $@")' > BUILD.bazel
   tun bazel build //:g 2> "$tmp/first"
   grep -q "Starting local Bazel server" "$tmp/first"
+  grep -q "remote cache: tun's, through /tun/sock/cache.sock" "$tmp/first" # tun serve's default
   tun bazel build //:g 2> "$tmp/second"
   if grep -q "Starting local Bazel server" "$tmp/second"; then exit 1; fi # (! is exempt from set -e)
   grep -q "uploaded 0 of 3 files (0B sent)" "$tmp/second"
@@ -68,6 +70,9 @@ if command -v bazel >/dev/null; then
   tun bazel --json build //:g > "$tmp/json" 2>/dev/null
   grep -q '"path":"bazel-bin/g.txt"' "$tmp/json"
   tun sessions | grep -q '"commands":4'
+  # A new session (another name: its own output base) gets the action from tun's remote cache.
+  tun bazel --session other build //:g 2> "$tmp/other"
+  grep -Eq "[0-9]+ remote cache hit" "$tmp/other"
   cd "$tmp"
 fi
 echo 'e2e: passed'

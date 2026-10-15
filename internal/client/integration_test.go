@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/server"
 	"github.com/altdansalt/tun/internal/workspace"
@@ -54,7 +55,9 @@ func startServer(t *testing.T, cfg server.Config) *testServer {
 	if cfg.MaxUpload == 0 {
 		cfg.MaxUpload = 64 << 20
 	}
-	cfg.KillGrace = 50 * time.Millisecond
+	if cfg.KillGrace == 0 {
+		cfg.KillGrace = 50 * time.Millisecond
+	}
 	s, err := server.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +73,7 @@ func startServer(t *testing.T, cfg server.Config) *testServer {
 			ts.puts.Add(1)
 		}
 		h.ServeHTTP(w, r)
-	})}
+	}), Protocols: reapi.Protocols()} // h2c: the REAPI cache's gRPC with Config.Cache
 	go ts.hs.Serve(ln)
 	t.Cleanup(ts.stop)
 	return ts
@@ -155,7 +158,7 @@ func (ts *testServer) detach(cwd string, args ...string) string {
 func cmdStderr(s string) string {
 	var out strings.Builder
 	for _, line := range strings.SplitAfter(s, "\n") {
-		if !strings.HasPrefix(line, "tun: job ") && !strings.HasPrefix(line, "tun: workspace ") && !strings.HasPrefix(line, "tun: uploaded ") {
+		if !strings.HasPrefix(line, "tun: job ") && !strings.HasPrefix(line, "tun: workspace ") && !strings.HasPrefix(line, "tun: uploaded ") && !strings.HasPrefix(line, "tun: running on ") {
 			out.WriteString(line)
 		}
 	}
@@ -171,7 +174,7 @@ func TestExitCodes(t *testing.T) {
 		msg  string
 	}{
 		{[]string{"run", "-c", "exit 3"}, 3, ""},
-		{[]string{"run", "--", "true"}, 0, ""},
+		{[]string{"run", "--", "true"}, 0, "\ntun: running on hub\n"},
 		{[]string{"run", "--", "false"}, 1, ""},
 		{[]string{"run", "--", "sh", "-c", "kill -9 $$"}, 137, ""},
 		{[]string{"run", "--", "/nonexistent/cmd"}, 125, "tun: job"},
@@ -562,5 +565,26 @@ func TestRetryCancellation(t *testing.T) {
 	defer cancel()
 	if _, err := c.Health(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error: %v", err)
+	}
+}
+
+// TestProxyErrorPage: an HTML error page from a proxy in front of tun (exe.dev's when the
+// server is down) is reduced to its text, not dumped whole.
+func TestProxyErrorPage(t *testing.T) {
+	page := `<!doctype html><html><head><title>Service unavailable</title><style>body { color: red; }</style></head>
+<body><main><h1>Port 7070 unbound.</h1>
+<p class="desc">We dialed port 7070 on this VM and nobody answered.</p></main></body></html>`
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(502)
+		io.WriteString(w, page)
+	}))
+	defer hs.Close()
+	var errb bytes.Buffer
+	code := Main([]string{"status", "x"}, Env{Stdout: io.Discard, Stderr: &errb, Cwd: t.TempDir(),
+		Getenv: func(k string) string { return map[string]string{"TUN_URL": hs.URL, "TUN_TOKEN": "t"}[k] }})
+	want := "tun: server: not tun but an HTML page (a proxy in front of tun; is the server down or restarting?): Port 7070 unbound. We dialed port 7070 on this VM and nobody answered. (HTTP 502)\n"
+	if code != 125 || errb.String() != want {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
 	}
 }

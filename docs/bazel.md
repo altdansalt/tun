@@ -62,11 +62,14 @@ job. `--remote_proxy=unix:PATH` works: Bazel speaks grpcs (TLS, authority from t
 socket; a host-side forwarder to remote.buildbuddy.dev:443 gave remote cache hits. So tun binds a
 socket into the sandbox (e.g. `/tun/cache.sock`) and adds `--remote_proxy=unix:...` itself. The
 bootstrap forwarder is a fixed-destination TCP passthrough (the BuildBuddy key is then a job flag);
-tun's own cache/executor later serves h2c on that socket with auth on the host side, so jobs never
-need a network or a token for it.
+tun's own cache serves h2c on a per-session socket (`/tun/sock/cache.sock`, built: see
+"Automatic cache and execution" below), authenticated by which socket the connection came in
+on, so sessions never need a network or a token for it.
 
-Only executors (tun itself) write the action cache once remote execution exists; sessions
-upload no local results (`--noremote_upload_local_results`), so a job can't poison the cache.
+Only executors (tun itself) write the *shared* action cache namespace. (Revised 2026-10-15:
+sessions do upload their local results, but into their own client's namespace, which only that
+client reads; so no client can poison another's builds, and a client's new or moved session
+gets hits for what it built before executors exist.)
 
 **Remote execution** (M3): the hub implements the Remote Execution API (Capabilities, CAS,
 ByteStream, ActionCache, Execution); runners become executors: fetch inputs from CAS into a
@@ -328,8 +331,8 @@ The advertised API version is 2.0, SHA256, with no execution capability.
 updates disabled. Default is allow while builds execute locally. The handler's write
 policy is the future executor-only authorization seam; executor credentials and sandbox
 socket binding are not part of this change. Both TCP and Unix endpoints accept
-`x-tun-token` or `authorization: Bearer TOKEN` metadata. Thus the future token-free sandbox socket described above remains
-integration work. Use `--remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN`;
+`x-tun-token` or `authorization: Bearer TOKEN` metadata. (The token-free sandbox socket is
+built now: see "Automatic cache and execution".) Use `--remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN`;
 add `--remote_proxy=unix:PATH` to use the Unix endpoint. `--cache-socket` overrides its
 path. Startup prints a short `/proc/PID/fd/FD/name` alias usable when DATA paths exceed
 Linux's Unix socket path length limit. A stale socket is removed on restart only after
@@ -401,3 +404,103 @@ Hub/runner deploys now drain admitted work (default 15m); see [deploy.md](deploy
 Queued Bazel commands finish before shutdown. Session disk state survives, but the
 sandbox/JVM is recreated on the next command. Live sandbox re-adoption remains future
 work; this does not change the milestone direction.
+
+## Automatic cache and execution (feat/bazel-auto)
+
+Goal: the agent sends `tun bazel test //...`; remote caching (and later remote execution)
+happens without the agent asking.
+
+**Cache, built.** `tun serve` enables the REAPI cache by default (`--cache-dir=reapi`;
+`--cache-dir=` disables it). The server, not `main`, owns the cache handler (`Config.Cache`),
+so in-process tests get the same behavior. While a session's sandbox lives the server listens
+on `sessions/<id>/sock/cache.sock` (listened through the dir's descriptor, so long data paths
+work) and binds that dir read-only at `/tun/sock` (bind source opened like every other mount:
+no symlinks, owned by the server, passed as a descriptor; connecting needs no write access to
+the mount). tun.bazelrc adds `--remote_cache=grpc://tun --remote_proxy=unix:/tun/sock/cache.sock`
+(verified with Bazel 9.3.0: plaintext HTTP/2 over the socket) and
+`--experimental_build_event_upload_strategy=local` (otherwise the BEP names outputs as
+`bytestream://` URIs and the summary loses them; internal/bep now also derives output paths
+from bytestream files).
+
+**Auth and trust.** The socket is per session, so the connection itself authenticates: the
+handler for that listener (`reapi.Handler.ForClient`) needs no token and uses the session's
+client as the action cache namespace, whatever the request says. The sandbox never sees the
+server token. On the token-authenticated endpoints (TCP, `DATA/cache.sock`) the namespace is
+the request's client identity, as for jobs (exe.dev source VM, else `X-Tun-Client`, else the
+remote address). `instance_name` is ignored everywhere. The CAS is shared (verified on write);
+action results live in `acc-<sha256(client NUL digest)>`, the shared namespace in `ac-<digest>`
+(what reapi-exec's executors write). Lookups read the client's own result, then the shared one;
+nothing reachable over gRPC writes the shared namespace. `--cache-action-writes=false` makes
+sessions run with `--noremote_upload_local_results`.
+
+**Execution, designed.** The bazelrc is generated per command from a `remoteSetup{socket,
+executors, readOnly}`: `executors` is the number of action slots the server can run
+(`Server.executionSlots`, 0 until the Execution service is in this server: then local
+execution, as now). With executors > 0 the rc adds `--remote_executor=grpc://tun` (same socket,
+so the same per-session auth; ForClient copies the handler, including a future Execution
+field), `--jobs=<slots>` and `--remote_local_fallback`. Executor results go to the shared
+namespace, which every session reads. Since the rc is rewritten before each command, `--jobs`
+follows runners joining and leaving, and none of these are startup options, so the warm Bazel
+server survives the change. Open point for when it lands: a session command holds a hub slot
+while its actions need slots too; with only local slots and `--max-sessions` sessions busy,
+actions could starve. Sessions should not count against action slots (or actions get their
+own pool).
+
+Merging feat/reapi-exec (trial merge 2026-10-15 at db5eea0): conflicts in main.go/server.go
+(both moved the cache setup; Execution should be created in `server.New` next to the cache
+handler, so session sockets get it through `ForClient`), store.go `read` (take reapi-exec's
+verified read; `readName` is the namespaced variant) and the docs. reapi-exec makes
+`--cache-action-writes` default to false because writes went to the one shared namespace; with
+per-client namespaces client writes can't poison anyone else, so the default can stay true.
+Then `executionSlots` returns local slots plus action-capable runner slots when Execution is on.
+
+Deviations from the plan above: sessions upload local results (own namespace, see Trust);
+with a remote cache sessions get no `--disk_cache` (measured below: no faster with both); the socket lives under the
+session dir (not `/tun/cache.sock`, since the bind source must be a server-owned directory).
+With `--sandbox none` the rc uses the host path, and a session whose socket path is longer
+than sun_path allows gets no remote cache (and says so).
+
+### Measurements (2026-10-15, tun's own tree)
+
+`scripts/bench-session.sh` in a tun job: `scripts/dev-tun.sh` starts a private server from
+this branch (cache on by default) on the job's host, and the client runs on the same host (no
+network round trips). The tree is this branch merged with feat/bazel-m0 plus gazelle (scratch
+branch, not pushed). Bazel 9.3.0, Go SDK 1.25.14 from M0's MODULE.bazel.
+
+Run 2, `tun bazel test -- //... -//internal/client:client_test -//internal/reapi:reapi_test
+-//scripts:e2e_test` (5 test targets), sessions without a disk cache; outer job
+`20261015T100741124967-924c9aa6` on runner tun-r4 (inner job ids are the private server's):
+
+| step | wall | Bazel | processes | inner job |
+|---|---|---|---|---|
+| (a) new session, empty caches (repository cache too: Go SDK download) | 121.4s | 120.4s | 103 linux-sandbox | 20261015T100801391780-41962487 |
+| (b) `--cold`, warm remote cache ("session on a new host") | **12.6s** | 10.8s | 103 remote cache hit | 20261015T101002693438-3fa8d8e2 |
+| (b) again (`--cold`, remote only) | 13.3s | 11.5s | 103 remote cache hit | 20261015T101137235787-c333181e |
+| (b') `--cold --remote_cache=` (no action cache at all, warm repository cache) | 81.9s | 81.0s | 103 linux-sandbox | 20261015T101015294282-05f286de |
+| (c) warm no-op | **0.98s** | 0.95s | 7 action cache hit | 20261015T101150494377-ad38224e |
+| (d) one-line change in internal/server/server.go | **2.67s** | 2.62s | 4 linux-sandbox | 20261015T101151478407-52e1a9a1 |
+| (d) its no-op | 0.58s | 0.55s | 5 action cache hit | 20261015T101154148120-7e0661a2 |
+
+The one-line change sent one 7.7KB file (12KB manifest); it was a trailing comment, so the
+recompiled server library had the same output and the dependent tests stayed cached (4 actions
+ran). The remote cache held 294MB afterwards.
+
+Run 1, all of `//...` (8 test targets, 3 of which fail in a session, see below), sessions with
+disk *and* remote cache; outer job `20261015T094443470466-e64bc22d` on runner tun-r2: (a)
+447.6s; (b1) `--cold` with disk and remote warm 168.2s (113 disk cache hits); (b2) `--cold`
+with only the remote cache (disk cache deleted) 167.2s (113 remote cache hits); (b3) `--cold
+--remote_cache=` with only the disk cache 226.9s (0 disk cache hits: not understood; Bazel
+re-executed all 117 actions); (c) no-op 96.4s; (d) one-line change 103.9s. The failing tests
+are not cached, so they rerun every time and dominate (c) and (d) (critical path ~95s).
+Disk + remote vs remote only: 168.2s vs 167.2s, hence no disk cache next to the remote cache.
+
+For comparison, `tun run -- ./scripts/ci.sh` (go vet/build, `go test -race` of everything, both
+smoke suites) took 233.7s (job 20261015T093529837825-42cbbe49) and 249.6s
+(20261015T094450267997-c543fe16) on runners: every run pays the whole test suite.
+
+The three targets that fail in a session run a real Bazel themselves (TestBazelReal,
+reapi's TestBazelCache, scripts/e2e.sh's Bazel part): inside Bazel's test sandbox bazelisk has
+no cached Bazel binary and can't download one (Bad Gateway through the session's proxy;
+`latest` needs DNS for the version lookup). That is M0's tests' environment (they pass under
+`go test` in tun run), not the session cache; fix in M0 by passing a Bazel binary as test data
+or tagging them `manual`.

@@ -11,6 +11,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     `tun run -e TEST_FLAGS='-run "TestA|TestB" -v' -- ./scripts/ci.sh` (or `-e TEST_FLAGS="-run 'A|B'"`).
     With `-run`, ci.sh skips the separate vet/build (go test compiles what it tests; add
     `-e CI_FULL=1` to keep them) and exits 1 if the pattern matched no test in any package.
+    Packages: `-e PKGS='./internal/reapi ./internal/client'` (default `./...`).
+    `tun run` says where the job runs: `tun: running on hub` or `tun: running on runner NAME`.
   - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
     stderr once the job ends (same exit code); `tun logs --tail N [--stderr] <id>` for more.
   - Test the changed binary with a private server: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
@@ -25,6 +27,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     and scripts/e2e.sh also run the real one when `bazel` is on PATH (it is on the tun hosts).
     It ends with a BEP summary line; `tun bazel --json ...` prints the result as one object.
     Bazel caches are per client on the server; dev-tun.sh seeds bazelisk from the job's cache.
+    Sessions use the server's REAPI remote cache automatically (`tun serve --cache-dir`, on by
+    default) through a per-session socket; action results are per client.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
 - **Bazel** (M0 of docs/bazel.md; `scripts/ci.sh` stays the default CI for now):
   - `tun run -- ./scripts/bazel-ci.sh` — checks that every Go file is in a BUILD.bazel
