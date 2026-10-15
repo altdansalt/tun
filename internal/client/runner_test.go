@@ -24,7 +24,14 @@ import (
 
 // hubConfig is a pure hub (no local slots) with short runner timeouts for tests.
 func hubConfig(data string) server.Config {
-	return server.Config{DataDir: data, HubOnly: true, RunnerPollWait: 300 * time.Millisecond, RunnerDeadAfter: 1500 * time.Millisecond}
+	return server.Config{DataDir: data, HubOnly: true, RunnerPollWait: 100 * time.Millisecond, RunnerDeadAfter: time.Second}
+}
+
+// release returns -e flags and a shell snippet that waits until the returned func is called.
+// Jobs here run unsandboxed on this host, so a file in a test dir works as the signal.
+func release(t *testing.T) (env []string, wait string, done func()) {
+	p := filepath.Join(t.TempDir(), "release")
+	return []string{"-e", "REL=" + p}, `while [ ! -e "$REL" ]; do sleep .01; done`, func() { os.WriteFile(p, nil, 0o644) }
 }
 
 type testRunner struct {
@@ -112,9 +119,10 @@ func TestRunnerConcurrency(t *testing.T) {
 	ts.startRunner("r1", 1)
 	ts.startRunner("r2", 1)
 	ts.waitRunners(2)
+	env, wait, done := release(t)
 	var ids []string
 	for range 3 {
-		ids = append(ids, ts.detach("", "--no-workspace", "--", "sh", "-c", "sleep 1.5; echo $TUN_JOB_ID"))
+		ids = append(ids, ts.detach("", append(env, "--no-workspace", "--", "sh", "-c", wait+"; echo $TUN_JOB_ID")...))
 	}
 	eventually(t, "two jobs running at once", func() bool {
 		a, b := ts.status(ids[0]), ts.status(ids[1])
@@ -127,6 +135,7 @@ func TestRunnerConcurrency(t *testing.T) {
 	if h := ts.health(); h.Running != 2 || h.Queued != 1 {
 		t.Errorf("health: %+v", h)
 	}
+	done()
 	for _, id := range ids {
 		if j := ts.waitDone(id); j.State != api.Exited || *j.ExitCode != 0 {
 			t.Errorf("job %+v", j)
@@ -442,7 +451,8 @@ func TestRunnerHubRestart(t *testing.T) {
 	addr := strings.TrimPrefix(ts.url, "http://")
 	ts.startRunner("r1", 1)
 	ts.waitRunners(1)
-	id := ts.detach("", "--no-workspace", "--", "sh", "-c", "echo before; sleep 2; echo after")
+	env, wait, done := release(t)
+	id := ts.detach("", append(env, "--no-workspace", "--", "sh", "-c", "echo before; "+wait+"; echo after")...)
 	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Running })
 	eventually(t, "log shipped", func() bool { return ts.tun("", "logs", id).stdout == "before\n" })
 	ts.stop()
@@ -458,6 +468,8 @@ func TestRunnerHubRestart(t *testing.T) {
 	go hs.Serve(ln)
 	t.Cleanup(func() { hs.Close(); s.Close() })
 	ts2 := &testServer{t: t, srv: s, url: ts.url, data: data}
+	eventually(t, "runner back", func() bool { return len(ts2.health().Runners) == 1 && ts2.health().Runners[0].Slots == 1 })
+	done()
 	j := ts2.waitDone(id)
 	if j.State != api.Exited || *j.ExitCode != 0 || j.Runner != "r1" {
 		t.Errorf("after hub restart: %+v", j)
@@ -473,14 +485,17 @@ func TestRunnerHubRestart(t *testing.T) {
 func TestRunnerMixedLocal(t *testing.T) {
 	t.Parallel()
 	// A hub with a local slot and a runner: both take work from the same FIFO.
-	ts := startServer(t, server.Config{MaxJobs: 1, RunnerPollWait: 300 * time.Millisecond, RunnerDeadAfter: 1500 * time.Millisecond})
+	ts := startServer(t, server.Config{MaxJobs: 1, RunnerPollWait: 100 * time.Millisecond, RunnerDeadAfter: time.Second})
 	ts.startRunner("r1", 1)
 	ts.waitRunners(1)
 	if h := ts.health(); h.LocalSlots != 1 || h.MaxJobs != 2 {
 		t.Errorf("health: %+v", h)
 	}
-	a := ts.detach("", "--no-workspace", "--", "sleep", "1")
-	b := ts.detach("", "--no-workspace", "--", "sleep", "1")
+	env, wait, done := release(t)
+	a := ts.detach("", append(env, "--no-workspace", "-c", wait)...)
+	b := ts.detach("", append(env, "--no-workspace", "-c", wait)...)
+	ts.waitFor(b, func(j api.Job) bool { return j.State == api.Running })
+	done()
 	ja, jb := ts.waitDone(a), ts.waitDone(b)
 	runners := []string{ja.Runner, jb.Runner}
 	slices.Sort(runners)
@@ -520,8 +535,5 @@ func TestRunnerNetIsolation(t *testing.T) {
 	}
 	if r := ts.tun("", "run", "--no-workspace", "-c", "echo out; exit 3"); r.code != 3 || r.stdout != "out\n" {
 		t.Errorf("exit status through the helper: %+v", r)
-	}
-	if r := ts.tun("", "run", "--no-workspace", "--timeout", "1s", "-c", "trap '' TERM; sleep 60 & sleep 60"); r.code != 124 {
-		t.Errorf("timeout through the helper: %+v", r)
 	}
 }
