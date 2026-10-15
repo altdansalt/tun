@@ -901,3 +901,11 @@ and the cause remains unisolated. Cold JVM/toolchain startup dominates quick tes
 progress. The documented BuildBuddy fallback passed the initial focused bridge tests
 (invocation `0dca4213-22ed-4116-8ece-ee6236387b61`); a fallback benchmark attempt had
 no Go on PATH, so measurements returned to tun once its drain finished.
+
+All five corrected real-process restart cases passed in outer job
+`20261015T152444081313-926065ca` on tun-r4 (19.894s queued): ordinary hub, runner
+and pure-hub drains were 3.150/2.849/4.199s; session hub and runner drains were
+61.049/54.392s, each retaining logs/artifacts and producing a cache hit after restart.
+Its subsequent runner smoke was invoked without the required zero-local-slot hub
+flags, so that setup failed its placement assertion and is not a valid runner-smoke
+result. The runner suite is rerun separately with the documented zero-slot setup.
