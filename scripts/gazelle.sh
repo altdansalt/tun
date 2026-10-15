@@ -8,7 +8,12 @@
 #
 # Caches as in bazel-ci.sh: the output root under $TMPDIR (deleted at exit), the shared
 # repository cache and disk cache in $XDG_CACHE_HOME/tun-bazel (TUN_BAZEL_CACHE overrides;
-# BAZEL_DISK_CACHE=0 skips the disk cache; see the trust note in bazel-ci.sh).
+# BAZEL_DISK_CACHE=0 skips the disk cache; see the trust note in bazel-ci.sh). Even warm, Bazel
+# spends ~50s loading and analyzing //:gazelle in a fresh output base, so the built gazelle
+# binary is also kept in $cache/gazelle/KEY (KEY: MODULE.bazel, its lockfile, the root
+# BUILD.bazel) and later runs on that host call it directly, without Bazel, like the
+# `bazel run` wrapper does. Same trust caveat as the disk cache (any job can write it);
+# GAZELLE_CACHE=0 always goes through Bazel.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=${GAZELLE_TAR:-gazelle.tar}
@@ -37,7 +42,32 @@ builds >"$tmp/list"
 tr '\n' '\0' <"$tmp/list" | xargs -0 -r sha256sum >"$tmp/before"
 mkdir "$tmp/orig"
 tar cf - -T "$tmp/list" | tar xf - -C "$tmp/orig"
-"${bazel[@]}" run "${flags[@]}" //:gazelle -- "$@"
+key=$(cat MODULE.bazel MODULE.bazel.lock BUILD.bazel 2>/dev/null | sha256sum | cut -c1-32)
+bin=$cache/gazelle/$key
+cmd=update
+case "${1-}" in
+fix | update) cmd=$1 && shift ;;
+help | update-repos) cmd= ;; # not cached: through Bazel
+esac
+if [ -n "$cmd" ] && [ "${GAZELLE_CACHE:-1}" != 0 ] && [ -x "$bin/gazelle" ]; then
+  echo "gazelle.sh: cached gazelle $bin" >&2
+  if command -v go >/dev/null; then
+    GOROOT=$(go env GOROOT) && export GOROOT
+  fi
+  BUILD_WORKSPACE_DIRECTORY=$PWD GOTOOLCHAIN=local "$bin/gazelle" "$cmd" -bzlmod -repo_config "$bin/repo_config" "$@"
+else
+  "${bazel[@]}" run "${flags[@]}" //:gazelle -- ${cmd:+"$cmd"} "$@"
+  # Keep the binary for next time (written aside, then renamed: concurrent jobs race safely).
+  runfiles=$("${bazel[@]}" info "${flags[@]}" bazel-bin 2>/dev/null)/gazelle.runfiles
+  g=$runfiles/gazelle+/cmd/gazelle/gazelle_/gazelle
+  c=$runfiles/gazelle++go_deps+bazel_gazelle_go_repository_config/WORKSPACE
+  if [ "${GAZELLE_CACHE:-1}" != 0 ] && [ ! -e "$bin" ] && [ -f "$g" ] && [ -f "$c" ]; then
+    mkdir -p "$cache/gazelle"
+    new=$(mktemp -d "$cache/gazelle/.new.XXXXXX")
+    cp "$g" "$new/gazelle" && cp "$c" "$new/repo_config" && chmod 755 "$new" "$new/gazelle" &&
+      mv -T "$new" "$bin" 2>/dev/null || rm -rf "$new"
+  fi
+fi
 builds | tr '\n' '\0' | xargs -0 -r sha256sum >"$tmp/after"
 # New (hash, path) pairs: changed or created files (gazelle doesn't delete BUILD files).
 mapfile -t changed < <(comm -13 <(sort "$tmp/before") <(sort "$tmp/after") | sed 's/^[0-9a-f]*  //' | sort)

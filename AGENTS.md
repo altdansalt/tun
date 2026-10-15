@@ -45,7 +45,10 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     fetch only the ones it changed:
     `tun run --out gazelle.tar -- ./scripts/gazelle.sh && tar xvf gazelle.tar && rm gazelle.tar`
     (prints each changed file's diff; args go to gazelle, e.g. `internal/client`; shared caches
-    like bazel-ci.sh; `GAZELLE_CHECK=1` exits 1 on changes). Commit the BUILD.bazel changes.
+    like bazel-ci.sh; `GAZELLE_CHECK=1` exits 1 on changes). It keeps the built gazelle binary per
+    tun host, so it takes <1s on a host that ran it before (same MODULE.bazel/lockfile), ~50s
+    through Bazel on a host with warm Bazel caches, ~9 min on a cold host (jobs land on any
+    runner). Commit the BUILD.bazel changes.
     Test data/tags/size in BUILD files are kept by gazelle.
   - Caches: output base in the job's `$TMPDIR` (deleted at exit; never let Bazel default to
     `$XDG_CACHE_HOME/bazel`), shared repository cache and disk cache in
