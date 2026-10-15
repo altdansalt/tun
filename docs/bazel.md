@@ -401,3 +401,23 @@ transport still buffers individual blobs; replacing it with streaming transfer
 remains a documented deviation. Exec roots use chmod-aware cleanup and are swept
 on startup. Missing inputs return FAILED_PRECONDITION with PreconditionFailure
 MISSING violations; lost runners return UNAVAILABLE. Local CAS reads verify hashes.
+
+Review validation (2026-10-15): full vet/build/race CI, real Bazel cache and
+execution integration, and both CLI smoke suites passed in tun job
+`20261015T092730806002-f76adfff` (155.516s; client 87.067s, REAPI 114.794s,
+server 40.954s). Focused review regressions also passed on the BuildBuddy fallback
+in invocation `e091c65f-a141-4bd4-9305-6f3c46539e83`.
+
+The 200-genrule benchmark on a private dev server with zero local slots and two
+runners with two slots each completed in **50.189s wall / 45.982s Bazel elapsed**,
+with **200 remote actions**, in tun job `20261015T092604426090-0fd19469`
+(54.051s total job time). The previous 39.969s runner measurement used the same
+logical topology; these runs share remote hosts with other jobs, so the difference
+is not a controlled throughput comparison. All Bazel roots stayed under TMPDIR.
+
+Tun friction during review: job `20261015T091722785773-65cba55c` was lost when
+shared runner tun-r3 shut down. The hub subsequently timed out on health requests
+and returned a workspace-upload HTTP 502, requiring the documented BuildBuddy
+fallback until it recovered. No shared server was restarted by this work.
+Superseded CI jobs were canceled. Fallback testing also exposed inherited Bazel
+configuration; integration builds and benchmarks now ignore host bazelrc files.
