@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "sandbox",
     srcs = [
+        "agent.go",
         "net.go",
         "sandbox.go",
     ],
@@ -12,6 +13,9 @@ go_library(
 
 go_test(
     name = "sandbox_test",
-    srcs = ["net_test.go"],
+    srcs = [
+        "net_test.go",
+        "sandbox_test.go",
+    ],
     embed = [":sandbox"],
 )

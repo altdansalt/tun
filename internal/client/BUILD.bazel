@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "client",
     srcs = [
+        "bazel.go",
         "cli.go",
         "client.go",
         "files.go",
