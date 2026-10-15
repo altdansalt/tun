@@ -41,6 +41,7 @@ import (
 type runnerState struct {
 	name, instance, sandbox, source string
 	privateNet                      bool
+	disk                            *api.Disk
 	slots                           int
 	lastSeen                        time.Time
 	retiredAt                       time.Time       // when a newer instance took the name (or it was dropped)
@@ -226,7 +227,7 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 		s.runners[name] = rn
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
-	rn.privateNet = p.NetworkIsolation
+	rn.privateNet, rn.disk = p.NetworkIsolation, p.Disk
 	return rn
 }
 
@@ -670,7 +671,7 @@ func (s *Server) runnerInfo() (slots, running int, list []api.RunnerInfo) {
 		slots += rn.slots
 		running += len(rn.jobs)
 		list = append(list, api.RunnerInfo{Name: rn.name, Slots: rn.slots, Running: len(rn.jobs),
-			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet})
+			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet, Disk: rn.disk})
 	}
 	for _, rn := range s.retired {
 		running += len(rn.jobs) // still finishing on a superseded instance

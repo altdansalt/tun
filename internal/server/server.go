@@ -41,6 +41,7 @@ type Config struct {
 	GCInterval                    time.Duration // 0: derived from the Keep* durations
 	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
 	MaxLog                        int64         // max bytes kept per stdout/stderr; 0: unlimited
+	MinFree                       MinFree       // free space to keep on the data dir's filesystem (see disk.go)
 
 	// Runners (see hub.go). HubOnly: no local job slots (tun serve --local-slots 0), so
 	// non-service jobs run only on runners; MaxJobs is then ignored.
@@ -184,6 +185,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{},
 		sessions: map[string]*session{}, quit: make(chan struct{})}
+	s.gc.fails = map[string]int{}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
 	}
@@ -333,6 +335,9 @@ func (s *Server) Handler() http.Handler {
 			MaxServices: s.cfg.MaxServices, Running: s.running + running, Queued: len(s.queue), Services: s.svc.running,
 			LocalSlots: s.cfg.MaxJobs, Runners: runners, Sessions: len(s.sessions), MaxSessions: s.cfg.MaxSessions}
 		s.mu.Unlock()
+		if h.Disk = diskInfo(s.cfg.DataDir, s.cfg.MinFree); h.Disk != nil {
+			h.Disk.ReclaimedWorkDirs, h.Disk.ReclaimedSessions = s.gc.reclaimedWork.Load(), s.gc.reclaimedSessions.Load()
+		}
 		writeJSON(w, 200, h)
 	})
 	auth := func(h http.HandlerFunc) http.HandlerFunc {

@@ -4,9 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/server"
 )
@@ -63,7 +66,15 @@ func TestBwrapGoBuild(t *testing.T) {
 	os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello from tun\") }\n"), 0o644)
 	r := ts.tun(ws, "run", "-e", "GOTOOLCHAIN=local", "-c", "go build -o hello . && ./hello && go vet ./...")
 	if r.code != 0 || r.stdout != "hello from tun\n" {
-		t.Fatalf("go build in sandbox: %+v", r)
+		// Once failed under full CI load with exit 1 and no output at all: say what the
+		// server knows (the job's error reports log write failures, e.g. a full disk).
+		var st api.Job
+		if m := regexp.MustCompile(`tun: job (\S+)`).FindStringSubmatch(r.stderr); m != nil {
+			st = ts.status(m[1])
+		}
+		var fs syscall.Statfs_t
+		syscall.Statfs(ts.data, &fs)
+		t.Fatalf("go build in sandbox: %+v\njob: %+v\nfree on the data dir: %dMB", r, st, int64(fs.Bavail)*fs.Bsize>>20)
 	}
 }
 

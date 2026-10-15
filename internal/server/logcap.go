@@ -5,25 +5,28 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 // jobLogs feeds a job's stdout/stderr through pipes into the server-owned log files, so
 // the server can stop writing at MaxLog bytes per stream (then it appends a marker and
-// discards the rest, still draining the pipe so the job never blocks on it).
+// discards the rest, still draining the pipe so the job never blocks on it). A failed write
+// (e.g. the disk is full) is reported by writeErr, and the rest is discarded likewise.
 type jobLogs struct {
 	Stdout, Stderr *os.File // pipe write ends, for the child
 	readers        []*os.File
 	files          []*os.File
 	wg             sync.WaitGroup
+	errs           [2]error // the first write error of each log
 }
 
 // openLogs opens dir/stdout and dir/stderr and starts the copiers. Call started once the
 // child has (or has failed to) start, and wait after the job's processes are gone.
 func openLogs(dir string, maxLog int64) (*jobLogs, error) {
 	l := &jobLogs{}
-	for _, name := range []string{"stdout", "stderr"} {
+	for i, name := range []string{"stdout", "stderr"} {
 		f, err := openOwn(filepath.Join(dir, name), os.O_WRONLY|os.O_APPEND, 0)
 		if err != nil {
 			l.close()
@@ -44,27 +47,57 @@ func openLogs(dir string, maxLog int64) (*jobLogs, error) {
 		l.wg.Add(1)
 		go func() {
 			defer l.wg.Done()
-			copyCapped(f, r, maxLog, name)
+			l.errs[i] = copyCapped(f, r, maxLog, name)
 		}()
 	}
 	return l, nil
 }
 
-func copyCapped(dst io.Writer, src io.Reader, max int64, name string) {
+// copyCapped copies src to dst up to max bytes (0: no limit), then appends a marker and
+// discards the rest. After a failed write it discards the rest too, and returns that error.
+func copyCapped(dst io.Writer, src io.Reader, max int64, name string) error {
+	w := &errWriter{w: dst}
+	defer io.Copy(io.Discard, src)
 	if max <= 0 {
-		io.Copy(dst, src)
-		return
+		io.Copy(w, src)
+		return w.err
 	}
-	n, _ := io.Copy(dst, io.LimitReader(src, max))
-	if n < max {
-		return // EOF (or a write error) before the cap
+	n, _ := io.Copy(w, io.LimitReader(src, max))
+	if n < max || w.err != nil {
+		return w.err // EOF (or a write error) before the cap
 	}
 	var one [1]byte
 	if k, _ := io.ReadFull(src, one[:]); k == 0 {
-		return // exactly at the cap
+		return nil // exactly at the cap
 	}
-	fmt.Fprintf(dst, "\n[tun: %s truncated: over the server's limit of %s per stream (tun serve --max-log); the rest is discarded]\n", name, fmtSize(max))
-	io.Copy(io.Discard, src)
+	fmt.Fprintf(w, "\n[tun: %s truncated: over the server's limit of %s per stream (tun serve --max-log); the rest is discarded]\n", name, fmtSize(max))
+	return w.err
+}
+
+// errWriter remembers the first error of w.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(p)
+	e.err = err
+	return n, err
+}
+
+// writeErr describes the logs' write errors (after wait), or is "".
+func (l *jobLogs) writeErr() string {
+	var msgs []string
+	for i, name := range []string{"stdout", "stderr"} {
+		if l.errs[i] != nil {
+			msgs = append(msgs, fmt.Sprintf("writing the %s log failed, output after that is lost: %v", name, l.errs[i]))
+		}
+	}
+	return strings.Join(msgs, "; ")
 }
 
 // started closes the parent's copies of the pipe write ends.

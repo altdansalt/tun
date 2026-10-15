@@ -32,7 +32,8 @@ type RunnerPoll struct {
 	Running []string `json:"running"` // job ids the runner holds (received and not yet reported done)
 	Sandbox string   `json:"sandbox"` // the runner's sandbox mode (bwrap|none)
 	// NetworkIsolation: the runner gives each job its own network namespace (--net private).
-	NetworkIsolation bool `json:"network_isolation"`
+	NetworkIsolation bool  `json:"network_isolation"`
+	Disk             *Disk `json:"disk,omitempty"` // the runner's data dir
 }
 
 // RunnerPollResponse is the hub's answer: jobs to start and job ids to kill and drop.
@@ -97,4 +98,5 @@ type RunnerInfo struct {
 	Sandbox          string    `json:"sandbox,omitempty"`
 	NetworkIsolation bool      `json:"network_isolation"`
 	Source           string    `json:"source,omitempty"` // who connected (exe.dev source VM, else IP)
+	Disk             *Disk     `json:"disk,omitempty"`   // as of its last poll
 }

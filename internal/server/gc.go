@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
@@ -33,9 +34,12 @@ const maxRemoveTries = 3
 
 type gcState struct {
 	blobMu sync.Mutex // serializes blob deletion against HEAD/job creation touching blobs
+	workMu sync.Mutex // serializes the sweep and reclaimDisk (and guards fails)
 	stop   chan struct{}
 	done   chan struct{}
-	fails  map[string]int // path -> failed removals; only the sweep goroutine touches it
+	fails  map[string]int // path -> failed removals
+
+	reclaimedWork, reclaimedSessions atomic.Int64 // deleted because disk space was low
 }
 
 // gcInterval is how often the sweep runs: GCInterval if set, else a quarter of the shortest
@@ -45,6 +49,9 @@ func (c *Config) gcInterval() time.Duration {
 		return c.GCInterval
 	}
 	d := 10 * time.Minute
+	if c.MinFree.set() {
+		d = time.Minute
+	}
 	for _, k := range []time.Duration{c.KeepWork, c.KeepJobs, c.KeepBlobs} {
 		if k > 0 && k/4 < d {
 			d = k / 4
@@ -55,16 +62,17 @@ func (c *Config) gcInterval() time.Duration {
 
 // startGC runs the first sweep now and then every gcInterval until stopGC.
 func (s *Server) startGC() {
-	if s.cfg.KeepWork <= 0 && s.cfg.KeepJobs <= 0 && s.cfg.KeepBlobs <= 0 {
+	if s.cfg.KeepWork <= 0 && s.cfg.KeepJobs <= 0 && s.cfg.KeepBlobs <= 0 && !s.cfg.MinFree.set() {
 		return
 	}
-	s.gc.stop, s.gc.done, s.gc.fails = make(chan struct{}), make(chan struct{}), map[string]int{}
+	s.gc.stop, s.gc.done = make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(s.gc.done)
 		t := time.NewTicker(s.cfg.gcInterval())
 		defer t.Stop()
 		for {
 			s.sweep(time.Now())
+			s.reclaimDisk()
 			select {
 			case <-s.gc.stop:
 				return
@@ -84,6 +92,8 @@ func (s *Server) stopGC() {
 
 // sweep applies the retention policy once.
 func (s *Server) sweep(now time.Time) {
+	s.gc.workMu.Lock()
+	defer s.gc.workMu.Unlock()
 	var expired, workGone []*job
 	inUse := map[string]bool{}
 	s.mu.Lock()
@@ -115,18 +125,7 @@ func (s *Server) sweep(now time.Time) {
 		delete(s.gc.fails, s.sandboxDir(j.ID))
 	}
 	for _, j := range workGone {
-		if !s.remove(s.sandboxDir(j.ID)) {
-			continue
-		}
-		os.Remove(filepath.Join(s.jobDir(j.ID), outputsFile)) // a runner job's files
-		s.mu.Lock()
-		if s.jobs[j.ID] == j {
-			j.WorkDeleted = true
-			if err := s.persist(j); err != nil {
-				log.Printf("tun: gc: persisting job %s: %v", j.ID, err)
-			}
-		}
-		s.mu.Unlock()
+		s.deleteWork(j)
 	}
 	if s.cfg.KeepJobs > 0 {
 		s.sweepOrphans(now, known)

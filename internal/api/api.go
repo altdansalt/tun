@@ -100,6 +100,20 @@ type Health struct {
 	Runners          []RunnerInfo `json:"runners"`
 	Sessions         int          `json:"sessions"` // tun bazel sessions (see GET /v1/sessions)
 	MaxSessions      int          `json:"max_sessions"`
+	Disk             *Disk        `json:"disk,omitempty"`
+}
+
+// Disk is the state of a data dir's filesystem (healthz; runners report theirs in polls).
+type Disk struct {
+	FreeBytes    int64 `json:"free_bytes"`
+	TotalBytes   int64 `json:"total_bytes"`
+	MinFreeBytes int64 `json:"min_free_bytes"` // --min-free; 0: none
+	Low          bool  `json:"low"`            // under min_free_bytes (even after reclaiming)
+	// What was deleted because space was low, since the process started: finished jobs'
+	// work dirs and idle sessions (the server), cached workspace blobs (a runner).
+	ReclaimedWorkDirs int64 `json:"reclaimed_work_dirs,omitempty"`
+	ReclaimedSessions int64 `json:"reclaimed_sessions,omitempty"`
+	ReclaimedBlobs    int64 `json:"reclaimed_blobs,omitempty"`
 }
 
 // Error is the body of every non-2xx response.

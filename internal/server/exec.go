@@ -167,6 +167,14 @@ func (p *proc) kill(state string) {
 	close(p.killed)
 }
 
+// joinMsg joins non-empty messages with "; ".
+func joinMsg(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
+	}
+	return a + "; " + b
+}
+
 // procResult is how a job's command ended.
 type procResult struct {
 	State     string // exited, timeout, canceled, failed, or "crash"
@@ -222,5 +230,6 @@ func (p *proc) wait() procResult {
 	if err != nil && res.Code == nil && res.Sig == nil {
 		res.Msg = err.Error()
 	}
+	res.Msg = joinMsg(res.Msg, p.logs.writeErr())
 	return res
 }

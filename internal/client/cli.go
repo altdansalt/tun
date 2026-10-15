@@ -617,6 +617,8 @@ func exitCode(j api.Job) (int, string) {
 			msg = "was canceled"
 		}
 		return 128 + *j.Signal, msg
+	case j.ExitCode != nil && j.Error != "":
+		return *j.ExitCode, "exited; server error: " + j.Error // e.g. its logs could not be written
 	case j.ExitCode != nil:
 		return *j.ExitCode, ""
 	case j.State == api.Canceled:

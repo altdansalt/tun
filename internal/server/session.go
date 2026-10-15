@@ -253,15 +253,20 @@ func (s *Server) stopSession(sess *session, why string) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.shutdownSandbox(sess)
-		s.removeSessionDir(sess.ID)
-		s.mu.Lock()
-		if s.sessions[sess.ID] == sess {
-			delete(s.sessions, sess.ID)
-		}
-		s.schedule()
-		s.mu.Unlock()
+		s.dropSession(sess)
 	}()
+}
+
+// dropSession does the work of stopSession: sess (marked stopping) is shut down and deleted.
+func (s *Server) dropSession(sess *session) {
+	s.shutdownSandbox(sess)
+	s.removeSessionDir(sess.ID)
+	s.mu.Lock()
+	if s.sessions[sess.ID] == sess {
+		delete(s.sessions, sess.ID)
+	}
+	s.schedule()
+	s.mu.Unlock()
 }
 
 // removeSessionDir moves a session dir aside (so the id can be reused at once) and deletes it.
@@ -773,6 +778,7 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	r := <-resc
 	close(br.ended) // a process still holding the logs open must not make it look running
 	logs.wait()
+	logErr := logs.writeErr()
 	if r.Err != nil {
 		tail := ""
 		if f, err := openOwn(filepath.Join(s.sessionDir(sess.ID), "agent.log"), os.O_RDONLY, 0); err == nil {
@@ -783,9 +789,9 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 			}
 			f.Close()
 		}
-		return procResult{State: api.Failed, Msg: fmt.Sprintf("session %s: %v (agent.log: %s)", sess.Name, r.Err, tail)}
+		return procResult{State: api.Failed, Msg: joinMsg(fmt.Sprintf("session %s: %v (agent.log: %s)", sess.Name, r.Err, tail), logErr)}
 	}
-	return procResult{State: api.Exited, Code: r.Code, Sig: r.Signal}
+	return procResult{State: api.Exited, Code: r.Code, Sig: r.Signal, Msg: logErr}
 }
 
 // closeSessions kills every session sandbox (server shutdown). Session dirs stay.

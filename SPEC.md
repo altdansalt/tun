@@ -20,6 +20,7 @@ tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N]
           [--ephemeral] [--exit-on-eof]
           [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
+          [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -194,6 +195,21 @@ A sweep at server startup and then periodically (a quarter of the shortest reten
 - Blobs not referenced by a queued/running job and unused (HEAD/PUT/job creation bump the
   file's mtime) for `--keep-blobs` (24h) are deleted; clients just re-upload.
 - A duration of 0 disables that deletion.
+
+Disk space: when free space on the data dir's filesystem is under `--min-free` (bytes with
+KB/MB/GB, or a percentage of the filesystem; default 10%; 0 disables), the server deletes
+finished jobs' work dirs early, oldest first (as `--keep-work` would; `work_deleted: true`),
+until it is above again, then idle Bazel sessions, least recently used first. It checks
+before each job starts, before it unpacks a workspace, and every minute; it logs what it
+deleted. healthz `disk: {free_bytes, total_bytes, min_free_bytes, low, reclaimed_work_dirs,
+reclaimed_sessions}` (`low`: still under the minimum). A runner (whose job dirs are deleted
+when the job ends) does the same with its cached workspace blobs, least recently used first,
+before each poll (`tun runner --min-free`, default 10%), and reports its `disk` (with
+`reclaimed_blobs`) in polls; healthz shows it as `runners[].disk`.
+
+Logs: if writing a job's stdout or stderr log fails (e.g. the disk is full), the rest of that
+stream is discarded (the job never blocks on it) and the job's `error` says so; `tun run`
+prints it ("tun: job ID exited; server error: ...").
 
 ## Services
 `tun run --service [--port N]... -- <cmd>` starts a job meant to run until canceled (dev server,
@@ -471,7 +487,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, disk}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 - `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,

@@ -173,6 +173,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if j.Workspace != "" && !(s.cfg.HubOnly && !j.Service) {
+		s.reclaimDisk() // before unpacking
+	}
 	if code, err := s.prepare(j); err != nil {
 		workspace.RemoveAll(s.jobDir(j.ID))
 		writeErr(w, code, err.Error())
@@ -293,6 +296,7 @@ func (s *Server) schedule() {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			s.reclaimDisk()
 			if j.bz != nil {
 				s.runBazel(j)
 			} else {
