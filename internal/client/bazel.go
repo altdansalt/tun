@@ -12,13 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/workspace"
 )
 
-const bazelUsage = `usage: tun bazel [--session NAME] [--cold] [--timeout DUR] <bazel command> [args...]
+const bazelUsage = `usage: tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]
 
 Run a Bazel command in a warm session on the tun server, e.g. tun bazel test //... .
 The bazel command and its args pass through unchanged; tun adds only startup options (the
@@ -47,6 +48,17 @@ and on servers with network isolation the HTTP(S) proxy variables (downloads wor
 it, as in tun run). Outputs stay in the session's output base on the server; tun get can't
 fetch them yet.
 
+Results: for build, test, coverage and run, tun adds --build_event_json_file (in the
+session) and, when Bazel exits, prints one summary line from the Build Event Protocol, e.g.
+"tun: bazel test exit=3 after 12.4s: 2 of 40 tests failed: //a:b_test //c:d_test" (also the
+job's "summary"). --json prints instead, on stdout, one JSON object: {job, state, command,
+exit_code, exit_name, success, complete, duration_sec, targets [{label, success, outputs}],
+tests [{label, status, attempts [{run, shard, attempt, status, duration_sec, logs}],
+duration_sec, shards}], failed_actions [{label, message, logs}], target_count, test_count,
+failed_test_count, failed_target_count, omitted {list: n}, error}; lists are capped at 20
+(omitted counts the rest), paths are relative to the workspace (bazel-bin/..., bazel-out/...)
+on the server. With --json, Bazel's own stdout goes to stderr.
+
 Each command is a normal job (tun ls, tun status, tun logs, tun cancel) with "session" and
 "session_id" fields. Stderr ends with "tun: job <id> <state> exit=<code> after <run>s
 (<queue>s queued)". Canceling (or SIGINT/SIGTERM to tun bazel) interrupts Bazel like Ctrl-C.
@@ -59,19 +71,20 @@ func bazelCmd(args []string, e Env) int {
 	session := fs.String("session", "default", "run in session `NAME` (letters, digits, '.', '_', '-')")
 	cold := fs.Bool("cold", false, "start the session afresh: discard its Bazel server, output base and workspace copy")
 	timeout := fs.Duration("timeout", 30*time.Minute, "cancel the bazel command after this long (exit 124; max 168h)")
+	jsonOut := fs.Bool("json", false, "print the result as one JSON object on stdout (Bazel's stdout goes to stderr)")
 	// tun's flags end at the bazel command; anything else that looks like a flag before it
 	// is a Bazel startup option, which tun doesn't pass on.
 	i := 0
 	for i < len(args) && strings.HasPrefix(args[i], "-") && args[i] != "--" {
 		name, _, hasValue := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
 		switch {
-		case name == "h" || name == "help" || name == "cold":
+		case name == "h" || name == "help" || name == "cold" || name == "json":
 		case name == "session" || name == "timeout":
 			if !hasValue {
 				i++
 			}
 		default:
-			return errorf(e, "bazel: %q: put tun's flags (--session, --cold, --timeout) first, then the bazel command; Bazel startup options are not supported (tun sets its own)", args[i])
+			return errorf(e, "bazel: %q: put tun's flags (--session, --cold, --timeout, --json) first, then the bazel command; Bazel startup options are not supported (tun sets its own)", args[i])
 		}
 		i++
 	}
@@ -84,9 +97,9 @@ func bazelCmd(args []string, e Env) int {
 	}
 	switch {
 	case len(bargs) == 0:
-		return errorf(e, "bazel: no bazel command; usage: tun bazel [--session NAME] [--cold] <bazel command> [args...]")
+		return errorf(e, "bazel: no bazel command; usage: tun bazel [--session NAME] [--cold] [--json] <bazel command> [args...]")
 	case strings.HasPrefix(bargs[0], "-"):
-		return errorf(e, "bazel: %q: put tun's flags (--session, --cold, --timeout) first, then the bazel command; Bazel startup options are not supported (tun sets its own)", bargs[0])
+		return errorf(e, "bazel: %q: put tun's flags (--session, --cold, --timeout, --json) first, then the bazel command; Bazel startup options are not supported (tun sets its own)", bargs[0])
 	case *timeout <= 0 || *timeout > api.MaxTimeoutSec*time.Second:
 		return errorf(e, "bazel: --timeout must be positive and at most %v", api.MaxTimeoutSec*time.Second)
 	}
@@ -107,11 +120,50 @@ func bazelCmd(args []string, e Env) int {
 	fmt.Fprintf(e.Stderr, "tun: job %s (session %s)\n", j.ID, j.Session)
 	fmt.Fprintf(e.Stderr, "tun: sync: %d manifest entries (%dB sent), uploaded %d of %d files (%dB sent) in %.3fs\n",
 		len(manifest), st.manifestBytes, st.uploaded, st.files, st.uploadBytes, time.Since(start).Seconds())
-	code, final := wait(ctx, cancel, c, j, false, -1, e)
+	we := e
+	if *jsonOut { // both streams to stderr, written by two goroutines
+		w := &lockedWriter{w: e.Stderr}
+		we.Stdout, we.Stderr = w, w
+	}
+	code, final := wait(ctx, cancel, c, j, false, -1, we)
 	if final != nil {
 		printCompletion(e.Stderr, *final, code)
 	}
+	if *jsonOut {
+		printBazelJSON(ctx, c, j.ID, final, e)
+	}
 	return code
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// printBazelJSON prints job id's summary object (GET /v1/jobs/{id}/bep) with the job's id,
+// state and error added; without one (the command never ran), just those.
+func printBazelJSON(ctx context.Context, c *Client, id string, final *api.Job, e Env) {
+	out := map[string]any{}
+	if err := c.doJSON(ctx, "GET", "/v1/jobs/"+id+"/bep", nil, &out); err != nil {
+		out = map[string]any{}
+	}
+	out["job"] = id
+	if final != nil {
+		out["state"] = final.State
+		if final.Error != "" {
+			out["error"] = final.Error
+		}
+		if _, ok := out["exit_code"]; !ok {
+			out["exit_code"] = final.ExitCode
+		}
+	}
+	printJSON(e, out)
 }
 
 // bazelManifest lists the workspace containing the cwd and builds its manifest. It returns

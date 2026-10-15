@@ -72,6 +72,9 @@ type Job struct {
 	// Session (name) and SessionID: the warm Bazel session a tun bazel job runs in.
 	Session   string `json:"session,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	// Summary: a tun bazel job's one-line result from Bazel's Build Event Protocol (build,
+	// test, coverage, run), also the last line of its stderr before tun's own.
+	Summary string `json:"summary,omitempty"`
 
 	// Computed each time the job is served. QueueSec is the time from creation to
 	// start (or to now/end if it never started); RunSec the time from start to end (or now).

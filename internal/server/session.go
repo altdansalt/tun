@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/bep"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
 )
@@ -757,12 +758,21 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	if started {
 		say("session %s: started a new session sandbox (Bazel server starts with this command)", sess.Name)
 	}
-	argv := append(append([]string{s.cfg.BazelCommand}, s.startupOptions(p)...), b.Args...)
+	args, useBEP := b.Args, bepCommands[b.Args[0]]
+	if useBEP {
+		args = slices.Concat(args[:1], []string{"--build_event_json_file=" + p.out + "/" + bepFile}, args[1:])
+		if root, err := os.OpenRoot(hp.out); err == nil { // the sandbox's: no links followed
+			root.Remove(bepFile) // a previous command's
+			root.Close()
+		}
+	}
+	argv := append(append([]string{s.cfg.BazelCommand}, s.startupOptions(p)...), args...)
 	if killed() {
 		endLogs()
 		return procResult{State: api.Canceled}
 	}
 	// Not under br.mu: Run may wait for the agent, and kill is called with s.mu held.
+	start = time.Now()
 	opts := sandbox.RunOpts{Sweep: s.cfg.Sandbox == sandbox.Bwrap, Keep: p.out + "/base/server/server.pid.txt"}
 	resc, err := sess.sb.Run(argv, dir, logs.Stdout, logs.Stderr, opts)
 	if err != nil {
@@ -776,9 +786,13 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	br.mu.Unlock()
 	logs.started()
 	r := <-resc
+	elapsed := time.Since(start)
 	close(br.ended) // a process still holding the logs open must not make it look running
 	logs.wait()
 	logErr := logs.writeErr()
+	if r.Err == nil {
+		s.bazelSummary(j, hp.out, useBEP, r, elapsed)
+	}
 	if r.Err != nil {
 		tail := ""
 		if f, err := openOwn(filepath.Join(s.sessionDir(sess.ID), "agent.log"), os.O_RDONLY, 0); err == nil {
@@ -792,6 +806,102 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		return procResult{State: api.Failed, Msg: joinMsg(fmt.Sprintf("session %s: %v (agent.log: %s)", sess.Name, r.Err, tail), logErr)}
 	}
 	return procResult{State: api.Exited, Code: r.Code, Sig: r.Signal, Msg: logErr}
+}
+
+// bepFile is where a session command writes its Build Event Protocol JSON, in out/ (tun adds
+// --build_event_json_file for the commands in bepCommands). maxBEP bounds what is read of it.
+const (
+	bepFile = "tun-bep.json"
+	maxBEP  = 256 << 20
+)
+
+// bepCommands get a BEP file and a summary line. (Bazel 9.3.0 also accepts the flag for
+// query, cquery, aquery and fetch, and ignores it for info, clean, mod and the like, but a
+// "targets built" line would mislead there.)
+var bepCommands = map[string]bool{"build": true, "test": true, "coverage": true, "run": true}
+
+// bazelSummary turns a finished command's BEP into the job's summary: for BEP commands one
+// line appended to its stderr log (before tun's own completion line) and recorded as the
+// job's "summary"; for every command the bounded JSON object in the job dir (bep.json:
+// GET /v1/jobs/{id}/bep, tun bazel --json). Bazel's exit status is authoritative.
+func (s *Server) bazelSummary(j *job, out string, useBEP bool, r sandbox.Result, elapsed time.Duration) {
+	p := bep.New(j.bz.Args[0])
+	var perr error
+	if useBEP {
+		perr = readBEP(out, p)
+	}
+	code := 0
+	if r.Code != nil {
+		code = *r.Code
+	} else if r.Signal != nil {
+		code = 128 + *r.Signal
+	}
+	p.SetResult(code, elapsed)
+	sum := p.Snapshot()
+	if b, err := sum.JSON(); err == nil {
+		if err := writeOwn(filepath.Join(s.jobDir(j.ID), "bep.json"), b); err != nil {
+			log.Printf("tun: job %s: %v", j.ID, err)
+		}
+	}
+	if !useBEP {
+		return
+	}
+	line := sum.Line()
+	if perr != nil {
+		line += " (reading the BEP: " + perr.Error() + ")"
+	}
+	if f, err := openOwn(filepath.Join(s.jobDir(j.ID), "stderr"), os.O_WRONLY|os.O_APPEND, 0); err == nil {
+		fmt.Fprintln(f, line)
+		f.Close()
+	}
+	s.mu.Lock()
+	j.Summary = line
+	s.mu.Unlock()
+}
+
+// readBEP feeds out/bepFile to p. out is the sandbox's: the file is opened through an os.Root
+// without following a link, and must be a regular file.
+func readBEP(out string, p *bep.Parser) error {
+	root, err := os.OpenRoot(out)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	f, err := root.OpenFile(bepFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // Bazel wrote none (it failed early)
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", bepFile)
+	}
+	n, err := io.Copy(p, io.LimitReader(f, maxBEP+1))
+	if err != nil {
+		return err
+	}
+	if n > maxBEP {
+		return fmt.Errorf("over %s; the rest is ignored", fmtSize(maxBEP))
+	}
+	return p.Finish()
+}
+
+// getBEP serves GET /v1/jobs/{id}/bep: a finished bazel job's summary object.
+func (s *Server) getBEP(w http.ResponseWriter, r *http.Request) {
+	j := s.lookup(w, r)
+	if j == nil {
+		return
+	}
+	f, err := openOwn(filepath.Join(s.jobDir(j.ID), "bep.json"), os.O_RDONLY, 0)
+	if err != nil {
+		writeErr(w, 404, fmt.Sprintf("job %s has no Bazel summary (only a tun bazel job whose command ran has one, once it ended)", j.ID))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, io.LimitReader(f, 64<<20))
 }
 
 // closeSessions kills every session sandbox (server shutdown). Session dirs stay.

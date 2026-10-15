@@ -372,6 +372,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", auth(s.cancelJob))
 	mux.HandleFunc("GET /v1/jobs/{id}/{stream}", auth(s.logs))
 	mux.HandleFunc("GET /v1/jobs/{id}/files", auth(s.files))
+	mux.HandleFunc("GET /v1/jobs/{id}/bep", auth(s.getBEP))
 	mux.HandleFunc("/v1/jobs/{id}/ports/{port}", auth(s.proxy))
 	mux.HandleFunc("/v1/jobs/{id}/ports/{port}/{path...}", auth(s.proxy))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

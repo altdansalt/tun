@@ -27,6 +27,17 @@ for a; do
   shift
 done
 cmd=$1; shift
+bep=; args=()
+for a; do case $a in --build_event_json_file=*) bep=${a#*=} ;; *) args+=("$a") ;; esac; done
+set -- "${args[@]}"
+if [ -n "$bep" ]; then # a target (or for test, a failed test) per non-flag arg
+  for t; do
+    case $t in -*) ;;
+      *) if [ "$cmd" = test ]; then echo "{\"id\":{\"testSummary\":{\"label\":\"$t\"}},\"testSummary\":{\"overallStatus\":\"FAILED\"}}"
+         else echo "{\"id\":{\"targetCompleted\":{\"label\":\"$t\"}},\"completed\":{\"success\":true}}"; fi ;;
+    esac
+  done >"$bep"
+fi
 mkdir -p "$ob/server"
 pid=$(cat "$ob/server/server.pid.txt" 2>/dev/null)
 if [ "$cmd" = shutdown ]; then
@@ -47,7 +58,7 @@ fi
 echo "cmd=$cmd args=$*"
 echo "pwd=$PWD home=$HOME tmp=$TMPDIR"
 case $cmd in
-  fail) exit 3 ;;
+  fail|test) exit 3 ;;
   sleep) sleep "$1" ;;
   cat) cat "$@" ;;
   sh) bash -c "$1" ;;
@@ -311,6 +322,41 @@ func TestBazelSessionMounts(t *testing.T) {
 	}
 }
 
+// TestBazelSummary: build/test/coverage/run commands end with a summary line from the BEP
+// (also the job's "summary"); --json prints the summary object on stdout instead.
+func TestBazelSummary(t *testing.T) {
+	ts := bazelServer(t, server.Config{}, false)
+	ws := bazelWS(t, map[string]string{})
+	r := ts.tun(ws, "bazel", "build", "//:a", "//:b", "--config=x")
+	if r.code != 0 || !strings.Contains(r.stdout, "cmd=build args=//:a //:b --config=x") ||
+		!regexp.MustCompile(`tun: bazel build exit=0 after [0-9.]+s: 2 targets built\ntun: job \S+ exited exit=0`).MatchString(r.stderr) {
+		t.Fatalf("build: %+v", r)
+	}
+	if j := ts.status(jobOf(t, r)); !strings.HasPrefix(j.Summary, "tun: bazel build exit=0") {
+		t.Fatalf("job summary: %+v", j)
+	}
+	r = ts.tun(ws, "bazel", "--json", "test", "//:t1", "//:t2")
+	var out struct {
+		Job, State, Command string
+		ExitCode            *int `json:"exit_code"`
+		TestCount           int  `json:"test_count"`
+		FailedTests         int  `json:"failed_test_count"`
+		Tests               []struct{ Label, Status string }
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil || r.code != 3 || strings.Count(r.stdout, "\n") != 1 {
+		t.Fatalf("--json test: %v: %+v", err, r)
+	}
+	if out.Job != jobOf(t, r) || out.State != api.Exited || out.ExitCode == nil || *out.ExitCode != 3 || out.TestCount != 2 || out.FailedTests != 2 ||
+		len(out.Tests) != 2 || out.Tests[0].Status != "FAILED" || !strings.Contains(r.stderr, "cmd=test") || !strings.Contains(r.stderr, "2 of 2 tests failed: //:t1 //:t2") {
+		t.Fatalf("--json test: %+v\n%+v", out, r)
+	}
+	// No BEP for other commands: no line, but --json still has the exit code.
+	r = ts.tun(ws, "bazel", "--json", "fail")
+	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil || r.code != 3 || out.ExitCode == nil || *out.ExitCode != 3 || strings.Contains(r.stderr, "tun: bazel fail") {
+		t.Fatalf("--json fail: %v: %+v", err, r)
+	}
+}
+
 // TestBazelSessionSweep: processes a command leaves behind are killed when it ends (all but
 // the Bazel server), so they can't tamper with later commands.
 func TestBazelSessionSweep(t *testing.T) {
@@ -531,7 +577,8 @@ func TestBazelReal(t *testing.T) {
 		return string(b)
 	}
 	r := ts.tun(ws, "bazel", "build", "//:hello")
-	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || out() != "one\n" {
+	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || out() != "one\n" ||
+		!regexp.MustCompile(`tun: bazel build exit=0 after [0-9.]+s: 1 targets built\n`).MatchString(r.stderr) {
 		t.Fatalf("first: %+v", r)
 	}
 	r = ts.tun(ws, "bazel", "build", "//:hello")
@@ -543,7 +590,20 @@ func TestBazelReal(t *testing.T) {
 	if r.code != 0 || strings.Contains(r.stderr, "Starting local Bazel server") || out() != "two\n" {
 		t.Fatalf("third (changed input): %+v", r)
 	}
-	if r = ts.tun(ws, "bazel", "build", "//:nope"); r.code == 0 || !strings.Contains(r.stderr, "no such target") {
+	if r = ts.tun(ws, "bazel", "build", "//:nope"); r.code == 0 || !strings.Contains(r.stderr, "no such target") ||
+		!strings.Contains(r.stderr, "tun: bazel build exit=1 after") {
 		t.Fatalf("bad target: %+v", r)
+	}
+	r = ts.tun(ws, "bazel", "--json", "build", "//:hello")
+	var sum struct {
+		Success bool
+		Targets []struct {
+			Label   string
+			Outputs []struct{ Path string }
+		}
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &sum); err != nil || !sum.Success || len(sum.Targets) != 1 || len(sum.Targets[0].Outputs) != 1 ||
+		sum.Targets[0].Outputs[0].Path != "bazel-bin/hello.txt" {
+		t.Fatalf("--json: %v: %+v", err, r)
 	}
 }
