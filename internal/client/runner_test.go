@@ -725,3 +725,40 @@ func TestRunnerService(t *testing.T) {
 		t.Fatalf("service admission leaked: %+v", h)
 	}
 }
+
+func TestRunnerServiceHubRestart(t *testing.T) {
+	data := t.TempDir()
+	ts := startServer(t, hubConfig(data))
+	addr := strings.TrimPrefix(ts.url, "http://")
+	ts.startRunner("r", 1)
+	ts.waitRunners(1)
+	id, urls := ts.startService("--port", "8080", "--ready-timeout", "15s")
+	if ts.srv.Drain(50 * time.Millisecond) {
+		t.Fatal("drain ignored live service")
+	}
+	ts.stop()
+	s, err := server.New(hubConfig(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ln net.Listener
+	eventually(t, "hub listening again", func() bool { ln, err = net.Listen("tcp", addr); return err == nil })
+	hs := &http.Server{Handler: s.Handler()}
+	go hs.Serve(ln)
+	t.Cleanup(func() { hs.Close(); s.Close() })
+	ts2 := &testServer{t: t, srv: s, url: ts.url, data: data}
+	eventually(t, "runner back", func() bool { return len(ts2.health().Runners) == 1 && ts2.health().Runners[0].Slots == 1 })
+	if ts2.health().Services != 1 {
+		t.Fatalf("service admission lost: %+v", ts2.health())
+	}
+	if code, body := ts2.get(urls[8080]+"env", true); code != 200 || !strings.Contains(body, "PORT=") {
+		t.Fatalf("proxy after restart: %d %s", code, body)
+	}
+	if r := ts2.tun("", "cancel", id); r.code != 0 {
+		t.Fatal(r)
+	}
+	ts2.waitDone(id)
+	if ts2.health().Services != 0 {
+		t.Fatal("service count leaked after restart")
+	}
+}
