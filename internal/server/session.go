@@ -940,6 +940,7 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	// Not under br.mu: Run may wait for the agent, and kill is called with s.mu held.
 	start = time.Now()
 	opts := sandbox.RunOpts{Sweep: s.cfg.Sandbox == sandbox.Bwrap, Keep: p.out + "/base/server/server.pid.txt"}
+	sb := sess.sb
 	resc, err := sess.sb.Run(argv, dir, logs.Stdout, logs.Stderr, opts)
 	if err != nil {
 		return fail("session %s: %v", sess.Name, err)
@@ -958,6 +959,17 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	logErr := logs.writeErr()
 	if r.Err == nil {
 		s.bazelSummary(j, hp.out, useBEP, r, elapsed)
+	}
+	if r.Err == nil && opts.Sweep && r.KeptGone {
+		// The sweep spared no Bazel server (none, or the one the agent recorded exited): a
+		// new sandbox, whose agent finds the next server anew, for the next command.
+		log.Printf("tun: session %s (%s): no Bazel server after job %s; its next command starts a new sandbox", sess.ID, sess.Name, j.ID)
+		sb.Close(5 * time.Second)
+		s.mu.Lock()
+		if sess.sb == sb {
+			sess.sb = nil
+		}
+		s.mu.Unlock()
 	}
 	if r.Err != nil {
 		tail := ""

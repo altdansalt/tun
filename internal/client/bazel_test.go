@@ -375,6 +375,41 @@ func TestBazelSessionSweep(t *testing.T) {
 	}
 }
 
+// TestBazelSessionSweepForgedPid: the agent records the Bazel server once; a later command
+// that writes its own leftover's pid into server.pid.txt doesn't make it survive, and the
+// real server still does.
+func TestBazelSessionSweepForgedPid(t *testing.T) {
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap unusable")
+	}
+	ts := bazelServer(t, server.Config{Sandbox: sandbox.Bwrap, DataDir: t.TempDir()}, false)
+	ws := bazelWS(t, map[string]string{})
+	if r := ts.tun(ws, "bazel", "build"); r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") {
+		t.Fatalf("first: %+v", r)
+	}
+	pidFile := "/tun/out/base/server/server.pid.txt"
+	r := ts.tun(ws, "bazel", "sh", "cp "+pidFile+" /tmp/real; setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! >/tmp/left; cp /tmp/left "+pidFile)
+	if r.code != 0 {
+		t.Fatalf("forging: %+v", r)
+	}
+	r = ts.tun(ws, "bazel", "sh", "kill -0 $(cat /tmp/left) && echo left''-alive; kill -0 $(cat /tmp/real) && echo real''-alive; cp /tmp/real "+pidFile)
+	if r.code != 0 || strings.Contains(r.stdout, "left-alive") || !strings.Contains(r.stdout, "real-alive") {
+		t.Fatalf("the forged pid survived, or the real server didn't: %+v", r)
+	}
+	// Once the recorded server is gone (here: bazel shutdown), the next command gets a new
+	// sandbox, which finds the next server anew.
+	if r := ts.tun(ws, "bazel", "shutdown"); r.code != 0 {
+		t.Fatalf("shutdown: %+v", r)
+	}
+	eventually(t, "sandbox ended", func() bool { return !ts.sessions()[0].Server })
+	if r := ts.tun(ws, "bazel", "build"); r.code != 0 || !strings.Contains(r.stderr, "started a new session sandbox") {
+		t.Fatalf("after shutdown: %+v", r)
+	}
+	if r := ts.tun(ws, "bazel", "build"); r.code != 0 || !strings.Contains(r.stderr, "warm server") {
+		t.Fatalf("warm again: %+v", r)
+	}
+}
+
 // TestBazelSessionAgentLog: the session sandbox writes its own output (agent.log) only
 // through a pipe the server caps, even via /proc/<agent>/fd/1.
 func TestBazelSessionAgentLog(t *testing.T) {

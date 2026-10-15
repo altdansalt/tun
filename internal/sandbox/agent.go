@@ -16,9 +16,12 @@ package sandbox
 //
 // One command at a time. When the command ends, the agent kills what is left in its process
 // group and, with sweep (only in a pid namespace of its own), every other process in the
-// sandbox except itself, its ancestors, and the process whose pid is in the file keep (the
-// Bazel server) with its descendants, so nothing a command started outlives it to tamper
-// with the next one. When the server closes its end, the agent kills the running command and
+// sandbox except itself, its ancestors, and the Bazel server with its descendants, so nothing
+// a command started outlives it to tamper with the next one. The Bazel server is the process
+// whose pid is in the file keep when a command first ends with one there; the agent records
+// it (pid and start time) and never reads the file again, since commands can write it. If
+// that process is gone, nothing is spared and the exit message says "kept_gone" (the server
+// then starts a new sandbox for the next command). When the server closes its end, the agent kills the running command and
 // exits, which ends the sandbox (bwrap kills everything in its pid namespace).
 
 import (
@@ -68,7 +71,12 @@ type agentMsg struct {
 	Error string   `json:"error,omitempty"`
 	Sweep bool     `json:"sweep,omitempty"`
 	Keep  string   `json:"keep,omitempty"`
+	Gone  bool     `json:"kept_gone,omitempty"`
 }
+
+// procID names a process across pid reuse: its pid and its start time (/proc/<pid>/stat
+// field 22, in clock ticks since boot).
+type procID struct{ pid, start int }
 
 func agentMain() int {
 	f := os.NewFile(PassFD, "ctl")
@@ -87,6 +95,7 @@ func agentMain() int {
 	}
 	var mu sync.Mutex
 	var cur *exec.Cmd
+	var kept *procID // the Bazel server, once known (only the command goroutine uses it)
 	buf, oob := make([]byte, 64<<10), make([]byte, syscall.CmsgSpace(3*4))
 	for {
 		k, oobn, _, _, err := ctl.ReadMsgUnix(buf, oob)
@@ -147,13 +156,16 @@ func agentMain() int {
 			go func() {
 				cmd.Wait()
 				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // stragglers in its group
+				r := agentMsg{Op: "exited"}
 				if m.Sweep {
-					sweep(m.Keep)
+					if kept == nil {
+						kept = readKeep(m.Keep)
+					}
+					r.Gone = !sweep(kept)
 				}
 				mu.Lock()
 				cur = nil
 				mu.Unlock()
-				r := agentMsg{Op: "exited"}
 				if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 					n := int(ws.Signal())
 					r.Sgnl = &n
@@ -170,62 +182,92 @@ func agentMain() int {
 	}
 }
 
+// readKeep reads the pid in the file keep and returns that process if it is alive.
+func readKeep(keep string) *procID {
+	b, err := os.ReadFile(keep)
+	if err != nil {
+		return nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 || pid == os.Getpid() {
+		return nil
+	}
+	if st, ok := procStat(pid); ok {
+		return &procID{pid, st.start}
+	}
+	return nil
+}
+
+type procInfo struct{ ppid, start int }
+
+// procStat reads a live (not zombie) process's parent and start time from /proc.
+func procStat(pid int) (procInfo, bool) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	i := strings.LastIndexByte(string(b), ')')
+	if err != nil || i < 0 {
+		return procInfo{}, false
+	}
+	f := strings.Fields(string(b[i+1:])) // field 3 (state) onwards
+	if len(f) < 20 || f[0] == "Z" {
+		return procInfo{}, false // gone, or a zombie its parent reaps
+	}
+	ppid, _ := strconv.Atoi(f[1])
+	start, _ := strconv.Atoi(f[19])
+	return procInfo{ppid, start}, true
+}
+
 // sweep kills every process in the sandbox's pid namespace except this agent, its ancestors
-// (bwrap's init, the network helper) and the process whose pid is in the file keep with its
+// (bwrap's init, the network helper) and kept (if it is still that process) with its
 // descendants. It repeats until a scan finds nothing to kill (a process may fork meanwhile).
-func sweep(keep string) {
+// It reports whether kept was spared (false if kept is nil or gone).
+func sweep(kept *procID) bool {
+	alive := false
 	for round := 0; round < 50; round++ {
-		ppid := map[int]int{}
+		procs := map[int]procInfo{}
 		ents, _ := os.ReadDir("/proc")
 		for _, e := range ents {
 			pid, err := strconv.Atoi(e.Name())
 			if err != nil {
 				continue
 			}
-			b, err := os.ReadFile("/proc/" + e.Name() + "/stat")
-			i := strings.LastIndexByte(string(b), ')')
-			if err != nil || i < 0 {
-				continue
+			if st, ok := procStat(pid); ok {
+				procs[pid] = st
 			}
-			f := strings.Fields(string(b[i+1:])) // state ppid ...
-			if len(f) < 2 || f[0] == "Z" {
-				continue // gone, or a zombie its parent reaps
-			}
-			ppid[pid], _ = strconv.Atoi(f[1])
 		}
 		spare := map[int]bool{}
-		for p := os.Getpid(); p > 0 && !spare[p]; p = ppid[p] {
+		for p := os.Getpid(); p > 0 && !spare[p]; p = procs[p].ppid {
 			spare[p] = true
 		}
-		if b, err := os.ReadFile(keep); err == nil {
-			if srv, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && srv > 1 && !spare[srv] {
-				if _, ok := ppid[srv]; ok {
-					todo := []int{srv}
-					for len(todo) > 0 {
-						p := todo[0]
-						todo = todo[1:]
-						spare[p] = true
-						for c, pp := range ppid {
-							if pp == p && !spare[c] {
-								todo = append(todo, c)
-							}
+		alive = false
+		if kept != nil {
+			if st, ok := procs[kept.pid]; ok && st.start == kept.start && !spare[kept.pid] {
+				alive = true
+				todo := []int{kept.pid}
+				for len(todo) > 0 {
+					p := todo[0]
+					todo = todo[1:]
+					spare[p] = true
+					for c, st := range procs {
+						if st.ppid == p && !spare[c] {
+							todo = append(todo, c)
 						}
 					}
 				}
 			}
 		}
 		killed := 0
-		for pid := range ppid {
+		for pid := range procs {
 			if !spare[pid] {
 				syscall.Kill(pid, syscall.SIGKILL)
 				killed++
 			}
 		}
 		if killed == 0 {
-			return
+			break
 		}
 		time.Sleep(time.Duration(round+1) * time.Millisecond)
 	}
+	return alive
 }
 
 // Session is the server's handle on a running session sandbox.
@@ -290,9 +332,12 @@ func StartSession(s Spec, log *os.File) (*Session, error) {
 func (ss *Session) Done() <-chan struct{} { return ss.done }
 
 // Result is how a session command ended: exactly one of Code, Signal set, or Err.
+// KeptGone: with RunOpts.Sweep, the Bazel server the agent spares is gone (or was never
+// found), so the sweep killed every other process; start a new sandbox for the next command.
 type Result struct {
 	Code, Signal *int
 	Err          error
+	KeptGone     bool
 }
 
 // ErrSessionGone means the session sandbox exited (or stopped answering) under a command.
@@ -300,7 +345,8 @@ var ErrSessionGone = errors.New("session sandbox exited")
 
 // RunOpts are the optional parts of a command: with Sweep (only for a sandbox with its own
 // pid namespace) every process the command leaves behind is killed when it ends, except the
-// one whose pid is in the file Keep (a path inside the sandbox) and its descendants.
+// Bazel server and its descendants: the process whose pid was in the file Keep (a path inside
+// the sandbox) when a command of this sandbox first ended with a live one there (see sweep).
 type RunOpts struct {
 	Sweep bool
 	Keep  string
@@ -367,7 +413,7 @@ func (ss *Session) Run(argv []string, dir string, stdout, stderr *os.File, o Run
 		case m.Error != "":
 			res <- Result{Err: errors.New(m.Error)}
 		default:
-			res <- Result{Code: m.Code, Signal: m.Sgnl}
+			res <- Result{Code: m.Code, Signal: m.Sgnl, KeptGone: m.Gone}
 		}
 	}()
 	return res, nil
