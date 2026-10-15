@@ -62,6 +62,17 @@ func (s *Server) sessionHost(j *job) string {
 		}
 		return sess.Host
 	}
+	// Pin an eviction to one host so fresh resource samples cannot revoke a
+	// second host's idle JVM while the first shutdown is still in progress.
+	if j.placementHost != "" {
+		if j.placementHost == api.LocalRunner && !s.cfg.HubOnly {
+			return j.placementHost
+		}
+		if rn := s.runners[j.placementHost]; rn != nil && rn == j.placementRunner && rn.slots > 0 && time.Since(rn.lastSeen) <= s.cfg.RunnerDeadAfter {
+			return j.placementHost
+		}
+		j.placementHost, j.placementRunner = "", nil
+	}
 	best := ""
 	score := -1e30
 	bestFree := false

@@ -251,6 +251,7 @@ func (s *Server) claimSessionOn(j *job, host string) bool {
 			}
 		}
 		if victim != nil {
+			j.placementHost, j.placementRunner = host, s.runners[host]
 			s.stopSession(victim, fmt.Sprintf("evicted (least recently used of %d sessions) for a new session", s.cfg.MaxSessions))
 		}
 		return false

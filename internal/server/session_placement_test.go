@@ -194,6 +194,12 @@ func TestRemoteEvictionWaitsForAcknowledgment(t *testing.T) {
 	if s.claimSessionOn(j, "r") || !old.stopping {
 		t.Fatal("did not initiate eviction")
 	}
+	other := s.register("other", api.RunnerPoll{Instance: "other", Slots: 1, SessionSupport: true, MemoryAvailable: 100 << 30}, "", time.Now())
+	if host := s.sessionHost(j); host != rn.name {
+		t.Fatalf("eviction switched to %s", host)
+	}
+	delete(s.runners, other.name)
+
 	s.register("r", api.RunnerPoll{Instance: "i", Slots: 1, Sessions: []string{"old"}}, "", time.Now())
 	if s.claimSessionOn(j, "r") {
 		t.Fatal("overlapped JVM leases")
@@ -212,7 +218,17 @@ func TestSessionBatchFetch(t *testing.T) {
 	defer hub.Close()
 	var calls atomic.Int64
 	gate := make(chan struct{})
-	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); hub.Handler().ServeHTTP(w, r) }))
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 3 {
+			close(gate)
+		}
+		select {
+		case <-gate:
+		case <-time.After(3 * time.Second):
+			t.Error("batch requests were serialized")
+		}
+		hub.Handler().ServeHTTP(w, r)
+	}))
 	defer h.Close()
 	r := &Runner{cfg: RunnerConfig{HTTP: http.DefaultClient, Hub: h.URL, Token: hub.token, DataDir: t.TempDir(), Sandbox: "none", KeepBlobs: time.Hour}}
 	if err := r.newSessionHost(); err != nil {

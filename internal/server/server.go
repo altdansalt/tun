@@ -125,6 +125,8 @@ type job struct {
 	exitedAt        time.Time       // the runner reported the command ended (.../exited)
 	exited          *api.RunnerDone // what it reported then
 	logMu           sync.Mutex      // serializes log chunk writes
+	placementHost   string          // chosen host while waiting for an eviction
+	placementRunner *runnerState
 	runnerMaxUpload int64
 	runnerMaxLog    *int64
 	bz              *api.BazelJob // a tun bazel job (kept in memory only: after a restart it has failed)
