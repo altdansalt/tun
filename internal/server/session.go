@@ -529,9 +529,11 @@ func (s *Server) bazelrc(name string, in sessionPaths, r remoteSetup) string {
 	}
 	if r.executors > 0 {
 		// Execute goes through the same socket; results come from the shared, executor-written
-		// action cache namespace. As many actions in flight as there are slots.
+		// action cache namespace. Twice as many actions in flight as there are slots, so the
+		// next action is already queued when a slot frees up (200 genrules sleeping 1s on 3
+		// slots: 0.28s overhead per action with --jobs=3, 0.04s with --jobs=6; docs/bazel.md).
 		// If the executors can't be reached, Bazel runs the action itself.
-		fmt.Fprintf(&b, "common --remote_executor=grpc://tun\ncommon --jobs=%d\ncommon --remote_local_fallback\n", r.executors)
+		fmt.Fprintf(&b, "common --remote_executor=grpc://tun\ncommon --jobs=%d\ncommon --remote_local_fallback\n", 2*r.executors)
 	}
 	return b.String()
 }

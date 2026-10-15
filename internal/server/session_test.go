@@ -90,7 +90,7 @@ func TestBazelrc(t *testing.T) {
 		t.Fatalf("read-only:\n%s", ro)
 	}
 	exec := s.bazelrc("default", in, remoteSetup{socket: "/s", executors: 12})
-	if !strings.Contains(exec, "common --remote_executor=grpc://tun\ncommon --jobs=12\ncommon --remote_local_fallback\n") {
+	if !strings.Contains(exec, "common --remote_executor=grpc://tun\ncommon --jobs=24\ncommon --remote_local_fallback\n") {
 		t.Fatalf("executors:\n%s", exec)
 	}
 	if note := s.bazelrc("default", in, remoteSetup{note: "no remote cache: why"}); !strings.Contains(note, "# no remote cache: why\n") || strings.Contains(note, "--remote") {
