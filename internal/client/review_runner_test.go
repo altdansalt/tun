@@ -104,27 +104,37 @@ func TestReviewRunnerStartedCancelRace(t *testing.T) {
 	ts := startServer(t, hubConfig(""))
 	f := &fakeRunner{ts: ts, name: "race", instance: "i1"}
 	f.poll(0)
+	// Batches of jobs raced at once: review/runners raced one at a time 10000 times (~30s
+	// with -race); with batches the old code failed within 40 rounds.
+	const batch = 8
 	bad := 0
-	for i := 0; i < 3000 && bad == 0; i++ { // review/runners had 10000 (~30s with -race); the old code failed at ~800
-		id := f.createJob()
-		if _, resp := f.poll(1); len(resp.Jobs) != 1 || resp.Jobs[0].ID != id {
+	for i := 0; i < 120 && bad == 0; i++ {
+		var ids []string
+		for range batch {
+			ids = append(ids, f.createJob())
+		}
+		if _, resp := f.poll(batch); len(resp.Jobs) != batch {
 			t.Fatalf("assign: %+v", resp)
 		}
-		var started, canceled int
+		started, canceled := make([]int, batch), make([]int, batch)
 		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); started = f.rawReq("POST", "/v1/runner/jobs/"+id+"/started", nil) }()
-		go func() { defer wg.Done(); canceled = f.rawReq("POST", "/v1/jobs/"+id+"/cancel", nil) }()
-		wg.Wait()
-		j := ts.status(id)
-		if started == 200 && j.State == api.Canceled && j.StartedAt == nil {
-			bad++
-			t.Errorf("iteration %d: /started answered 200 (cancel %d) for job %s that is %s %q, never started",
-				i, canceled, id, j.State, j.Error)
+		for k, id := range ids {
+			wg.Add(2)
+			go func() { defer wg.Done(); started[k] = f.rawReq("POST", "/v1/runner/jobs/"+id+"/started", nil) }()
+			go func() { defer wg.Done(); canceled[k] = f.rawReq("POST", "/v1/jobs/"+id+"/cancel", nil) }()
 		}
-		// Clean up: end whatever is left (the next poll's assignment then has a free slot).
-		d, _ := json.Marshal(api.RunnerDone{State: api.Exited, ExitCode: new(int)})
-		f.rawReq("POST", "/v1/runner/jobs/"+id+"/done", d)
+		wg.Wait()
+		for k, id := range ids {
+			j := ts.status(id)
+			if started[k] == 200 && j.State == api.Canceled && j.StartedAt == nil {
+				bad++
+				t.Errorf("iteration %d: /started answered 200 (cancel %d) for job %s that is %s %q, never started",
+					i, canceled[k], id, j.State, j.Error)
+			}
+			// Clean up: end whatever is left (the next poll's assignments then have free slots).
+			d, _ := json.Marshal(api.RunnerDone{State: api.Exited, ExitCode: new(int)})
+			f.rawReq("POST", "/v1/runner/jobs/"+id+"/done", d)
+		}
 	}
 }
 
