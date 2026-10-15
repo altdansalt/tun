@@ -759,3 +759,14 @@ runner service readiness/proxy checks. A redundant standalone service check
 (`20261015T140920775200-6fc650c8`) stayed queued for 558.903s before cancellation;
 the full CI covered that check. A second verbose full CI was canceled once the
 complete run passed. No shared hub or runner was restarted for these checks.
+
+## Concurrent agent success benchmark
+
+[scripts/agentbench.sh](../scripts/agentbench.sh) measures the goal above directly:
+edit-to-result wall time on the same committed repository with N independent agent
+copies, compared with `bb remote`. [Agent benchmark report](agentbench.md) records
+cold first iterations alongside repeated edits, queue waits and deployment snapshots.
+Selected workspace/server targets bound shared-host work; Gazelle is the external
+profile. This exercises warm sessions plus the existing cache, with no remote
+execution flags or milestone deviation. Healthz is the authority for the deployment
+actually measured; missing load fields are unknown, never zero.

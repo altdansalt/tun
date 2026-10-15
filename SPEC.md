@@ -711,3 +711,11 @@ Runner session engines trim their per-client repository caches with
 client. Blob fetches use the runner's trusted CAS path because the hub already checked
 uploader ownership at admission. Session cache credentials select the authenticated
 client's namespace, never a caller-supplied identity header.
+
+## Agent benchmark tooling
+
+`scripts/agentbench.sh` simulates concurrent agents in isolated git clones, adds compiled
+regression-test cases, and records edit-to-result wall time for `tun bazel test` and
+`bb remote test`. JSONL includes exit codes, summary lines, job queue/run durations and
+healthz snapshots; raw command logs and a percentile table accompany it. See
+[docs/agentbench.md](docs/agentbench.md). This adds no service API or CLI behavior.

@@ -123,6 +123,7 @@ def main():
     nonce = uuid.uuid4().hex[:12]
     lock = threading.Lock()
     rows = []
+    exhausted = threading.Event()
     deadline = time.monotonic() + a.budget
     def emit(row):
         with lock:
@@ -144,22 +145,24 @@ def main():
             try:
                 for iteration in range(a.iterations):
                     if time.monotonic() >= deadline:
+                        exhausted.set()
                         emit(dict(type='budget_exhausted', system=system, n=n, agent=index, iteration=iteration))
                         break
                     git(repo, 'reset', '--hard', commit)
                     before = api.get('/v1/healthz') if api else None
+                    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
                     start = time.monotonic()
-                    path = edit(repo, a.profile, iteration, nonce)
+                    path = edit(repo, a.profile, iteration, '%s-n%d-a%d' % (nonce, n, index))
                     command = (['tun', 'bazel', '--session', session, '--timeout', str(a.timeout) + 's']
                                if system == 'tun' else ['bb', 'remote', '--remote_runner=grpcs://remote.buildbuddy.dev', '--timeout=' + str(a.timeout) + 's'])
                     command += ['test', *targets, '--jobs=2']
                     log = a.out / ('%s-n%d-a%d-i%d.log' % (system, n, index, iteration))
-                    code, command_wall, expired = invoke(command, repo, a.timeout, log)
+                    code, command_wall, expired = invoke(command, repo, min(a.timeout, max(1, deadline - time.monotonic())), log)
                     wall = time.monotonic() - start
                     output = log.read_text(errors='replace')
                     ids = re.findall(r'tun: job ([0-9A-Za-z-]+)', output)
                     job = api.get('/v1/jobs/' + ids[-1]) if api and ids else None
-                    row = dict(type='iteration', system=system, n=n, agent=index,
+                    row = dict(type='iteration', system=system, n=n, agent=index, started_at=started_at,
                                iteration=iteration, phase='first' if iteration == 0 else 'repeat',
                                edit=path, wall_sec=wall, command_wall_sec=command_wall,
                                exit_code=code, timed_out=expired, command=command,
@@ -183,7 +186,7 @@ def main():
     table = summary(rows)
     (a.out / 'summary.md').write_text(table + '\n')
     print(table)
-    return int(any(r['exit_code'] for r in rows))
+    return int(exhausted.is_set() or any(r['exit_code'] for r in rows))
 
 
 if __name__ == '__main__':

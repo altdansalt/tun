@@ -75,3 +75,11 @@ SIGTERM draining, and required systemd KillMode/TimeoutStopSec overrides.
   tool dirs, repository cache entries), never while a job/session may use them (sharedcache.go).
 - Uploaded content (workspace blobs, tun bazel CAS) is per uploader; other clients' argv,
   script and workspace are hidden in job views. Remaining isolation gaps: SPEC.md, Known gaps.
+
+## Agent edit benchmark
+
+`scripts/agentbench.sh --out /tmp/agentbench --systems tun --agents 1 3 --iterations 5`
+measures concurrent edit-to-test latency on the shared deployment (no local builds).
+See [docs/agentbench.md](docs/agentbench.md) for BuildBuddy, external-repo profiles,
+limits, interpretation and the measured ledger. Test the harness remotely with
+`tun run -- python3 scripts/agentbench_test.py`.
