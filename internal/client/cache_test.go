@@ -86,6 +86,9 @@ func TestBazelSessionRemoteCache(t *testing.T) {
 		!strings.Contains(r.stderr, "remote cache: tun's, through /tun/sock/cache.sock") {
 		t.Fatalf("session: %+v", r)
 	}
+	if !ts.health().RemoteCache {
+		t.Error("healthz: remote_cache false")
+	}
 	sess := ts.sessions()[0]
 	dial := func() (net.Conn, error) {
 		// The data dir's path may be too long for a unix socket address: go through a descriptor.

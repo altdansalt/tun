@@ -345,7 +345,8 @@ func (s *Server) Handler() http.Handler {
 		slots, running, runners := s.runnerInfo()
 		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, NetworkIsolation: s.cfg.PrivateNet, MaxJobs: s.cfg.MaxJobs + slots,
 			MaxServices: s.cfg.MaxServices, Running: s.running + running, Queued: len(s.queue), Services: s.svc.running,
-			LocalSlots: s.cfg.MaxJobs, Runners: runners, Sessions: len(s.sessions), MaxSessions: s.cfg.MaxSessions}
+			LocalSlots: s.cfg.MaxJobs, Runners: runners, Sessions: len(s.sessions), MaxSessions: s.cfg.MaxSessions,
+			RemoteCache: s.cache != nil}
 		s.mu.Unlock()
 		if h.Disk = diskInfo(s.cfg.DataDir, s.cfg.MinFree); h.Disk != nil {
 			h.Disk.ReclaimedWorkDirs, h.Disk.ReclaimedSessions = s.gc.reclaimedWork.Load(), s.gc.reclaimedSessions.Load()

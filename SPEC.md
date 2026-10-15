@@ -510,7 +510,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, disk}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, remote_cache, disk}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 - `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
