@@ -33,9 +33,7 @@ func (r *Runner) newSessionHost() error {
 		s.Close()
 		return err
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.Protocols = new(http.Protocols)
-	tr.Protocols.SetHTTP1(true)
+	tr := http1Transport(http.DefaultTransport.(*http.Transport))
 	// HTTP/1 means one connection per concurrent RPC; keep a Bazel-sized pool warm so cache
 	// bursts don't pay a TLS handshake through the proxy per call.
 	tr.MaxIdleConnsPerHost = 64
@@ -47,15 +45,7 @@ func (r *Runner) newSessionHost() error {
 			base = t
 		}
 	}
-	st := base.Clone()
-	st.Protocols = new(http.Protocols)
-	st.Protocols.SetHTTP1(true)
-	if st.TLSClientConfig != nil {
-		st.TLSClientConfig = st.TLSClientConfig.Clone()
-	} else {
-		st.TLSClientConfig = new(tls.Config)
-	}
-	st.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	st := http1Transport(base)
 	r.serviceTransport = st
 	r.serviceHTTP = &http.Client{Transport: st}
 
@@ -328,4 +318,21 @@ func (r *Runner) cancelSessionJob(j *runnerJob, state string) {
 	} else {
 		j.sessionJob.cancelReq = true
 	}
+}
+
+// http1Transport clones base to speak only HTTP/1.1. Setting Protocols is not enough: a
+// transport that has already been used carries "h2" in its TLS NextProtos, so the clone would
+// still offer h2 by ALPN, and an h2-capable server (the exe.dev proxy) would answer HTTP/1
+// requests with HTTP/2 frames.
+func http1Transport(base *http.Transport) *http.Transport {
+	t := base.Clone()
+	t.Protocols = new(http.Protocols)
+	t.Protocols.SetHTTP1(true)
+	if t.TLSClientConfig != nil {
+		t.TLSClientConfig = t.TLSClientConfig.Clone()
+	} else {
+		t.TLSClientConfig = new(tls.Config)
+	}
+	t.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	return t
 }

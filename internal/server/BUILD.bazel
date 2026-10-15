@@ -39,6 +39,7 @@ go_test(
     name = "server_test",
     srcs = [
         "disk_test.go",
+        "http1transport_test.go",
         "identity_test.go",
         "main_test.go",
         "owners_test.go",
