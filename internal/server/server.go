@@ -3,8 +3,8 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,6 +42,7 @@ type Config struct {
 	GCInterval                    time.Duration // 0: derived from the Keep* durations
 	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
 	MaxLog                        int64         // max bytes kept per stdout/stderr; 0: unlimited
+	MaxSharedCache                int64         // disposable tool cache budget; zero disables size cap
 	MinFree                       MinFree       // free space to keep on the data dir's filesystem (see disk.go)
 
 	// Runners (see hub.go). HubOnly: no local job slots (tun serve --local-slots 0), so
@@ -203,7 +204,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	if cfg.Cache != nil {
-		s.cache = &reapi.Handler{Store: cfg.Cache, Token: s.token, AllowActionWrites: !cfg.CacheReadOnly, Client: cacheClient}
+		s.cache = &reapi.Handler{Store: cfg.Cache, Token: s.token, AllowActionWrites: !cfg.CacheReadOnly, Client: s.cacheIdentity, Authenticate: s.authenticate}
 	}
 	if err := s.recover(); err != nil {
 		return nil, err
@@ -390,13 +391,14 @@ func (s *Server) Handler() http.Handler {
 	})
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			// X-Tun-Token first: proxies in front of tun (e.g. exe.dev's) may consume Authorization.
-			got, ok := r.Header.Get("X-Tun-Token"), true
-			if got == "" {
-				got, ok = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			name, admin, ok := s.identity(r)
+			if !ok {
+				writeErr(w, 401, "missing or wrong bearer token")
+				return
 			}
-			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-				writeErr(w, 401, "missing or wrong bearer token (the server's token is in its $DATA/token)")
+			r = r.WithContext(context.WithValue(r.Context(), identityKey{}, principal{name, admin}))
+			if !admin && (strings.HasPrefix(r.URL.Path, "/v1/runner/") || (r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/blobs/"))) {
+				writeErr(w, 403, "admin token required")
 				return
 			}
 			h(w, r)
@@ -482,6 +484,12 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) *job {
 	if j == nil {
 		writeErr(w, 404, s.noSuchJob(r.PathValue("id")))
 	}
+	if j != nil {
+		if p, ok := r.Context().Value(identityKey{}).(principal); ok && !p.admin && p.name != j.Client && !(r.Method == "GET" && r.URL.Path == "/v1/jobs/"+j.ID) {
+			writeErr(w, 403, "job belongs to another client")
+			return nil
+		}
+	}
 	return j
 }
 
@@ -529,6 +537,9 @@ func secs(d time.Duration) float64 {
 // hostname), else the remote IP. Without the proxy in front, both headers are only as
 // trustworthy as the token holder: this is for visibility, not access control.
 func clientOf(r *http.Request) string {
+	if p, ok := r.Context().Value(identityKey{}).(principal); ok {
+		return p.name
+	}
 	for _, h := range []string{"X-Exedev-Source-Vm", "X-Tun-Client"} {
 		if v := cleanName(r.Header.Get(h)); v != "" {
 			return v

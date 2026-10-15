@@ -4,6 +4,7 @@ go_library(
     name = "server",
     srcs = [
         "disk.go",
+        "identity.go",
         "exec.go",
         "files.go",
         "gc.go",
@@ -32,6 +33,7 @@ go_test(
     name = "server_test",
     srcs = [
         "disk_test.go",
+        "identity_test.go",
         "main_test.go",
         "review2_test.go",
         "session_test.go",
@@ -39,6 +41,7 @@ go_test(
     embed = [":server"],
     deps = [
         "//internal/api",
+        "//internal/reapi",
         "//internal/sandbox",
         "//internal/workspace",
     ],

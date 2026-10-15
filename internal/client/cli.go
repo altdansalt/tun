@@ -44,6 +44,8 @@ usage:
                                      recent jobs as JSON lines, newest first
   tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
   tun runners                        live runners of the server as JSON lines
+  tun token [--data DIR] new NAME    issue a client token on the server host
+                                    install in ~/.config/tun/token; shared token is admin (no isolation)
   tun serve [flags]                  run the server (tun serve -h; --ephemeral for testing)
   tun runner --hub URL [flags]       run jobs for a server from another machine (tun runner -h)
   tun help                           this text; 'tun <cmd> -h' for per-command flags

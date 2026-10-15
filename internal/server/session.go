@@ -306,6 +306,9 @@ func (s *Server) expireSessions(now time.Time) {
 // listSessions serves GET /v1/sessions?client=NAME|mine=1, most recently used first.
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	client := r.URL.Query().Get("client")
+	if p, ok := r.Context().Value(identityKey{}).(principal); ok && !p.admin {
+		client = p.name
+	}
 	if v := r.URL.Query().Get("mine"); v == "1" || v == "true" {
 		client = clientOf(r)
 	}
