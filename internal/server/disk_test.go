@@ -137,6 +137,10 @@ func TestRunnerReclaimBlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.lock.Close()
+	defer r.Kill()
+	// This test replaces the process-wide disk sampler below. Stop the inner
+	// engine's background retention worker before installing that fixture.
+	r.sessions.Close()
 	blobs := filepath.Join(data, "blobs")
 	for i, name := range []string{"old", "mid", "new"} {
 		p := filepath.Join(blobs, name)
