@@ -155,7 +155,7 @@ func (ts *testServer) detach(cwd string, args ...string) string {
 func cmdStderr(s string) string {
 	var out strings.Builder
 	for _, line := range strings.SplitAfter(s, "\n") {
-		if !strings.HasPrefix(line, "tun: job ") && !strings.HasPrefix(line, "tun: workspace ") && !strings.HasPrefix(line, "tun: uploaded ") {
+		if !strings.HasPrefix(line, "tun: job ") && !strings.HasPrefix(line, "tun: workspace ") && !strings.HasPrefix(line, "tun: uploaded ") && !strings.HasPrefix(line, "tun: running on ") {
 			out.WriteString(line)
 		}
 	}
@@ -171,7 +171,7 @@ func TestExitCodes(t *testing.T) {
 		msg  string
 	}{
 		{[]string{"run", "-c", "exit 3"}, 3, ""},
-		{[]string{"run", "--", "true"}, 0, ""},
+		{[]string{"run", "--", "true"}, 0, "\ntun: running on hub\n"},
 		{[]string{"run", "--", "false"}, 1, ""},
 		{[]string{"run", "--", "sh", "-c", "kill -9 $$"}, 137, ""},
 		{[]string{"run", "--", "/nonexistent/cmd"}, 125, "tun: job"},
