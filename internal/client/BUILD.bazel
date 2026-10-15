@@ -135,7 +135,8 @@ go_library(
         [],
     ),
     (
-        # A real nested Bazel: the slowest test (a cold Bazel server and analysis).
+        # Real nested Bazel (cold Bazel servers and analysis; the remote cache across runner
+        # hosts): the slowest tests.
         "bazel_real_test",
         ["bazel_real_test.go"],
         "large",
