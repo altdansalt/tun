@@ -22,7 +22,6 @@ sh_test(name="timeout", srcs=["timeout.sh"], timeout="short")
 BUILD
 printf '#!/bin/sh\nexit 0\n' > pass.sh
 printf '#!/bin/sh\necho deliberate_failure >&2\nexit 1\n' > fail.sh
-printf '#!/bin/sh\n[ "${TEST_RUN_NUMBER:-1}" -gt 1 ]\n' > flaky.sh
 # Use a job-local marker and standalone execution for deterministic retry coverage.
 cat > flaky.sh <<'SH'
 #!/bin/sh

@@ -184,10 +184,10 @@ func (p *Parser) event(b []byte) error {
 			ShardCount             int
 		}
 		Action *struct {
-			Success                     bool
-			Label, FailureDetailMessage string
-			Stderr, Stdout              rawFile
-			FailureDetail               struct{ Message string }
+			Success        bool
+			Label          string
+			Stderr, Stdout rawFile
+			FailureDetail  struct{ Message string }
 		}
 	}
 	if err := json.Unmarshal(b, &e); err != nil {
@@ -259,6 +259,10 @@ func (p *Parser) event(b []byte) error {
 }
 func (p *Parser) Snapshot() Summary {
 	s := p.s
+	if s.ExitCode != nil {
+		c := *s.ExitCode
+		s.ExitCode = &c
+	}
 	s.FailedActions = append([]Action(nil), s.FailedActions...)
 	for i := range s.FailedActions {
 		s.FailedActions[i].Logs = append([]File(nil), s.FailedActions[i].Logs...)

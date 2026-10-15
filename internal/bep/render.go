@@ -36,6 +36,15 @@ func (s Summary) Line() string {
 		detail = fmt.Sprintf("%d of %d tests failed", len(labels), len(s.Tests))
 	} else if len(s.Tests) > 0 {
 		detail = fmt.Sprintf("%d tests passed", len(s.Tests))
+		flaky := 0
+		for _, t := range s.Tests {
+			if t.Status == "FLAKY" {
+				flaky++
+			}
+		}
+		if flaky > 0 {
+			detail += fmt.Sprintf(" (%d flaky)", flaky)
+		}
 	} else {
 		for _, t := range s.Targets {
 			if !t.Success {

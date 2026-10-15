@@ -148,3 +148,16 @@ func TestNamedSets(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestSnapshotIsolation(t *testing.T) {
+	p := New("test")
+	p.Write([]byte("{\"id\":{\"testResult\":{\"label\":\"//:x\",\"shard\":1}},\"testResult\":{\"status\":\"PASSED\",\"testActionOutput\":[{\"name\":\"test.log\",\"uri\":\"file:///tmp/test.log\"}]}}\n"))
+	p.SetResult(0, time.Second)
+	s := p.Snapshot()
+	*s.ExitCode = 99
+	s.Tests[0].Attempts[0].Logs[0].Path = "changed"
+	again := p.Snapshot()
+	if *again.ExitCode != 0 || again.Tests[0].Attempts[0].Logs[0].Path != "/tmp/test.log" {
+		t.Fatal(again)
+	}
+}
