@@ -23,6 +23,20 @@ class BenchmarkTest(unittest.TestCase):
         rows = [dict(system='tun', n=3, wall_sec=i, exit_code=int(i == 10)) for i in range(1, 11)]
         self.assertIn('| tun | 3 | 10 | 1 | 5.000 | 9.000 | 10.000 | 55.000 |', b.summary(rows))
 
+    def test_one_line_compiled_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            file = repo / 'internal/workspace/sync_test.go'
+            file.parent.mkdir(parents=True)
+            original = '\t\t{"dotdot", []api.ManifestEntry{{Path: "../x"}}, ".."},\n'
+            file.write_text(original)
+            with patch.object(b.subprocess, 'run'):
+                self.assertEqual(b.one_line_edit(repo, 2, 'nonce'), 'internal/workspace/sync_test.go')
+            lines = file.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn('Path: "../agentbench-nonce-2"', lines[0])
+            self.assertEqual(lines[1], original.rstrip('\n'))
+
     def test_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, wall, expired = b.invoke(['python3', '-c', 'import time; time.sleep(60)'], tmp, .1, Path(tmp) / 'log')
@@ -82,6 +96,11 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(len({(root / 'out' / r['log']).read_text().splitlines()[0] for r in rows if r['edit']}), 9)
                 self.assertTrue(all(r['started_at'] for r in rows))
                 self.assertEqual(len({r['job']['id'] for r in rows}), 1)
+                bb = bin_dir / 'bb'
+                bb.write_text('#!/bin/sh\nbranch=$(git symbolic-ref --short HEAD) || exit 91\ntest "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/$branch)" || exit 92\n')
+                bb.chmod(0o755)
+                with patch.dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH']):
+                    subprocess.run(['python3', str(Path(b.__file__)), '--repo', str(repo), '--systems', 'bb', '--agents', '1', '--iterations', '1', '--out', str(root / 'bb-out')], check=True)
                 b.git(repo, 'checkout', '--detach', 'HEAD')
                 rejected = subprocess.run(['python3', str(Path(b.__file__)), '--repo', str(repo), '--systems', 'bb', '--out', str(root / 'rejected')], capture_output=True, text=True)
                 self.assertEqual(rejected.returncode, 2)

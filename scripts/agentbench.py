@@ -45,6 +45,21 @@ def edit(repo, profile, sequence, nonce):
     return path
 
 
+def one_line_edit(repo, sequence, nonce):
+    """Add one executable path-traversal case to the existing manifest test table."""
+    path = 'internal/workspace/sync_test.go'
+    file = repo / path
+    source = file.read_text()
+    marker = '\t\t{"dotdot", []api.ManifestEntry'
+    if source.count(marker) != 1:
+        raise ValueError('one-line edit requires the tun TestCheckManifest table')
+    value = 'agentbench-' + nonce + '-' + str(sequence)
+    row = '\t\t{"%s", []api.ManifestEntry{{Path: "../%s", Type: api.EntryFile, Sha: sha}}, ".."},\n' % (value, value)
+    file.write_text(source.replace(marker, row + marker))
+    subprocess.run(['gofmt', '-w', str(file)], check=True)
+    return path
+
+
 class API:
     def __init__(self):
         self.url = os.environ.get('TUN_URL', 'http://127.0.0.1:7070').rstrip('/')
@@ -106,6 +121,7 @@ def main():
     p.add_argument('--systems', nargs='+', choices=['tun', 'bb'], default=['tun', 'bb'])
     p.add_argument('--agents', nargs='+', type=int, default=[1, 3])
     p.add_argument('--iterations', type=int, default=5)
+    p.add_argument('--one-line', action='store_true', help='tun profile: add one manifest traversal table case per edit')
     p.add_argument('--baselines', action='store_true', help='prepend cold-session and unchanged warm commands before edits')
     p.add_argument('--timeout', type=int, default=480, help='seconds per command')
     p.add_argument('--budget', type=int, default=1800, help='total elapsed admission budget, seconds')
@@ -114,12 +130,15 @@ def main():
     a = p.parse_args()
     if min(a.agents + [a.iterations, a.timeout, a.budget]) < 1:
         p.error('counts and limits must be positive')
+    if a.one_line and a.profile != 'tun':
+        p.error('--one-line requires --profile tun')
     a.repo = a.repo.resolve()
     if 'bb' in a.systems:
         branch = subprocess.run(['git', '-C', str(a.repo), 'symbolic-ref', '--quiet', 'HEAD'], capture_output=True)
         if branch.returncode:
             p.error('bb remote requires a named source branch; check out a pushed branch before benchmarking')
     commit = git(a.repo, 'rev-parse', 'HEAD')
+    source_branch = git(a.repo, 'symbolic-ref', '--short', 'HEAD') if 'bb' in a.systems else None
     remote = git(a.repo, 'remote', 'get-url', 'public' if a.profile == 'tun' else 'origin')
     targets = a.targets or (['//internal/workspace/...', '//internal/server/...'] if a.profile == 'tun' else ['//v2/label:label_test'])
     a.out.mkdir(parents=True, exist_ok=False)
@@ -138,12 +157,18 @@ def main():
               targets=targets, agents=a.agents, iterations=a.iterations, nonce=nonce,
               timeout_sec=a.timeout, budget_sec=a.budget,
               identity='VM token shared by all agents; distinct session names',
+              one_line=a.one_line,
               started=datetime.datetime.now(datetime.timezone.utc).isoformat()))
     def agent(system, n, index):
         with tempfile.TemporaryDirectory(prefix='agentbench-') as tmp:
             repo = Path(tmp) / 'repo'
             subprocess.run(['git', 'clone', '-q', '--shared', str(a.repo), str(repo)], check=True)
-            git(repo, 'checkout', '--detach', commit)
+            if source_branch:
+                git(repo, 'checkout', '-B', source_branch, commit)
+                git(repo, 'update-ref', 'refs/remotes/origin/' + source_branch, commit)
+                git(repo, 'branch', '--set-upstream-to=origin/' + source_branch, source_branch)
+            else:
+                git(repo, 'checkout', '--detach', commit)
             git(repo, 'remote', 'set-url', 'origin', remote)
             git(repo, 'config', 'buildbuddy.remote-bazel-remote-name', 'origin')
             session = 'ab-%s-%d-%d' % (nonce, n, index)
@@ -157,7 +182,10 @@ def main():
                     before = api.get('/v1/healthz') if api else None
                     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
                     start = time.monotonic()
-                    path = edit(repo, a.profile, iteration, '%s-n%d-a%d' % (nonce, n, index)) if iteration >= 0 else None
+                    path = None
+                    if iteration >= 0:
+                        edit_nonce = '%s-n%d-a%d' % (nonce, n, index)
+                        path = one_line_edit(repo, iteration, edit_nonce) if a.one_line else edit(repo, a.profile, iteration, edit_nonce)
                     command = (['tun', 'bazel', '--session', session, '--timeout', str(a.timeout) + 's']
                                if system == 'tun' else ['bb', 'remote', '--remote_runner=grpcs://remote.buildbuddy.dev', '--timeout=' + str(a.timeout) + 's'])
                     if system == 'tun' and iteration == -2:
