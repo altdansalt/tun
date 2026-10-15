@@ -34,9 +34,10 @@ tun runner --hub "$(cat "$tmp/url")" --name cache-proxy --slots 1 --data "$tmp/r
 runner_pid=$!
 for ((i=0;i<100;i++)); do [ "$(tun runners | wc -l)" -eq 1 ] && break; sleep .1; done
 step() {
- local name=$1; shift
+ local name=$1 start=$EPOCHREALTIME; shift
  echo "=== $name"
  tun bazel --session cache-proxy --cold --json test //internal/workspace:workspace_test "$@"
+ awk -v name="$name" -v start="$start" -v end="$EPOCHREALTIME" 'BEGIN {printf "%s client_wall_sec=%.3f\n",name,end-start}'
 }
 step seed
 step warm-remote

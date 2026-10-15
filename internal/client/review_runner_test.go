@@ -101,7 +101,11 @@ func TestReviewRunnerDelayedPollOldInstance(t *testing.T) {
 // before [started] ... the call is a 410, so the runner never starts it").
 func TestReviewRunnerStartedCancelRace(t *testing.T) {
 	t.Parallel()
-	ts := startServer(t, hubConfig(""))
+	cfg := hubConfig("")
+	// This fake runner polls only between batches, not on a heartbeat.
+	// Loaded race builds can spend over a second submitting/canceling a batch.
+	cfg.RunnerDeadAfter = time.Minute
+	ts := startServer(t, cfg)
 	f := &fakeRunner{ts: ts, name: "race", instance: "i1"}
 	f.poll(0)
 	// Batches of jobs raced at once: review/runners raced one at a time 10000 times (~30s
