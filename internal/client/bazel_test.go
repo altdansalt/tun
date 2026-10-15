@@ -499,6 +499,8 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	}
 	a := start("", "sleep", "30")
 	ts.waitFor(a, func(j api.Job) bool { return j.State == api.Running })
+	// Past the fake server's start (canceled before it wrote its pid file, b would start anew).
+	eventually(t, "a sleeping", func() bool { return strings.Contains(ts.tun("", "logs", a).stdout, "cmd=sleep") })
 	b := start("", "build") // same session: waits for a
 	other := start("other", "build")
 	if j := ts.waitDone(other); j.State != api.Exited { // another session runs meanwhile
