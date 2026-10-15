@@ -824,14 +824,26 @@ link, test) went from 10.9s locally to 37.7-55s remotely. (a) includes the Go SD
 into the client's repository cache. Bazel server CPU during (a): 227-457s; during remote
 (d)/(e): 22-30s/160-218s.
 
-**What this means.** Remote execution only pays off once executors add CPUs the session's host
-doesn't have, and per-action overhead must drop from seconds to tens of milliseconds (the
-genrule overhead) for edit loops: reuse exec roots between actions (only the changed inputs
-copied), bind or link inputs instead of copying them, and download fewer outputs (test
-binaries are top-level outputs, so Bazel fetches each relinked one). Until then an agent
-can get local execution per command with `--remote_executor=`, and an operator for every
-session with `tun serve --session-remote-execution=false` (sessions keep the remote cache and
-take a job slot again). Not done here.
+**After the size memo** (commit "Tree cache: remember the size of every directory"):
+`scripts/bench-rbe.sh edit` on tun-r6, job 20261015T143822060991-ba62fc50: (a) new session
+911.8s; (d1) first one-line change, remote: 49.3s (9 remote actions; new trees are copied on
+first sight and cached on the second); **(d2) second one-line change, remote: 11.5s** (6
+remote actions, critical path 9.6s); (g) a third change, local: 22.6s (6 linux-sandbox; this
+step also re-analyzed: 97 remote cache hits). The executor log of that run shows the
+remaining input phases: 2-5s even with 0 files copied and 3-4 cached trees bound (CPU-starved
+next to 3 running actions on 2 CPUs: reading and verifying a few hundred Directory messages),
+3.8s for a link action that copies 155MB of archives, 7.8s for the stdlib build's 5515 files.
+
+**What this means.** With warm executor caches a one-line change can be faster remotely
+(d2: 11.5s vs 22.6s), but the first edits after a new session and every full rebuild are
+slower while the executors share the session's host: remote execution pays off once
+executors add CPUs the session's host doesn't have, and the per-action input phase (seconds
+for Go actions) must shrink further: reuse exec roots between actions (copy only changed
+inputs), bind or link more inputs instead of copying, verify Directory messages once, and
+download fewer outputs (test binaries are top-level outputs, so Bazel fetches each relinked
+one). Not done here. An agent gets local execution per command with `--remote_executor=`,
+an operator for every session with `tun serve --session-remote-execution=false` (sessions
+keep the remote cache and take a job slot again).
 
 ### Go actions: input materialization and the tree cache
 
