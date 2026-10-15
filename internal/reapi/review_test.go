@@ -82,19 +82,21 @@ func TestEvictionFailureContinues(t *testing.T) {
 func TestStreamDeadlinesAndBearer(t *testing.T) {
 	for _, tc := range []struct {
 		name, timeout, token string
-		pause                time.Duration
+		pause, idle          time.Duration
 		chunks               int
 		want                 string
 	}{
-		{"bearer", "", "secret", 0, 1, "0"},
-		{"wrong bearer", "", "wrong", 0, 1, "16"},
-		{"client expires", "20m", "secret", 60 * time.Millisecond, 2, "4"},
-		{"idle expires", "", "secret", 180 * time.Millisecond, 2, "4"},
-		{"active beyond idle", "1S", "secret", 30 * time.Millisecond, 8, "0"},
+		{"bearer", "", "secret", 0, 100 * time.Millisecond, 1, "0"},
+		{"wrong bearer", "", "wrong", 0, 100 * time.Millisecond, 1, "16"},
+		{"client expires", "20m", "secret", 60 * time.Millisecond, 100 * time.Millisecond, 2, "4"},
+		{"idle expires", "", "secret", 180 * time.Millisecond, 100 * time.Millisecond, 2, "4"},
+		// Pauses well under the idle limit (a loaded 2-CPU host stretched 30ms of a 100ms limit
+		// past it), total time well over it.
+		{"active beyond idle", "10S", "secret", 100 * time.Millisecond, 600 * time.Millisecond, 10, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, addr, _ := testServer(t)
-			h.idleTimeout = 100 * time.Millisecond
+			h.idleTimeout = tc.idle
 			data := bytes.Repeat([]byte("x"), tc.chunks)
 			d := digest(data)
 			name := "uploads/deadline/blobs/" + string(get(d, 1).b) + fmt.Sprintf("/%d", len(data))

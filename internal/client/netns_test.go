@@ -72,7 +72,8 @@ func TestNetIsolation(t *testing.T) {
 		if r.code != 0 || !strings.Contains(r.stdout, c.want) {
 			t.Errorf("%s: %+v", name, r)
 		}
-		if name == "proxy env" && !strings.HasPrefix(r.stdout, "http://127.0.0.1:") {
+		// The same address in every job (Bazel's test cache keys on --test_env=HTTPS_PROXY).
+		if name == "proxy env" && !strings.HasPrefix(r.stdout, "http://127.0.0.1:3128 http://127.0.0.1:3128 ") {
 			t.Errorf("%s: %q", name, r.stdout)
 		}
 	}

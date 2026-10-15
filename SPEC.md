@@ -155,7 +155,9 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
   - bwrap's command is a helper: the server's own executable (bound read-only into the
     sandbox from an fd opened at startup, so a replaced binary on disk doesn't matter),
     re-executed as `tun __tun-netns-helper <argv...>`. It reads the job env from a pipe (so
-    `LD_PRELOAD` etc. don't act on it), listens on `127.0.0.1:<random>` in the namespace, sets
+    `LD_PRELOAD` etc. don't act on it), listens on `127.0.0.1:3128` in the namespace (fixed: every job has its own namespace, and
+    the same proxy variables in every job keep env-keyed caches such as Bazel's test results
+    valid across jobs), sets
     `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy` to it and `NO_PROXY`/`no_proxy` to
     `localhost,127.0.0.1,::1` unless the job env has them, runs argv as its child (same
     process group, stdio, cwd), and exits with the child's status (dying of the same signal).

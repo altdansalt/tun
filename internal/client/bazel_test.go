@@ -557,9 +557,7 @@ func TestBazelReal(t *testing.T) {
 	if sandbox.NetUsable() == nil {
 		cfg.PrivateNet = true
 	}
-	if x := os.Getenv("XDG_CACHE_HOME"); x != "" { // in a tun job: its shared bazelisk downloads
-		cfg.BazeliskSeed = filepath.Join(x, "bazelisk")
-	}
+	cfg.BazeliskSeed = bazeliskSeed(t)
 	ts := bazelServer(t, cfg, true)
 	ws := bazelWS(t, map[string]string{
 		"MODULE.bazel":  "module(name = \"t\")\n",

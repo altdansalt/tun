@@ -13,3 +13,20 @@ go_sdk.download(
 
 # Tests run go in jobs (internal/client) and in the e2e suites: they use this SDK too.
 use_repo(go_sdk, "go_sdk")
+
+# The Bazel binary itself, for tests that run Bazel nested in a Bazel test (internal/reapi,
+# internal/client's TestBazelReal, scripts:e2e_test). They must not depend on bazelisk finding a
+# download cache or the network inside the test sandbox; tun hosts are linux-x86_64. Keep the
+# version in step with .bazelversion of the test workspaces (9.3.0).
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "bazel_binary",
+    downloaded_file_path = "bazel-9.3.0-linux-x86_64",
+    executable = True,
+    sha256 = "d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8",
+    urls = [
+        "https://releases.bazel.build/9.3.0/release/bazel-9.3.0-linux-x86_64",
+        "https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64",
+    ],
+)

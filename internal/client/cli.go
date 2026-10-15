@@ -97,8 +97,8 @@ the job), GOCACHE/GOMODCACHE/XDG_CACHE_HOME (caches shared across jobs), TUN_JOB
 
 Network: on a server with network isolation (healthz "network_isolation": true) each job has
 its own network namespace with only loopback. Outbound HTTP(S) goes through a proxy the server
-runs (HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy and NO_PROXY=localhost,127.0.0.1,::1 are
-set unless given with -e), which go, git, curl, pip and npm honor; raw TCP/UDP (ssh, DNS
+runs (HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy=http://127.0.0.1:3128, the same in every
+job, and NO_PROXY=localhost,127.0.0.1,::1 are set unless given with -e), which go, git, curl, pip and npm honor; raw TCP/UDP (ssh, DNS
 lookups) can't leave the job. Ports a job listens on are reachable only inside the job (and,
 for services, through the server's proxy). Without isolation jobs share the server's network.
 

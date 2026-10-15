@@ -18,5 +18,10 @@ go_test(
         "reapi_test.go",
         "review_test.go",
     ],
+    # Real Bazel nested in this test (TestBazelCache): the pinned binary, not bazelisk.
+    data = ["@bazel_binary//file"],
     embed = [":reapi"],
+    env = {"TUN_TEST_BAZEL": "$(rlocationpath @bazel_binary//file)"},
+    # Nested real Bazel fetches modules from the Bazel Central Registry (via the proxy, .bazelrc).
+    tags = ["requires-network"],
 )

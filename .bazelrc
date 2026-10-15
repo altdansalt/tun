@@ -3,3 +3,10 @@ test --test_output=errors
 # Race detector, like scripts/ci.sh's go test -race: bazel test --config=race //...
 # (needs cgo, so a C compiler on the host: rules_cc's autodetected toolchain).
 build:race --@rules_go//go/config:race
+# Tests that run real Bazel nested in a test (//internal/client:client_test's TestBazelReal,
+# //internal/reapi:reapi_test, //scripts:e2e_test) resolve its modules from the Bazel Central
+# Registry. In a tun job or tun bazel session the network is tun's egress proxy, so pass the proxy
+# variables on (unset ones are left out). tun's proxy address is the same in every job
+# (127.0.0.1:3128), so cached test results stay valid across jobs and sessions.
+test --test_env=HTTP_PROXY --test_env=HTTPS_PROXY --test_env=NO_PROXY
+test --test_env=http_proxy --test_env=https_proxy --test_env=no_proxy

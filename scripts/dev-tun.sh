@@ -29,8 +29,18 @@ mkfifo "$tmp/env" "$tmp/stdin"
 exec 3<>"$tmp/stdin"
 # DEV_TUN_SERVE_ARGS: extra tun serve flags (word-split), e.g. '--local-slots 0'.
 seed=()
-# In a tun job: seed tun bazel's per-client bazelisk homes from the job's (shared) download cache.
-if [ -n "${XDG_CACHE_HOME:-}" ] && [ -d "$XDG_CACHE_HOME/bazelisk/downloads" ]; then
+if [ -n "${DEV_TUN_BAZEL:-}" ]; then
+  # DEV_TUN_BAZEL: a Bazel binary named bazel-<version>-<os>-<arch> (Bazel's e2e tests: no network
+  # or download cache inside the test sandbox). Seed tun bazel's bazelisk homes with it, laid out
+  # like bazelisk's own cache.
+  sum=$(sha256sum "$DEV_TUN_BAZEL" | cut -d' ' -f1)
+  mkdir -p "$tmp/bazelisk/downloads/sha256/$sum/bin" "$tmp/bazelisk/downloads/metadata/bazelbuild"
+  cp "$DEV_TUN_BAZEL" "$tmp/bazelisk/downloads/sha256/$sum/bin/bazel"
+  chmod 755 "$tmp/bazelisk/downloads/sha256/$sum/bin/bazel"
+  printf %s "$sum" > "$tmp/bazelisk/downloads/metadata/bazelbuild/$(basename "$DEV_TUN_BAZEL")"
+  seed=(--bazelisk-seed "$tmp/bazelisk")
+elif [ -n "${XDG_CACHE_HOME:-}" ] && [ -d "$XDG_CACHE_HOME/bazelisk/downloads" ]; then
+  # In a tun job: seed them from the job's (shared) download cache.
   seed=(--bazelisk-seed "$XDG_CACHE_HOME/bazelisk")
 fi
 # shellcheck disable=SC2086

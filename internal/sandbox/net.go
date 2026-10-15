@@ -6,8 +6,8 @@ package sandbox
 // small helper first: this binary re-executed as `<exe> __tun-netns-helper <argv...>`. Inside
 // the namespace it
 //   - reads the job's env from a pipe (envFD), so that e.g. LD_PRELOAD doesn't act on it;
-//   - listens on 127.0.0.1:<random> and points HTTP(S)_PROXY there (unless the job env sets
-//     them), then runs argv as its child and exits with the child's status;
+//   - listens on 127.0.0.1:3128 (EgressPort) and points HTTP(S)_PROXY there (unless the job env
+//     sets them), then runs argv as its child and exits with the child's status;
 //   - answers requests on a socketpair shared with the server (fd 4) by sending back file
 //     descriptors: the egress listener ("egress"), and TCP connections it dials to
 //     127.0.0.1:<port> in the namespace ("dial <port>", for the service proxy and probe).
@@ -44,6 +44,11 @@ const (
 	exeFD     = 5 // the tun executable, bound into the sandbox for the helper
 	envFD     = 6 // the job's env, NUL-terminated K=V entries
 )
+
+// EgressPort is where the helper listens inside every job's network namespace (each job has its
+// own, so they can't collide). Fixed rather than random so that the proxy variables are the same
+// in every job: Bazel keys cached test results on the env it passes (--test_env=HTTPS_PROXY).
+const EgressPort = 3128
 
 // Every binary importing this package (tun, and test binaries that run servers) can be the helper.
 func init() {
@@ -95,10 +100,10 @@ type Net struct {
 	ctl *net.UnixConn
 	hs  *http.Server // the egress proxy
 
-	ready  chan struct{} // closed once serveEgress has the listener (or failed to get it)
-	lnMu   sync.Mutex
-	ln     *net.TCPListener // the egress listener, once serveEgress has it
-	lnErr  error
+	ready chan struct{} // closed once serveEgress has the listener (or failed to get it)
+	lnMu  sync.Mutex
+	ln    *net.TCPListener // the egress listener, once serveEgress has it
+	lnErr error
 }
 
 func newNet() (*Net, *os.File, error) {
@@ -335,7 +340,10 @@ func helperMain(argv []string) int {
 		pass = os.NewFile(PassFD, "pass")
 	}
 	closeOnExecAll() // e.g. the bound executable's fd; the command gets only stdio (and pass)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(EgressPort))
+	if err != nil {
+		ln, err = net.Listen("tcp", "127.0.0.1:0") // can't happen in a fresh namespace
+	}
 	if err != nil {
 		return fail(err)
 	}

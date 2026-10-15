@@ -24,6 +24,8 @@ go_test(
     # network namespaces (nested inside Bazel's linux-sandbox; loopback only, so no
     # requires-network), plus jobs that run go and scripts/ci.sh.
     size = "large",
+    # Nested real Bazel fetches modules from the Bazel Central Registry (via the proxy, .bazelrc).
+    tags = ["requires-network"],
     srcs = [
         "auth_test.go",
         "bazel_test.go",
@@ -49,10 +51,15 @@ go_test(
         "//scripts:bb-ci.sh",
         "//scripts:ci.sh",
         "@go_sdk//:bin/go",
+        "@bazel_binary//file",
         "@go_sdk//:files",
     ],
     embed = [":client"],
-    env = {"TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
+    env = {
+        # TestBazelReal seeds its server's bazelisk home with this Bazel binary.
+        "TUN_TEST_BAZEL": "$(rlocationpath @bazel_binary//file)",
+        "TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)",
+    },
     deps = [
         "//internal/api",
         "//internal/sandbox",

@@ -144,8 +144,23 @@ func TestLRU(t *testing.T) {
 	}
 }
 
+// testBazel is the Bazel binary: under bazel test the pinned @bazel_binary (TUN_TEST_BAZEL, see
+// BUILD.bazel), run directly, since bazelisk inside a test sandbox has no download cache and no
+// network; else bazel (bazelisk) from PATH, or "" if there is none.
+func testBazel() string {
+	if p := os.Getenv("TUN_TEST_BAZEL"); p != "" {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(os.Getenv("TEST_SRCDIR"), p)
+		}
+		return p
+	}
+	p, _ := exec.LookPath("bazel")
+	return p
+}
+
 func TestBazelCache(t *testing.T) {
-	if _, e := exec.LookPath("bazel"); e != nil {
+	bazel := testBazel()
+	if bazel == "" {
 		t.Skip("bazel missing")
 	}
 	_, addr, socket := testServer(t)
@@ -157,7 +172,7 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bazel", "--output_user_root="+root, "shutdown")
+		cmd := exec.CommandContext(ctx, bazel, "--output_user_root="+root, "shutdown")
 		cmd.Dir = work
 		cmd.WaitDelay = time.Second
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -170,7 +185,7 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 		args = append(args, extra...)
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bazel", args...)
+		cmd := exec.CommandContext(ctx, bazel, args...)
 		cmd.WaitDelay = 3 * time.Second
 		cmd.Dir = work
 		out, e := cmd.CombinedOutput()

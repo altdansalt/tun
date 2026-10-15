@@ -18,15 +18,20 @@ exports_files([
         "$(rootpath //cmd/tun)",
         "$(rootpath @go_sdk//:bin/go)",
         "$(rootpath %s)" % suite,
+        # e2e.sh's tun bazel smoke step runs Bazel nested in this test: no bazelisk download.
+        "$(rootpath @bazel_binary//file)",
     ],
     data = [
         "dev-tun.sh",
         suite,
         "//cmd/tun",
+        "@bazel_binary//file",
         "@go_sdk//:bin/go",
         "@go_sdk//:files",
     ],
     env = env,
+    # e2e.sh's tun bazel step: nested real Bazel fetches modules from the Bazel Central Registry.
+    tags = ["requires-network"],
 ) for name, suite, env in [
     ("e2e_test", "e2e.sh", {}),
     (
