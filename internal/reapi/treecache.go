@@ -36,7 +36,7 @@ type treeCache struct {
 	mu      sync.Mutex
 	entries map[string]*treeEntry // complete or being materialized, by digest key
 	seen    map[string]bool       // large directories named once so far
-	sizes   map[string]treeSize   // recursive sizes of large directories' digests
+	sizes   map[string]treeSize   // recursive sizes by directory digest
 	total   int64                 // bytes of complete entries
 	tick    uint64
 }
@@ -100,14 +100,14 @@ func (c *treeCache) size(ctx context.Context, s BlobStore, d []byte, depth int) 
 		sz.files += ssz.files
 		sz.bytes += ssz.bytes
 	}
-	if sz.files >= treeMinFiles || sz.bytes >= treeMinBytes {
-		c.mu.Lock()
-		if len(c.sizes) >= treeSeenMax {
-			clear(c.sizes)
-		}
-		c.sizes[k] = sz
-		c.mu.Unlock()
+	// Every directory, not only large ones: mount asks for the size of each directory on the
+	// way down, so without it a deep tree would be walked once per level.
+	c.mu.Lock()
+	if len(c.sizes) >= treeSeenMax {
+		clear(c.sizes)
 	}
+	c.sizes[k] = sz
+	c.mu.Unlock()
 	return sz, nil
 }
 
