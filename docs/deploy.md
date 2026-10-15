@@ -50,10 +50,12 @@ timeouts still fail unfinished local jobs; this design protects orderly deploys.
 Long-lived services can hold the drain open until its timeout; cancel or migrate
 them explicitly before deploying if that is undesirable.
 
-An active Bazel command finishes before shutdown. Session metadata, workspace and
-on-disk output base survive, but the sandbox and JVM stop; the next command
-recreates them (a cold JVM with retained disk state). Live session re-adoption is
-not implemented. No change to the Bazel-native execution direction is required.
+An active Bazel command finishes before shutdown. For hub-local sessions, metadata,
+workspace and output base survive, but the sandbox and JVM stop; the next command
+recreates them (a cold JVM with retained disk state). Runner leases belong to process
+instances: replacing a runner or restarting the hub creates fresh leases/output bases,
+reusing per-client repository downloads and the hub remote cache. Command archives on
+the hub survive independently. Live session re-adoption is not implemented. No change to the Bazel-native execution direction is required.
 
 The real-process regression in scripts/e2e-drain.py (part of scripts/e2e.sh)
 signals a hub mid-job, checks queued work and a new submission during draining,
