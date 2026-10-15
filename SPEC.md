@@ -730,7 +730,9 @@ session eviction and runner/hub restarts, until `--keep-work` retention or disk 
 removes them. Downloads use ordinary owner/admin authorization. Files are opened through
 the session output base's os.Root; arbitrary absolute paths are never accepted. The
 per-command byte limit is `--max-download`; collection errors appear in the job's
-output error and downloads fail explicitly. Directory/tree artifacts are not yet staged.
+output error and downloads fail explicitly. Directory/tree artifacts are not yet staged:
+an output that is not a regular file inside the output base (a directory, an sh_test's
+symlink to its script) is left out (logged), the rest of the archive is kept.
 The archive retains an uncapped label index; BEP JSON for agents remains bounded.
 
 Runner session engines trim their per-client repository caches with

@@ -46,6 +46,12 @@ func TestSessionArtifactsRetained(t *testing.T) {
 	os.Symlink(filepath.Join(out, "base", "bin"), filepath.Join(work, "bazel-bin"))
 	sum := bep.Summary{Targets: []bep.Target{{Label: "//pkg:hello", Outputs: []bep.File{{Path: "bazel-bin/hello"}}}}, Tests: []bep.Test{{Label: "//:test", Attempts: []bep.Attempt{{Run: 1, Shard: 1, Attempt: 1, Logs: []bep.File{{Path: filepath.Join(out, "test.log")}}}}}}}
 	sum.Targets = append(sum.Targets, bep.Target{Label: "//:test", Outputs: []bep.File{{Path: "bazel-bin/hello"}}})
+	// Outputs that can't be kept are left out, not the archive: an sh_test's symlink to its
+	// script in the source tree, a directory (tree artifact).
+	os.Symlink(filepath.Join(work, "script.sh"), filepath.Join(out, "base", "bin", "sh_test"))
+	os.Mkdir(filepath.Join(out, "base", "bin", "tree"), 0700)
+	sum.Targets = append(sum.Targets, bep.Target{Label: "//:sh_test", Outputs: []bep.File{{Path: "bazel-bin/sh_test"}}},
+		bep.Target{Label: "//:tree", Outputs: []bep.File{{Path: "bazel-bin/tree"}}})
 	if err := s.stageSessionArtifacts(j, out, sum); err != nil {
 		t.Fatal(err)
 	}

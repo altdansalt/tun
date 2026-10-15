@@ -5,8 +5,10 @@ package server
 import (
 	"archive/tar"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +18,10 @@ import (
 )
 
 const artifactIndex = ".tun-artifacts.json"
+
+// errSkipArtifact marks a file that can't be kept (outside the output base's root, or not a
+// regular file).
+var errSkipArtifact = errors.New("not kept")
 
 func (s *Server) stageSessionArtifacts(j *job, out string, sum bep.Summary) error {
 	root, err := os.OpenRoot(out)
@@ -50,7 +56,7 @@ func (s *Server) stageSessionArtifacts(j *job, out string, sum bep.Summary) erro
 		}
 		in, err := root.Open(source)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %v", errSkipArtifact, err)
 		}
 		defer in.Close()
 		fi, err := in.Stat()
@@ -58,7 +64,7 @@ func (s *Server) stageSessionArtifacts(j *job, out string, sum bep.Summary) erro
 			return err
 		}
 		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("artifact is not a regular file: %s", source)
+			return fmt.Errorf("%w: not a regular file: %s", errSkipArtifact, source)
 		}
 		index[label] = append(index[label], name)
 		if seen[name] {
@@ -96,7 +102,12 @@ func (s *Server) stageSessionArtifacts(j *job, out string, sum bep.Summary) erro
 			if !filepath.IsAbs(link) {
 				link = filepath.Clean(filepath.Join(work, link))
 			}
-			if err := add(t.Label, a.Path, filepath.Join(link, rest)); err != nil {
+			// A target output that isn't a regular file inside the output base (an sh_test's
+			// symlink to its script in the source tree, a directory) is left out, not the
+			// whole archive: its test logs matter more.
+			if err := add(t.Label, a.Path, filepath.Join(link, rest)); errors.Is(err, errSkipArtifact) {
+				log.Printf("tun: job %s: not keeping %s's output %s: %v", j.ID, t.Label, a.Path, err)
+			} else if err != nil {
 				return err
 			}
 		}
