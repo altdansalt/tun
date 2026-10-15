@@ -45,6 +45,7 @@ func roundTrip(t *testing.T, root string, files []string) string {
 		t.Fatalf("size %d vs %d, sum %q", size, buf.Len(), sum)
 	}
 	dst := t.TempDir()
+	t.Cleanup(func() { RemoveAll(dst) }) // runs before TempDir's cleanup; handles read-only dirs
 	if err := Unpack(&buf, dst); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +180,11 @@ func TestUnpackRejectsUnsafe(t *testing.T) {
 		// writing through them must still fail.
 		"write through link": {{name: "d", link: ".", typ: sym}, {name: "e", link: "d/../outside", typ: sym}, {name: "e/f", typ: reg}},
 		"duplicate":          {{name: "f", typ: reg}, {name: "f", typ: reg}},
+		// Link chains that only escape once resolved, in either creation order.
+		"link chain":          {{name: "d", link: ".", typ: sym}, {name: "e", link: "d/../outside", typ: sym}},
+		"link chain reversed": {{name: "e", link: "d/../outside", typ: sym}, {name: "d", link: ".", typ: sym}},
+		"nested link chain":   {{name: "a/b/up", link: "..", typ: sym}, {name: "a/x", link: "b/up/../../outside", typ: sym}},
+		"link loop":           {{name: "p", link: "q", typ: sym}, {name: "q", link: "p", typ: sym}},
 	}
 	for name, entries := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -202,7 +208,31 @@ func TestUnpackRejectsUnsafe(t *testing.T) {
 	if err := Unpack(tarOf(t, entry{name: "a/l", link: "../b", typ: sym}), t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
+	// Chains that stay inside are fine too.
+	if err := Unpack(tarOf(t, entry{name: "d", link: "a", typ: sym}, entry{name: "a/b/l", link: "../../d/../c", typ: sym}), t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
 	if err := Unpack(strings.NewReader("not gzip"), t.TempDir()); err == nil {
 		t.Fatal("garbage accepted")
+	}
+}
+
+func TestRemoveAllReadOnlyDirs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "job")
+	write(t, filepath.Join(dir, "a", "b", "f"), "x", 0o444)
+	outside := filepath.Join(t.TempDir(), "keep")
+	write(t, filepath.Join(outside, "f"), "x", 0o644)
+	os.Chmod(outside, 0o755)
+	os.Symlink(outside, filepath.Join(dir, "a", "link"))
+	os.Chmod(filepath.Join(dir, "a", "b"), 0o500)
+	os.Chmod(filepath.Join(dir, "a"), 0o000)
+	if err := RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir still there: %v", err)
+	}
+	if fi, err := os.Stat(outside); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Fatalf("symlink target touched: %v %v", fi, err)
 	}
 }

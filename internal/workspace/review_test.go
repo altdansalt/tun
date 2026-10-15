@@ -79,6 +79,8 @@ func TestReviewReadOnlyDirectoryMode(t *testing.T) {
 	if err := os.Chmod(filepath.Join(root, "readonly"), 0555); err != nil {
 		t.Fatal(err)
 	}
+	// Test fix: the source tree's read-only dir would otherwise break TempDir cleanup.
+	t.Cleanup(func() { os.Chmod(filepath.Join(root, "readonly"), 0755) })
 	files, err := Files(root)
 	if err != nil {
 		t.Fatal(err)

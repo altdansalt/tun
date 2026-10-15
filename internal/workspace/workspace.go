@@ -87,18 +87,44 @@ func Files(root string) ([]string, error) {
 }
 
 // Pack writes a tar.gz of files (relative to root) to w and returns its sha256 (hex) and
-// size. Regular files keep their permission bits, symlinks are stored as links, directories
-// are kept (so empty dirs survive), anything else is skipped.
+// size. Regular files and directories keep their permission bits, symlinks are stored as
+// links, directories are kept (so empty dirs survive), anything else is skipped.
 func Pack(root string, files []string, w io.Writer) (sum string, size int64, err error) {
 	h := sha256.New()
 	cw := &countWriter{w: io.MultiWriter(w, h)}
 	gz := gzip.NewWriter(cw)
 	tw := tar.NewWriter(gz)
+	dirs := map[string]bool{} // directory entries already written
+	writeDir := func(d string, fi fs.FileInfo) error {
+		dirs[d] = true
+		return tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: d + "/", Mode: int64(fi.Mode().Perm()),
+			ModTime: fi.ModTime().Truncate(1e9), Format: tar.FormatPAX})
+	}
 	for _, f := range files {
+		// Ship each parent directory once, before its contents, so directory modes survive
+		// even when files lists only files (as git does).
+		for i := range len(f) {
+			if f[i] != '/' || dirs[f[:i]] {
+				continue
+			}
+			if fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f[:i]))); err == nil && fi.IsDir() {
+				if err := writeDir(f[:i], fi); err != nil {
+					return "", 0, err
+				}
+			}
+		}
 		p := filepath.Join(root, filepath.FromSlash(f))
 		fi, err := os.Lstat(p)
 		if err != nil {
 			return "", 0, err
+		}
+		if fi.IsDir() {
+			if !dirs[f] {
+				if err := writeDir(f, fi); err != nil {
+					return "", 0, err
+				}
+			}
+			continue
 		}
 		hdr := &tar.Header{Name: f, Mode: int64(fi.Mode().Perm()), ModTime: fi.ModTime().Truncate(1e9), Format: tar.FormatPAX}
 		switch {
@@ -109,8 +135,6 @@ func Pack(root string, files []string, w io.Writer) (sum string, size int64, err
 				return "", 0, err
 			}
 			hdr.Typeflag = tar.TypeSymlink
-		case fi.IsDir():
-			hdr.Typeflag, hdr.Name = tar.TypeDir, f+"/"
 		default:
 			continue
 		}
@@ -157,8 +181,10 @@ func (c *countWriter) Write(p []byte) (int, error) {
 }
 
 // Unpack extracts a tar.gz from r into dir (which must exist). It rejects absolute paths,
-// "..", links that are absolute or escape dir, hard links and device/special files. All
-// writes go through an os.Root, so nothing can be written outside dir even via symlinks.
+// "..", links that are absolute or resolve outside dir (also via other links), hard links
+// and device/special files. All writes go through an os.Root, so nothing can be written
+// outside dir even via symlinks. Directory modes are applied last, so a read-only directory
+// can still be filled; use RemoveAll to delete the result.
 func Unpack(r io.Reader, dir string) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -169,11 +195,13 @@ func Unpack(r io.Reader, dir string) error {
 		return err
 	}
 	defer root.Close()
+	dirModes := map[string]fs.FileMode{}
+	var links []string
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
 			return fmt.Errorf("bad workspace tar: %w", err)
@@ -187,18 +215,16 @@ func Unpack(r io.Reader, dir string) error {
 		}
 		mode := fs.FileMode(hdr.Mode).Perm()
 		if parent := path.Dir(name); parent != "." {
-			if err := root.MkdirAll(parent, 0o755); err != nil {
+			if err := root.MkdirAll(parent, 0o700); err != nil {
 				return err
 			}
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := root.MkdirAll(name, 0o755); err != nil {
+			if err := root.MkdirAll(name, 0o700); err != nil {
 				return err
 			}
-			if err := root.Chmod(name, mode|0o700); err != nil {
-				return err
-			}
+			dirModes[name] = mode
 		case tar.TypeReg:
 			f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
@@ -221,10 +247,86 @@ func Unpack(r io.Reader, dir string) error {
 			if err := root.Symlink(hdr.Linkname, name); err != nil {
 				return err
 			}
+			links = append(links, name)
 		default:
 			return fmt.Errorf("workspace entry %q: unsupported type %q (only files, dirs and symlinks)", hdr.Name, hdr.Typeflag)
 		}
 	}
+	// Each link passed the lexical check, but chains (d -> ., e -> d/../x) can still leave
+	// the root once the kernel resolves them. Check every link against the final tree.
+	for _, l := range links {
+		target, _ := root.Readlink(l)
+		if out, err := escapes(root, path.Dir(l)+"/"+target); err != nil || out {
+			return fmt.Errorf("workspace symlink %q -> %q: resolves outside the workspace root", l, target)
+		}
+	}
+	// Deepest first, so a parent losing its search bit doesn't block chmod of children.
+	names := make([]string, 0, len(dirModes))
+	for d := range dirModes {
+		names = append(names, d)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for _, d := range names {
+		if err := root.Chmod(d, dirModes[d]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// escapes reports whether resolving rel (slash-separated, relative to root) would leave
+// root, following the symlinks that exist in root the way the kernel would.
+func escapes(root *os.Root, rel string) (bool, error) {
+	var cur []string // resolved components, none of them a symlink
+	todo := strings.Split(rel, "/")
+	for hops := 0; len(todo) > 0; {
+		c := todo[0]
+		todo = todo[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			if len(cur) == 0 {
+				return true, nil
+			}
+			cur = cur[:len(cur)-1]
+			continue
+		}
+		p := path.Join(append(cur, c)...)
+		fi, err := root.Lstat(p)
+		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			cur = append(cur, c) // a dir, a file, or not there (yet): taken literally
+			continue
+		}
+		if hops++; hops > 40 {
+			return false, fmt.Errorf("too many levels of symlinks at %q", p)
+		}
+		t, err := root.Readlink(p)
+		if err != nil {
+			return false, err
+		}
+		if path.IsAbs(t) {
+			return true, nil
+		}
+		todo = append(strings.Split(t, "/"), todo...)
+	}
+	return false, nil
+}
+
+// RemoveAll removes dir like os.RemoveAll, first restoring owner rwx on directories inside
+// it (never following symlinks) so read-only directories from a workspace or a job don't
+// make it undeletable.
+func RemoveAll(dir string) error {
+	if err := os.RemoveAll(dir); err == nil {
+		return nil
+	}
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
 }
 
 func safeName(name string) (string, error) {
