@@ -7,6 +7,12 @@ Read SPEC.md first. tun is a Go (stdlib-only) remote execution service for codin
   `tun` binary is on PATH, built from main):
   - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race`, in a sandboxed copy of your working tree.
   - Subsets: `tun run -e TEST_FLAGS='-run TestX -v' -- ./scripts/ci.sh` (env is NOT forwarded unless `-e`).
+    ci.sh parses TEST_FLAGS with shell quoting, so alternations work as
+    `tun run -e TEST_FLAGS='-run "TestA|TestB" -v' -- ./scripts/ci.sh` (or `-e TEST_FLAGS="-run 'A|B'"`).
+    With `-run`, ci.sh skips the separate vet/build (go test compiles what it tests; add
+    `-e CI_FULL=1` to keep them) and exits 1 if the pattern matched no test in any package.
+  - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
+    stderr once the job ends (same exit code); `tun logs --tail N [--stderr] <id>` for more.
   - To test your *changed* tun binary end-to-end, start it inside the job (tests do this already:
     integration tests run an in-process server), or run `go run ./cmd/tun serve --addr 127.0.0.1:<random>
     --data $(mktemp -d)` inside a `tun run -c` script. Never restart or replace the shared server.

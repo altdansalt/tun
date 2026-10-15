@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,9 @@ usage:
                                      start a long-running service, proxied at
                                      <server>/v1/jobs/<id>/ports/N/; exits once it's ready
   tun status <id>                    print the job as one JSON object
-  tun logs [-f] [--stderr] <id>      print a job's stdout (or stderr); -f follows until it ends
+  tun logs [-f] [--stderr] [--tail N] <id>
+                                     print a job's stdout (or stderr); -f follows until it
+                                     ends; --tail N: only the last N lines (then follow, with -f)
   tun cancel <id>                    kill a job (whole process group) or drop it from the queue
   tun ls [--limit N]                 recent jobs as JSON lines, newest first
   tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
@@ -77,6 +80,11 @@ so name the outputs you want. A PATH that matched
 nothing is a "tun: warning:" on stderr and the exit status stays the command's; if the
 download itself fails (e.g. over the server's size limit), a 0 exit becomes 125.
 Later, or for other paths: tun get <id> PATH...
+
+--tail N streams nothing while the job runs; when it ends, tun prints the last N lines of its
+stdout (to stdout) and of its stderr (to stderr), then a "tun: job <id>: showed the last ..."
+line with line counts and the commands for the full logs (tun logs <id>; tun logs --stderr <id>).
+The exit status is the same as without --tail.
 
 flags:
 `
@@ -177,6 +185,7 @@ func runCmd(args []string, e Env) int {
 	noWS := fs.Bool("no-workspace", false, "upload nothing; run in an empty dir")
 	detach := fs.Bool("detach", false, "print the job id to stdout and exit 0 immediately")
 	jsonOut := fs.Bool("json", false, "don't stream; when the job ends print one JSON object {id, state, exit_code, signal, error,\nduration (seconds), stdout, stderr, stdout_truncated, stderr_truncated} (output: last 64KiB of each)")
+	tailN := fs.Int("tail", -1, "don't stream; when the job ends print only the last `N` lines of its stdout and of its\nstderr (full logs: tun logs <id> [--stderr])")
 	script := fs.String("c", "", "run this `script` with bash -c instead of argv")
 	var outs envFlag
 	fs.Var(&outs, "out", "after the job ends, copy `PATH` (file, dir or glob, relative to the workspace root)\nfrom its work dir into the local workspace (repeatable)")
@@ -199,6 +208,9 @@ func runCmd(args []string, e Env) int {
 	if err := checkPaths(outs); err != nil {
 		return errorf(e, "run: --out: %v", err)
 	}
+	if *tailN >= 0 && (*jsonOut || *detach) {
+		return errorf(e, "run: --tail can't be combined with --json or --detach")
+	}
 	if *detach && len(outs) > 0 {
 		return errorf(e, "run: --out does not work with --detach; fetch later with tun get <id> PATH...")
 	}
@@ -212,6 +224,9 @@ func runCmd(args []string, e Env) int {
 	req.TimeoutSec = int((*timeout + time.Second - 1) / time.Second)
 	if err := svc.apply(fs, &req); err != nil {
 		return errorf(e, "%v", err)
+	}
+	if req.Service && *tailN >= 0 {
+		return errorf(e, "run: --tail can't be used with --service; read its logs with tun logs --tail N <id>")
 	}
 	if req.Service && len(outs) > 0 {
 		return errorf(e, "run: --out can't be used with --service (a service doesn't end on its own); stop it with tun cancel, then tun get <id> <path>")
@@ -257,7 +272,11 @@ func runCmd(args []string, e Env) int {
 		return 0
 	}
 	if !*jsonOut {
-		fmt.Fprintf(e.Stderr, "tun: job %s\n", j.ID)
+		if *tailN >= 0 {
+			fmt.Fprintf(e.Stderr, "tun: job %s (--tail %d: output is printed when the job ends; full logs: tun logs %s, tun logs --stderr %s)\n", j.ID, *tailN, j.ID, j.ID)
+		} else {
+			fmt.Fprintf(e.Stderr, "tun: job %s\n", j.ID)
+		}
 		if !*noWS {
 			if root, err := localRoot(e.Cwd); err == nil {
 				fmt.Fprintf(e.Stderr, "tun: workspace %s\n", root)
@@ -267,7 +286,7 @@ func runCmd(args []string, e Env) int {
 	if j.Service {
 		return waitReady(ctx, c, j, *svc.readyTimeout, *jsonOut, e)
 	}
-	code := wait(ctx, cancel, c, j, *jsonOut, e)
+	code := wait(ctx, cancel, c, j, *jsonOut, *tailN, e)
 	if len(outs) > 0 {
 		code = fetchOuts(c, j.ID, outs, outDir, code, e)
 	}
@@ -333,12 +352,85 @@ func (t *tail) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// lineTail keeps the last n lines written to it (at most 1MiB of them).
+type lineTail struct {
+	n       int
+	lines   int64 // newlines seen
+	partial bool  // the last byte seen was not a newline
+	cut     bool  // buf lost bytes to the size cap
+	buf     []byte
+	mutex   sync.Mutex
+}
+
+func (t *lineTail) Write(p []byte) (int, error) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	if len(p) == 0 {
+		return 0, nil
+	}
+	t.lines += int64(bytes.Count(p, []byte("\n")))
+	t.partial = p[len(p)-1] != '\n'
+	t.buf = append(t.buf, p...)
+	t.buf = t.buf[lastLines(t.buf, t.n):]
+	if len(t.buf) > 1<<20 {
+		t.buf, t.cut = t.buf[len(t.buf)-1<<20:], true
+	}
+	return len(p), nil
+}
+
+// counts returns the number of lines kept and seen; a final unterminated line counts.
+func (t *lineTail) counts() (kept, total int64) {
+	kept = int64(bytes.Count(t.buf, []byte("\n")))
+	if t.partial {
+		kept, total = kept+1, t.lines+1
+	} else {
+		total = t.lines
+	}
+	return kept, total
+}
+
+// lastLines returns the index in b where its last n lines start.
+func lastLines(b []byte, n int) int {
+	if n == 0 {
+		return len(b)
+	}
+	for i := len(b) - 2; i >= 0; i-- {
+		if b[i] == '\n' {
+			if n--; n == 0 {
+				return i + 1
+			}
+		}
+	}
+	return 0
+}
+
+// printTails prints what --tail kept, then a line saying how much that was and where the rest is.
+func printTails(e Env, id string, tOut, tErr *lineTail) {
+	e.Stdout.Write(tOut.buf)
+	e.Stderr.Write(tErr.buf)
+	if tErr.partial && len(tErr.buf) > 0 {
+		fmt.Fprintln(e.Stderr)
+	}
+	ko, no := tOut.counts()
+	ke, ne := tErr.counts()
+	note := ""
+	if tOut.cut || tErr.cut {
+		note = " (lines cut to the last 1MiB)"
+	}
+	fmt.Fprintf(e.Stderr, "tun: job %s: showed the last %d of %d stdout lines and %d of %d stderr lines%s; full logs: tun logs %s, tun logs --stderr %s\n",
+		id, ko, no, ke, ne, note, id, id)
+}
+
 // wait streams (or collects) the job's output until it ends and maps the result to an exit code.
-func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, e Env) int {
+// With tailN >= 0 it prints only the last tailN lines of each stream once the job has ended.
+func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, tailN int, e Env) int {
 	var out, errw io.Writer = e.Stdout, e.Stderr
 	tOut, tErr := &tail{max: 64 << 10}, &tail{max: 64 << 10}
+	lOut, lErr := &lineTail{n: tailN}, &lineTail{n: tailN}
 	if jsonOut {
 		out, errw = tOut, tErr
+	} else if tailN >= 0 {
+		out, errw = lOut, lErr
 	}
 	var wg sync.WaitGroup
 	var errOut, errErr error
@@ -352,6 +444,9 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 	case sig := <-e.Signals:
 		cancel()
 		<-done
+		if tailN >= 0 {
+			printTails(e, j.ID, lOut, lErr)
+		}
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer ccancel()
 		if _, err := c.Cancel(cctx, j.ID); err != nil {
@@ -362,6 +457,9 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 			return 128 + int(s)
 		}
 		return 125
+	}
+	if tailN >= 0 {
+		printTails(e, j.ID, lOut, lErr)
 	}
 	if err := errors.Join(errOut, errErr); err != nil {
 		return errorf(e, "%v; job %s may still be running: reattach with 'tun logs -f %s'", err, j.ID, j.ID)
@@ -459,9 +557,10 @@ func cancelCmd(args []string, e Env) int {
 }
 
 func logsCmd(args []string, e Env) int {
-	fs := newFlags("logs", "usage: tun logs [-f] [--stderr] <id>\n\nPrint a job's stdout (or stderr) so far; with -f, keep streaming until the job ends.\n\nflags:\n", e)
+	fs := newFlags("logs", "usage: tun logs [-f] [--stderr] [--tail N] <id>\n\nPrint a job's stdout (or stderr) so far; with -f, keep streaming until the job ends.\n\nflags:\n", e)
 	follow := fs.Bool("f", false, "follow until the job ends")
 	stderr := fs.Bool("stderr", false, "print stderr instead of stdout")
+	tailN := fs.Int("tail", -1, "print only the last `N` lines (with -f: start there, then follow)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return flagErr(e, err)
@@ -474,7 +573,13 @@ func logsCmd(args []string, e Env) int {
 	if *stderr {
 		stream = "stderr"
 	}
-	if _, err := newClient(e).Logs(context.Background(), id, stream, 0, *follow, e.Stdout); err != nil {
+	c := newClient(e)
+	if *tailN >= 0 {
+		err = c.LogsTail(context.Background(), id, stream, *tailN, *follow, e.Stdout)
+	} else {
+		_, err = c.Logs(context.Background(), id, stream, 0, *follow, e.Stdout)
+	}
+	if err != nil {
 		return errorf(e, "%v", err)
 	}
 	return 0

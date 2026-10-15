@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,4 +191,24 @@ func (c *Client) Logs(ctx context.Context, id, stream string, offset int64, foll
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// LogsTail copies the last n lines of a job's stdout or stderr to w; with follow it then
+// streams the rest like Logs until the job ends.
+func (c *Client) LogsTail(ctx context.Context, id, stream string, n int, follow bool, w io.Writer) error {
+	resp, err := c.request(ctx, "GET", fmt.Sprintf("/v1/jobs/%s/%s?tail=%d", id, stream, n), nil, 0)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	start, err := strconv.ParseInt(resp.Header.Get("X-Tun-Offset"), 10, 64)
+	if err != nil {
+		return fmt.Errorf("server did not report a log offset for --tail (is it older than this client?)")
+	}
+	k, err := io.Copy(w, resp.Body)
+	if err != nil || !follow {
+		return err
+	}
+	_, err = c.Logs(ctx, id, stream, start+k, true, w)
+	return err
 }
