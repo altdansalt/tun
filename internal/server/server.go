@@ -83,6 +83,7 @@ type Server struct {
 	cache *reapi.Handler // nil without Config.Cache
 
 	mu       sync.Mutex
+	createMu sync.Mutex // serializes idempotent job admission
 	jobs     map[string]*job
 	queue    []*job // FIFO of queued jobs
 	running  int    // local non-service jobs
@@ -99,6 +100,7 @@ type Server struct {
 }
 
 type job struct {
+	RequestID string `json:"request_id,omitempty"`
 	api.Job
 	Env  map[string]string  `json:"env,omitempty"`
 	done chan struct{}      // closed when the job reaches a terminal state

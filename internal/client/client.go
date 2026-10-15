@@ -4,6 +4,7 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +52,18 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 
 // requestH is request with extra request headers.
 func (c *Client) requestH(ctx context.Context, method, path string, body io.Reader, size int64, hdr map[string]string) (*http.Response, error) {
+	if method == "POST" && path == "/v1/jobs" {
+		if hdr == nil {
+			hdr = map[string]string{}
+		}
+		if hdr["X-Tun-Request-Id"] == "" {
+			var key [16]byte
+			if _, err := rand.Read(key[:]); err != nil {
+				return nil, err
+			}
+			hdr["X-Tun-Request-Id"] = fmt.Sprintf("%x", key)
+		}
+	}
 	deadline := time.Now().Add(c.RetryTimeout)
 	var initial int64
 	seeker, seekable := body.(io.Seeker)

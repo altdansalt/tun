@@ -81,6 +81,27 @@ func (s *Server) tooBig(n int64) string {
 }
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+	// Keep successful keys for 24 hours (or until job retention removes them).
+	// Serialize admission so concurrent retries cannot create duplicate jobs.
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+	key := r.Header.Get("X-Tun-Request-Id")
+	if len(key) > 128 {
+		writeErr(w, 400, "request id exceeds 128 bytes")
+		return
+	}
+	if key != "" {
+		s.mu.Lock()
+		for _, j := range s.jobs {
+			if j.RequestID == key && j.Client == clientOf(r) && time.Since(j.CreatedAt) < 24*time.Hour {
+				snap := s.view(j, time.Now())
+				s.mu.Unlock()
+				writeJSON(w, 200, snap)
+				return
+			}
+		}
+		s.mu.Unlock()
+	}
 	var req api.CreateJob
 	body, limit := io.Reader(http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload)), int64(8<<20)
 	if r.Header.Get("Content-Encoding") == "gzip" { // tun bazel's manifests
@@ -153,7 +174,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "workspace must be a sha256 of an uploaded blob")
 		return
 	}
-	j := &job{done: make(chan struct{}), Env: req.Env, Job: api.Job{
+	j := &job{RequestID: key, done: make(chan struct{}), Env: req.Env, Job: api.Job{
 		ID: newID(), State: api.Queued, CreatedAt: time.Now().UTC(), Argv: req.Argv, Script: req.Script,
 		Cwd: cwd, TimeoutSec: req.TimeoutSec, Workspace: req.Workspace, Sandbox: s.cfg.Sandbox,
 		Service: req.Service, Client: clientOf(r), Outputs: req.Outputs,
