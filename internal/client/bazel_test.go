@@ -515,8 +515,9 @@ func TestBazelSessionCancelLeftover(t *testing.T) {
 
 func TestBazelSessionQueueAndCancel(t *testing.T) {
 	// The session sandbox is killed if a canceled command hasn't ended after twice the grace:
-	// not 50ms, which a loaded host can exceed.
-	ts := bazelServer(t, server.Config{MaxJobs: 4, KillGrace: 500 * time.Millisecond}, false)
+	// not 50ms, which a loaded host can exceed (nor 2*500ms: seen under tun bazel test on a
+	// busy hub, where the canceled command's exit took longer and b found a new server).
+	ts := bazelServer(t, server.Config{MaxJobs: 4, KillGrace: 1500 * time.Millisecond}, false)
 	ws := bazelWS(t, map[string]string{})
 	c := newClient(ts.env(ws, nil, nil, nil, nil)) // the same client name as the CLI's
 	start := func(session string, args ...string) string {
@@ -557,7 +558,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	if r := ts.tun("", "logs", "--stderr", b); !strings.Contains(r.stdout, "warm server") {
 		t.Fatalf("b after a canceled command: %+v", r)
 	}
-	time.Sleep(1100 * time.Millisecond) // past the cancel's escalation (twice KillGrace)
+	time.Sleep(3100 * time.Millisecond) // past the cancel's escalation (twice KillGrace)
 	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "warm server") {
 		t.Fatalf("a cancel that Bazel obeyed must not end the session's server: %+v", r)
 	}

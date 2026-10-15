@@ -286,11 +286,12 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 			t.Logf("bazel shutdown: %v: %s", err, out)
 		}
 	})
+	repo := t.TempDir() // shared by the runs: module resolution downloads from the registry once
 	run := func(extra ...string) string {
 		t.Helper()
-		args := []string{"--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
+		args := []string{"--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + repo}
 		args = append(args, extra...)
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute) // a loaded 2-CPU host
 		defer cancel()
 		cmd := exec.CommandContext(ctx, bazel, args...)
 		cmd.WaitDelay = 3 * time.Second
