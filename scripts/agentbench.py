@@ -191,6 +191,10 @@ def main():
     if not rows:
         return 1
     table = summary(rows)
+    for phase in ['cold_session', 'warm_unchanged', 'edit']:
+        group = [r for r in rows if r['phase'] == phase]
+        if group:
+            table += '\n\n' + phase + '\n\n' + summary(group)
     (a.out / 'summary.md').write_text(table + '\n')
     print(table)
     return int(exhausted.is_set() or any(r['exit_code'] for r in rows))

@@ -61,7 +61,7 @@ class BenchmarkTest(unittest.TestCase):
             formatter.write_text('#!/bin/sh\nexit 0\n')
             formatter.chmod(0o755)
             tun = bin_dir / 'tun'
-            tun.write_text('#!/bin/sh\ngit diff --stat\ngit diff | sha256sum\necho "tun: job test-job done"\necho "tun: bazel test exit=0 after 2s: 1 tests passed"\n')
+            tun.write_text('#!/bin/sh\ngit diff | sha256sum\necho "tun: job test-job done"\necho "tun: bazel test exit=0 after 2s: 1 tests passed"\n')
             tun.chmod(0o755)
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             server.tokens = []
