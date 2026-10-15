@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -104,7 +105,7 @@ func (s *Server) stageSessionArtifacts(j *job, out string, sum bep.Summary) erro
 		// A test label fetches its logs as well as declared outputs; .log is an alias.
 		for _, a := range t.Attempts {
 			for i, log := range a.Logs {
-				name := fmt.Sprintf("bazel-testlogs/%s/run_%d_shard_%d_attempt_%d/%d-%s", strings.ReplaceAll(strings.TrimPrefix(t.Label, "//"), ":", "/"), a.Run, a.Shard, a.Attempt, i, filepath.Base(log.Path))
+				name := path.Clean(fmt.Sprintf("bazel-testlogs/%s/run_%d_shard_%d_attempt_%d/%d-%s", strings.ReplaceAll(strings.TrimPrefix(t.Label, "//"), ":", "/"), a.Run, a.Shard, a.Attempt, i, filepath.Base(log.Path)))
 				if err := add(t.Label, name, log.Path); err != nil {
 					return err
 				}

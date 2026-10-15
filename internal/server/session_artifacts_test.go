@@ -44,30 +44,42 @@ func TestSessionArtifactsRetained(t *testing.T) {
 	os.WriteFile(filepath.Join(out, "base", "bin", "hello"), []byte("original output"), 0700)
 	os.WriteFile(filepath.Join(out, "test.log"), []byte("test passed"), 0600)
 	os.Symlink(filepath.Join(out, "base", "bin"), filepath.Join(work, "bazel-bin"))
-	sum := bep.Summary{Targets: []bep.Target{{Label: "//pkg:hello", Outputs: []bep.File{{Path: "bazel-bin/hello"}}}}, Tests: []bep.Test{{Label: "//pkg:test", Attempts: []bep.Attempt{{Run: 1, Shard: 1, Attempt: 1, Logs: []bep.File{{Path: filepath.Join(out, "test.log")}}}}}}}
+	sum := bep.Summary{Targets: []bep.Target{{Label: "//pkg:hello", Outputs: []bep.File{{Path: "bazel-bin/hello"}}}}, Tests: []bep.Test{{Label: "//:test", Attempts: []bep.Attempt{{Run: 1, Shard: 1, Attempt: 1, Logs: []bep.File{{Path: filepath.Join(out, "test.log")}}}}}}}
+	sum.Targets = append(sum.Targets, bep.Target{Label: "//:test", Outputs: []bep.File{{Path: "bazel-bin/hello"}}})
 	if err := s.stageSessionArtifacts(j, out, sum); err != nil {
 		t.Fatal(err)
 	}
 	// Subsequent commands/eviction cannot overwrite old command results.
 	os.RemoveAll(s.sessionDir(j.SessionID))
-	for _, tc := range []struct{ path, body string }{{"//pkg:hello", "original output"}, {"//pkg:test", "test passed"}, {"//pkg:test.log", "test passed"}, {"bazel-bin/hello", "original output"}} {
+	for _, tc := range []struct{ path, body string }{{"//pkg:hello", "original output"}, {"//:test", "test passed"}, {"//:test.log", "test passed"}, {"bazel-bin/hello", "original output"}} {
 		req := httptest.NewRequest("GET", "/v1/jobs/"+j.ID+"/files?path="+tc.path, nil)
 		req.Header.Set("X-Tun-Token", token)
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, req)
+		if len(w.Header().Values(api.HeaderMissing)) != 0 {
+			t.Fatalf("missing staged files: %v", w.Header().Values(api.HeaderMissing))
+		}
 		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", tc.path, w.Code, w.Body.String())
 		}
 		tr := tar.NewReader(w.Body)
-		if _, err := tr.Next(); err != nil {
-			t.Fatal(err)
+		var bodies []string
+		for {
+			_, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := io.ReadAll(tr)
+			bodies = append(bodies, string(b))
 		}
-		b, _ := io.ReadAll(tr)
-		if string(b) != tc.body {
-			t.Fatalf("%q", b)
+		if !strings.Contains(strings.Join(bodies, ";"), tc.body) {
+			t.Fatalf("%s: %v", tc.path, bodies)
 		}
 	}
-	req := httptest.NewRequest("GET", "/v1/jobs/"+j.ID+"/files?path=//pkg:test", nil)
+	req := httptest.NewRequest("GET", "/v1/jobs/"+j.ID+"/files?path=//:test", nil)
 	req.Header.Set("X-Tun-Token", other)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)

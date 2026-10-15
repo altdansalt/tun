@@ -98,7 +98,10 @@ STARLARK
   tun bazel test //:smoke_test 2>"$tmp/test.log" || fail "runner test"
   tid=$(tun ls --limit 1 | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   tun bazel build //:hello 2>/dev/null || fail "command after test"
-  tun get -o "$tmp/test-got" "$tid" //:smoke_test || fail "runner test logs by label"
+  if ! tun get -o "$tmp/test-got" "$tid" //:smoke_test; then
+    curl -fsS -H "X-Tun-Token: $TUN_TOKEN" "$TUN_URL/v1/jobs/$tid/files?path=." | tar -tvf - >&2
+    fail "runner test logs by label"
+  fi
   grep -rq runner-test-log "$tmp/test-got/bazel-testlogs" || fail "test log contents"
   tun get -o "$tmp/test-got" "$tid" //:smoke_test.log || fail "test log alias"
   echo 'e2e-runners: bazel affinity, artifacts, test logs and cache socket checked'
