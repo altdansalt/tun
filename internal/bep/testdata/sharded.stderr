@@ -1,0 +1,8 @@
+INFO: Analyzed target //:sharded (0 packages loaded, 3 targets configured).
+INFO: Found 1 test target...
+Target //:sharded up-to-date:
+  bazel-bin/sharded
+INFO: Elapsed time: 0.438s, Critical Path: 0.10s
+INFO: 9 processes: 6 internal, 6 linux-sandbox.
+INFO: Build completed successfully, 9 total actions
+INFO: Build Event Protocol files produced successfully.

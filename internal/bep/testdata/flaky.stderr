@@ -1,0 +1,12 @@
+INFO: Analyzed target //:flaky (0 packages loaded, 3 targets configured).
+FAIL: //:flaky (Exit 1) (see /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-bazel/fa30a403a25b1a61894207d8bc49966e/execroot/_main/bazel-out/k8-fastbuild/testlogs/flaky/test_attempts/attempt_1.log)
+
+FLAKY: //:flaky (Summary)
+      /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-bazel/fa30a403a25b1a61894207d8bc49966e/execroot/_main/bazel-out/k8-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+INFO: Found 1 test target...
+Target //:flaky up-to-date:
+  bazel-bin/flaky
+INFO: Elapsed time: 0.837s, Critical Path: 0.14s
+INFO: 7 processes: 6 internal, 4 linux-sandbox.
+INFO: Build completed successfully, 7 total actions
+INFO: Build Event Protocol files produced successfully.

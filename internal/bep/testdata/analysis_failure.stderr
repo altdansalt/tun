@@ -1,0 +1,7 @@
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//:missing': no such target '//:missing': target 'missing' not declared in package '' defined by /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-work/BUILD.bazel
+ERROR: no such target '//:missing': target 'missing' not declared in package '' defined by /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-work/BUILD.bazel
+INFO: Elapsed time: 0.243s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

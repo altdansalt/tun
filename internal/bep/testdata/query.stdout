@@ -1,0 +1,7 @@
+//:compile_error
+//:fail
+//:flaky
+//:output
+//:pass
+//:sharded
+//:timeout

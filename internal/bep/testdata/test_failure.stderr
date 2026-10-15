@@ -1,0 +1,9 @@
+INFO: Analyzed target //:fail (75 packages loaded, 831 targets configured).
+FAIL: //:fail (Exit 1) (see /home/exedev/.local/share/tun/jobs/20261015T074837676783-9d8cb93f/sandbox/tmp/bep-bazel/fa30a403a25b1a61894207d8bc49966e/execroot/_main/bazel-out/k8-fastbuild/testlogs/fail/test.log)
+INFO: Found 1 test target...
+Target //:fail up-to-date:
+  bazel-bin/fail
+INFO: Elapsed time: 5.512s, Critical Path: 0.15s
+INFO: 7 processes: 6 internal, 2 linux-sandbox.
+INFO: Build completed, 1 test FAILED, 7 total actions
+INFO: Build Event Protocol files produced successfully.
