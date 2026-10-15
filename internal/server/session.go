@@ -513,7 +513,10 @@ type cacheSocket struct {
 
 // startCacheSocket starts sess's cache socket unless it is running. Caller holds the session.
 func (s *Server) startCacheSocket(sess *session) error {
-	if s.cache == nil || sess.cache != nil {
+	s.mu.Lock()
+	running := sess.cache != nil
+	s.mu.Unlock()
+	if s.cache == nil || running {
 		return nil
 	}
 	dir, err := os.OpenFile(filepath.Join(s.sessionDir(sess.ID), "sock"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
