@@ -23,6 +23,7 @@ exports_files([
     ],
     data = [
         "dev-tun.sh",
+        "e2e-drain.py",
         suite,
         "//cmd/tun",
         "@bazel_binary//file",

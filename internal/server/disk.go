@@ -95,6 +95,9 @@ func (s *Server) diskLow() bool {
 // reclaimDisk frees space while it is low: finished jobs' sandbox dirs (oldest first), then
 // idle sessions (least recently used first).
 func (s *Server) reclaimDisk() {
+	if s.diskLow() {
+		s.trimSharedCaches()
+	}
 	if !s.cfg.MinFree.set() || !s.diskLow() {
 		return
 	}

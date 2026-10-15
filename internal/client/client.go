@@ -4,11 +4,13 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,10 +24,12 @@ import (
 
 // Client talks to a tun server.
 type Client struct {
-	URL   string // e.g. http://127.0.0.1:7070
-	Token string
-	Name  string // sent as X-Tun-Client: who is asking (the server records it on jobs)
-	HTTP  *http.Client
+	URL          string // e.g. http://127.0.0.1:7070
+	Token        string
+	Name         string // sent as X-Tun-Client: who is asking (the server records it on jobs)
+	HTTP         *http.Client
+	RetryTimeout time.Duration
+	RetryLog     func()
 }
 
 // StatusError is a non-2xx response from the server.
@@ -48,7 +52,58 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 
 // requestH is request with extra request headers.
 func (c *Client) requestH(ctx context.Context, method, path string, body io.Reader, size int64, hdr map[string]string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
+	if method == "POST" && path == "/v1/jobs" {
+		if hdr == nil {
+			hdr = map[string]string{}
+		}
+		if hdr["X-Tun-Request-Id"] == "" {
+			var key [16]byte
+			if _, err := rand.Read(key[:]); err != nil {
+				return nil, err
+			}
+			hdr["X-Tun-Request-Id"] = fmt.Sprintf("%x", key)
+		}
+	}
+	deadline := time.Now().Add(c.RetryTimeout)
+	var initial int64
+	seeker, seekable := body.(io.Seeker)
+	if seekable {
+		initial, _ = seeker.Seek(0, io.SeekCurrent)
+	}
+	for attempt := 0; ; attempt++ {
+		resp, err := c.requestOnce(ctx, method, path, body, size, hdr)
+		if err == nil {
+			return resp, nil
+		}
+		var se *StatusError
+		var op *net.OpError
+		retry := errors.As(err, &se) && (se.Code == 502 || se.Code == 503)
+		if errors.As(err, &op) {
+			// A failed dial cannot have submitted a job. Never replay an ambiguous POST.
+			retry = method == "GET" || method == "HEAD" || op.Op == "dial"
+		}
+		if !retry || c.RetryTimeout <= 0 || time.Now().After(deadline) || ctx.Err() != nil || (body != nil && !seekable) {
+			return nil, err
+		}
+		if attempt == 0 && c.RetryLog != nil {
+			c.RetryLog()
+		}
+		delay := min(time.Duration(attempt+1)*250*time.Millisecond, 2*time.Second, time.Until(deadline))
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		if seekable {
+			if _, err := seeker.Seek(initial, io.SeekStart); err != nil {
+				return nil, err
+			}
+		}
+	}
+}
+
+func (c *Client) requestOnce(ctx context.Context, method, path string, body io.Reader, size int64, hdr map[string]string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, readerOnly(body))
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +127,7 @@ func (c *Client) requestH(ctx context.Context, method, path string, body io.Read
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("cannot reach tun server at %s (is `tun serve` running? set $TUN_URL): %v", c.URL, err)
+		return nil, fmt.Errorf("cannot reach tun server at %s (is `tun serve` running? set $TUN_URL): %w", c.URL, err)
 	}
 	if resp.StatusCode >= 300 {
 		defer resp.Body.Close()
@@ -256,4 +311,12 @@ func (c *Client) LogsTail(ctx context.Context, id, stream string, n int, follow 
 	}
 	_, err = c.Logs(ctx, id, stream, start+k, true, w)
 	return err
+}
+
+// Hide Close from the transport: the caller owns upload files across retries.
+func readerOnly(r io.Reader) io.Reader {
+	if r == nil {
+		return nil
+	}
+	return struct{ io.Reader }{r}
 }

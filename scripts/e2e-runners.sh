@@ -101,13 +101,14 @@ tun cancel "$e" >/dev/null
 wait_for "$f" exited
 [ "$(tun logs "$f")" = after ] || fail "job after the runner died"
 
-# SIGTERM: the runner kills its job and reports it failed.
-g=$(tun run --detach --no-workspace -- sleep 60)
+# SIGTERM: the runner drains its job and preserves output and exit status.
+g=$(tun run --detach --no-workspace -c 'echo before; sleep 2; echo after; exit 7')
 wait_for "$g" running
 survivor=$(field "$g" runner)
 kill -TERM "${pids[$survivor]}"
 wait "${pids[$survivor]}" || true
 unset "pids[$survivor]"
-wait_for "$g" failed
-tun status "$g" | grep -q "shut down" || fail "graceful shutdown: $(tun status "$g")"
+wait_for "$g" exited
+[ "$(field "$g" exit_code)" = 7 ] || fail "drained exit: $(tun status "$g")"
+[ "$(tun logs "$g")" = $'before\nafter' ] || fail "drained output"
 echo 'e2e-runners: passed'

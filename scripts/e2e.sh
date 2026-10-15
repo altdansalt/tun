@@ -3,6 +3,7 @@
 set -euo pipefail
 : "${TUN_URL:?run through scripts/dev-tun.sh}"
 : "${TUN_TOKEN:?run through scripts/dev-tun.sh}"
+suite_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 tmp=$(mktemp -d)
 service=
 job=
@@ -75,3 +76,6 @@ if command -v bazel >/dev/null; then
   cd "$tmp"
 fi
 echo 'e2e: passed'
+
+# Real process restart regression.
+python3 "$suite_dir/e2e-drain.py"

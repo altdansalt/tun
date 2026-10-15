@@ -399,6 +399,11 @@ producing package results after REAPI/sandbox; it was canceled after the final f
 run passed. Its stall cause was not established. Separate server/workspace race
 tests passed in `20261015T082410099198-c3a8b234` (4.655s job time).
 
+## Orderly deployment
+Hub/runner deploys now drain admitted work (default 15m); see [deploy.md](deploy.md).
+Queued Bazel commands finish before shutdown. Session disk state survives, but the
+sandbox/JVM is recreated on the next command. Live sandbox re-adoption remains future
+work; this does not change the milestone direction.
 
 ## Automatic cache and execution (feat/bazel-auto)
 
@@ -421,8 +426,8 @@ from bytestream files).
 handler for that listener (`reapi.Handler.ForClient`) needs no token and uses the session's
 client as the action cache namespace, whatever the request says. The sandbox never sees the
 server token. On the token-authenticated endpoints (TCP, `DATA/cache.sock`) the namespace is
-the request's client identity, as for jobs (exe.dev source VM, else `X-Tun-Client`, else the
-remote address). `instance_name` is ignored everywhere. The CAS is shared (verified on write);
+the token-bound client identity, as for jobs. Only the legacy admin token accepts
+exe.dev source VM / `X-Tun-Client` / remote-address identities; it provides no isolation. `instance_name` is ignored everywhere. The CAS is shared (verified on write);
 action results live in `acc-<sha256(client NUL digest)>`, the shared namespace in `ac-<digest>`
 (what reapi-exec's executors write). Lookups read the client's own result, then the shared one;
 nothing reachable over gRPC writes the shared namespace. `--cache-action-writes=false` makes
@@ -610,3 +615,39 @@ sessions several times between two commands of mine (`--max-sessions` on a hub w
 slots), which turns a warm edit into a cold one; and free disk went down to 0.6-1.1GB
 (`--min-free` warnings) with several sessions' output bases and the remote cache on one
 25GB disk.
+
+## External customer exercise (2026-10-15)
+
+[External Bazel report](external-bazel.md) measures deployed shared tun against
+`bb remote` on public Gazelle (Go), GoogleTest (C++), and rules_python checkouts.
+Warm one-line test edits took 1.79/6.10/6.20s versus 10.87/13.17/14.58s on
+BuildBuddy. Session eviction also turned unchanged requests into 42–99s waits/builds;
+runner placement and retention are the first practical priority. The report includes
+job IDs, exact BEP summaries, sync bytes, cold costs and an artifact-fetch failure.
+
+Exercise deviations: bounded test targets instead of full suites on the shared
+2-CPU/4GB host, and GoogleTest uses host GCC 13.3 rather than a hermetic C++ toolchain
+(the explicit customer-exercise exception). No change to the agreed hermetic-toolchain
+product direction or milestone order. No local heavy Bazel baseline was run.
+
+## Client identity and tool cache retention
+
+Client tokens now bind a server-issued name to jobs, warm sessions and REAPI action-cache
+namespaces (see SPEC.md and docs/deploy.md). The legacy shared token remains admin during
+migration and provides no isolation. This implements the trust boundary assumed by M1/M2;
+it does not change the Bazel-native direction. Shared v0 tool caches still allow poisoning.
+
+The hub trims tool caches to budgets (SPEC.md, Tool cache budgets): the shared Go/XDG caches
+together, each client's Bazel repository cache separately. Bazel's disk caches are left to
+Bazel's own GC (`--experimental_disk_cache_gc_max_size`) except under disk pressure, and
+bazelisk downloads are never trimmed. Bazel trusts whole repository cache entries and
+fetched repository trees (`<repository_cache>/contents`), so they are evicted whole, and only
+while their client has no live session (shared ones only while no job runs). Session
+output bases keep their session lifecycle; REAPI keeps its separate verified LRU.
+No milestone deviation is required.
+
+Uploaded workspace content is per uploader (SPEC.md, Visibility): sessions can only sync
+file contents their client uploaded, so a digest learned elsewhere is not a capability.
+The REAPI CAS is still shared by digest (SPEC.md, Known gaps); when M2 adds remote
+execution, inputs fetched by executors should be checked against the same per-client
+ownership (FindMissingBlobs answering per client) before a shared CAS serves other clients.

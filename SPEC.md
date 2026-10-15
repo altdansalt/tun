@@ -17,10 +17,10 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 ```
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
           [--net auto|private|host] [--local-slots N] [--runner-timeout 30s]
-          [--ephemeral] [--exit-on-eof]
+          [--ephemeral] [--exit-on-eof] [--drain-timeout 15m]
           [--cache-dir reapi] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
-          [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
+          [--min-free 10%] [--max-shared-cache 5GB] [--max-client-cache 1GB] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -37,14 +37,17 @@ tun run [flags] -c '<shell script>' run via bash -c
                     stdout) and stderr (to stderr), then one "tun: job <id>: showed the last a of b
                     stdout lines and c of d stderr lines; full logs: tun logs <id>, tun logs --stderr
                     <id>" line. The opening "tun: job <id> (--tail N: ...)" line says the same.
-                    Exit status as without it. Not with --json, --detach or --service. N must be
+                    Every 30s while running, stderr reports elapsed seconds, stdout/stderr line
+                    counts, and a tun logs command. Exit status as without it.
+                    Not with --json, --detach or --service. N must be
                     >= 0 (a negative N is a usage error, exit 125; also for tun logs --tail).
 tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>       tun cancel <id>
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
                                   (tun bazel test jobs: PATH may be a test label, see Test logs)
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
-           [--net auto|private|host] [--min-free 10%]
+           [--net auto|private|host] [--min-free 10%] [--drain-timeout 15m]
+tun token [--data DIR] new NAME   issue a client token on the server host
 tun runners                       (JSON lines: the server's live runners)
 tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
 tun sessions [--client NAME | --mine]   (JSON lines: the server's Bazel sessions)
@@ -70,7 +73,9 @@ For testing, `tun serve --ephemeral` uses a random loopback port and a fresh tem
 data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
 it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
 stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
-diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
+diagnostics go to stderr. SIGINT/SIGTERM drain admitted jobs (including queued commands) for up to --drain-timeout
+(default 15m), rejecting new submissions with retryable 503s; then stop the server.
+See docs/deploy.md for required systemd settings and session restart behavior.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
 `scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server
 (with extra `tun serve` flags from `$DEV_TUN_SERVE_ARGS`, word-split),
@@ -110,14 +115,73 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
 - `runner`: where the job runs or ran, set when it leaves the queue: `local` (the server
   itself; always for services) or a runner's name (see Runners). `outputs`: the `--out`
   paths the client declared.
-- `client`: who submitted the job, recorded at creation: the `X-Exedev-Source-Vm` request header
-  (set by the exe.dev proxy, which callers can't forge through it), else the client-sent
-  `X-Tun-Client` (the CLI sends its hostname on every request), else the remote IP. Values are
-  stripped to printable non-space ASCII, at most 128 bytes. Without the exe.dev proxy in front
-  any token holder can claim any name: it is for visibility, not access control.
-- `tun ls --state S` (comma-separated for several), `--client NAME`, `--mine` filter on the
-  server before `--limit`. `--mine` means "client = what the server would record for this
-  request", so it matches the source VM behind the exe.dev proxy and the hostname otherwise.
+- `client`: the name bound to the authenticated client token. Headers cannot override it.
+  Run `tun token [--data DIR] new NAME` on the server host to issue a 256-bit random token.
+  Only its SHA256 hash is stored, as a 0600 file under `$DATA/clients/` containing the name.
+  Tokens work immediately; deleting a hash file revokes that token without restart. Several
+  tokens can name the same client (useful for rotation); names are 1-128 printable non-space
+  ASCII characters. Keep names unique per trust boundary.
+- The original `$DATA/token` remains an **admin** token for compatibility. It can access every
+  job and select any client identity through `X-Exedev-Source-Vm`, then `X-Tun-Client`, then
+  remote IP, as before. **This mode gives no client isolation.** Keep it off agent VMs once
+  migrated. Runner authentication is unchanged; client tokens cannot call runner endpoints.
+- All authenticated clients can list jobs and read job status/metadata, useful for spotting
+  load; another client's `argv`, `script` and `workspace` are omitted (commands often carry
+  secrets; the workspace digest names its content). Logs, files/outputs, BEP results, service
+  proxying and cancellation require the owner or admin. Sessions listed to client tokens are
+  restricted to that client; session identity and reuse always include the authenticated client.
+- Uploaded content is per uploader. A digest is not a capability (it leaks through metadata
+  or logs, and low-entropy content such as a config file with a short secret can be guessed
+  and confirmed), so proof of possession is uploading the bytes. A workspace blob (`PUT
+  /v1/blobs/{sha}`) or tun bazel file content (`POST /v1/cas`) is stored once, and each client
+  that uploaded it is recorded as an owner (a hard link under `$DATA/owners/`, removed with
+  the content by retention). For a client token, `HEAD /v1/blobs/{sha}` is 200 only for its
+  own uploads, `POST /v1/jobs` with another client's workspace says it is not uploaded, and a
+  tun bazel manifest's digests the client did not upload are reported missing (409), so the
+  CLI uploads them; nothing reveals whether another client has the content. Content already
+  on the server costs each further client one upload, and content uploaded before this
+  change one re-upload. Admin requests may use any content; `GET /v1/blobs/{sha}` is admin
+  (runner) only.
+- `tun ls --state S` (comma-separated), `--client NAME`, `--mine` filter before `--limit`.
+  `--mine` uses the token's client name, or the legacy header identity for admin requests.
+- REAPI TCP and authenticated Unix endpoints use the same tokens, via `x-tun-token` or
+  `authorization: Bearer TOKEN` metadata. Action-cache writes and lookups use the token's
+  client namespace regardless of headers or `instance_name`. Session sockets keep their
+  fixed client identity. The REAPI CAS is shared and verified by digest: unlike tun's own
+  uploads it is **not** per uploader, so any token holder can test whether a digest exists
+  (FindMissingBlobs) and read content by digest. Clients cannot learn each other's digests
+  from tun (action results, BEP and job details are per client), but low-entropy content
+  whose digest can be guessed is not confidential there (see Known gaps).
+
+### Tool cache budgets
+
+Tool caches are trimmed on each GC sweep (at most ten minutes apart) and, under `--min-free`
+pressure, before finished workspaces and idle sessions are deleted (internal/server/
+sharedcache.go has the details):
+- `--max-shared-cache` (default 5GB; 0: none) bounds `$DATA/cache/{go-build,gomod,xdg}`
+  together, except Bazel disk caches in them (`xdg/tun-bazel/disk`, which bazel-ci.sh bounds
+  with Bazel's own `--experimental_disk_cache_gc_max_size`).
+- `--max-client-cache` (default 1GB; 0: none) bounds each client's Bazel repository cache
+  (`$DATA/bazel/<client>/repo`). Its disk cache (used only without the REAPI cache) has
+  Bazel's own GC (5G); its `bazelisk/` (Bazel binaries) is never trimmed, and is re-seeded
+  from `--bazelisk-seed` whenever its downloads are missing.
+- Tools trust whole trees, so trimming evicts what a tool can lose without being misled:
+  single go-build entries; an extracted Go module together with its `cache/download` files
+  (download files are never trimmed alone: a missing `.ziphash` makes go re-extract a module
+  others may be compiling from, a missing `.lock` breaks locking); a whole top-level dir of
+  `xdg` (a tool's install); a whole Bazel repository cache entry
+  (`content_addressable/<algo>/<hash>`, or `contents/<hash>`: fetched repository trees).
+  Trees in the shared caches are only evicted while no local job or service runs, and a
+  client's Bazel caches only while it has no live session (checked under the admission lock,
+  so none starts until the tree is renamed away); a busy server trims them only between jobs.
+- Least recently used first, approximated by the newest mtime in the unit (dirs count: an
+  extracted archive keeps old file mtimes). Future mtimes are reset to now. Grace: an hour
+  since the last change, and for go-build entries Go's own 5 days + 1 hour (Go refreshes a
+  used entry's mtime at most hourly), except under disk pressure (an hour). Under pressure
+  Bazel disk cache files are candidates too.
+- Soft caps: reads need not update mtimes, and protected or unremovable entries can keep
+  usage over budget. Trimming never follows symlinks out of a cache root. Runners do not
+  trim tool caches yet.
 
 ## Workspace
 - Root = `git rev-parse --show-toplevel` of the client's cwd; if not in git, the cwd itself.
@@ -265,7 +329,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
   `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
   (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
-  work, kills its jobs, reports them `failed` ("runner N shut down") and tells the hub it is
+  work, finishes its jobs up to --drain-timeout (default 15m) and tells the hub it is
   leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
   signal quits at once. A runner flocks its data dir: a second runner on the same dir refuses
   to start. All its hub requests have timeouts (2 minutes; polls 90s).
@@ -345,8 +409,8 @@ client API is unchanged. Job state, logs and outputs live on the hub.
 - `GET /v1/healthz` adds `local_slots` and `runners: [{name, slots, running, last_seen,
   sandbox, network_isolation, source}]`; `tun runners` prints them as JSON lines.
 - Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
-  workspace; a runner-only credential (any token holder can act as a runner, and read any
-  blob by sha with `GET /v1/blobs/{sha}`, though every token holder is already fully trusted).
+  workspace; a runner-only credential (the legacy admin credential still authenticates runners and can
+  read blobs by sha with `GET /v1/blobs/{sha}`; client tokens cannot).
 
 ## Bazel sessions (tun bazel)
 First step of docs/bazel.md (M1, hub-local only). `tun bazel [--session NAME] [--cold]
@@ -424,7 +488,8 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   written)"); then the command runs in the session sandbox. Timeout and cancel send SIGINT to
   the bazel client (Bazel cancels the command), SIGKILL after the kill grace, and if the
   command still hasn't ended after twice the grace, kill the session sandbox. A server
-  shutdown kills the sandboxes; the next server marks running bazel jobs failed.
+  orderly shutdown finishes admitted commands before killing the sandboxes; after a crash
+  the next server marks running bazel jobs failed.
 - **Test logs.** After a `test` or `coverage` command the server copies the logs the BEP names
   for every attempt of every test (test.log, test.xml, `test_attempts/attempt_N.log`, ...)
   from the output base into the job's own work dir (`jobs/<id>/sandbox/work`, which a session
@@ -481,12 +546,13 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.
 
 ## HTTP API (JSON, all under /v1, bearer auth)
-- `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
-- `GET /v1/blobs/{sha256}` — the blob's bytes (runners fetch workspaces with it).
+- `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash and records the uploader; HEAD is
+  200 only for the client's own uploads (any blob for admin; see Visibility).
+- `GET /v1/blobs/{sha256}` — the blob's bytes (admin only: runners fetch workspaces with it).
 - `POST /v1/cas`: tun bazel's file contents, a tar (gzip if `Content-Encoding: gzip`) of
   regular files named by their sha256; each is verified; over `--max-upload` is a 413.
   Stored in `$DATA/cas/`, deleted unused for `--keep-blobs` (job creation marks the ones a
-  manifest names as used).
+  manifest names as used). Owned per uploader like workspace blobs.
 - `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace, service, ports, outputs}` -> job object (201).
   Or `{cwd, timeout_sec, bazel: {session, cold, root, manifest, args}}` for tun bazel (see
   Bazel sessions; 409 `{error, missing}` if file contents must be uploaded first). The body
@@ -498,7 +564,8 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `timeout_sec` <= 0 means the default (1800), except for services where 0 (or less) means none; over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason, summary}`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason, summary}`
+  (`argv`, `script` and `workspace` only for the owner or admin, here and in the list).
 - `GET /v1/jobs?limit=N&state=S[,S...]&client=NAME&mine=1` -> list, newest first, filtered
   before the limit (`mine=1`: client = this request's client identity; with `client` it's a 400;
   unknown states are a 400). `POST /v1/jobs/{id}/cancel`.
@@ -547,8 +614,8 @@ Bazel flags.
   results are not: an UpdateActionResult is stored in the namespace of the request's client
   and answers only that client's GetActionResult; a lookup tries the client's own namespace,
   then the shared one, which only tun's executors write (none yet: no gRPC request can).
-  The client is the server's identity of the request (as `client` for jobs: the exe.dev
-  source VM header, else `X-Tun-Client`, else the remote address); REAPI `instance_name` is
+  The client is the token-bound identity (legacy admin requests retain header-selected
+  identity as described under Visibility); REAPI `instance_name` is
   ignored. Capabilities advertise action updates only to requests with a namespace.
 - **Sessions.** Every `tun bazel` session gets the cache without asking: while its sandbox
   lives, the server listens on the session's own socket `sessions/<id>/sock/cache.sock`
@@ -570,8 +637,37 @@ Bazel flags.
 - `bazel test //...` (`scripts/bazel-ci.sh`) must pass too: MODULE.bazel with rules_go, gazelle-generated
   BUILD files, hermetic Go SDK at go.mod's version (so the code must build and pass with Go 1.25).
 
+## Known gaps in client isolation
+Client tokens (see Visibility) separate jobs, logs, outputs, sessions, action results and
+uploaded content. These remain shared or weak; treat clients as mutually trusted for
+integrity until they are fixed:
+- Shared tool caches (`$DATA/cache/{go-build,gomod,xdg}`) are writable by every job of every
+  client. A job can plant a Go build cache entry, alter an extracted module, or put a binary
+  in a tool's XDG cache (e.g. bazelisk's, or bazel-ci.sh's Bazel disk cache) that later jobs
+  of other clients run or link. There is no integrity isolation between clients there; only
+  Bazel sessions' caches are per client. (docs/bazel.md: executor-written caches.)
+- The REAPI CAS is shared by digest (see Bazel remote cache): any client can confirm
+  whether content with a guessed digest exists and read it.
+- `--sandbox none` gives jobs the server user's full access: they can read `$DATA` (every
+  client's workspaces, blobs, CAS, logs and the admin token) and the client token files'
+  hashes. Client tokens isolate nothing from a job in that mode.
+- `--net host` (or `auto` falling back to it) leaves jobs on the host network: a job can
+  connect directly to other clients' services' host ports (bypassing the token-checked
+  proxy) and to anything else listening on the host's loopback.
+- Jobs of different clients run as the same Unix user; isolation relies on bwrap.
+- The legacy admin token gives no isolation (see Visibility).
+
 ## Non-goals for v0 (later, driven by usage)
 Service-to-service networking (with isolation, jobs can't reach each other at all),
 raw TCP/UDP egress and DNS from isolated jobs, unauthenticated/public URLs, TLS
 termination, multi-host scheduling beyond runners (labels, affinity, services on runners), persistent
 workspaces and incremental upload for `tun run` (tun bazel has both), snapshots.
+
+## Orderly deploys
+See docs/deploy.md. CLI requests retry connection failures and HTTP 502/503 for up to
+16m with backoff. Runners finish jobs while heartbeating with zero advertised slots.
+Crashes and expired drain timeouts retain the failure behavior described above.
+
+Job creation sends a random `X-Tun-Request-Id` per request, reused on retries. The server
+returns the existing job for the same client and key for 24 hours, including across restarts,
+while the job remains retained. Failed admissions do not consume the key.

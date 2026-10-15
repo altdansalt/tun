@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -190,10 +192,10 @@ func TestExitCodes(t *testing.T) {
 			t.Errorf("tun %q = %d, stderr %q; want %d with %q", c.args, r.code, r.stderr, c.code, c.msg)
 		}
 	}
-	r := Main([]string{"run", "--", "true"}, Env{Stdout: io.Discard, Stderr: &bytes.Buffer{}, Cwd: t.TempDir(),
-		Getenv: func(k string) string { return map[string]string{"TUN_URL": "http://127.0.0.1:1"}[k] }})
-	if r != 125 {
-		t.Errorf("unreachable server: exit %d, want 125", r)
+	// A sustained outage has a bounded retry window.
+	c := &Client{URL: "http://127.0.0.1:1", RetryTimeout: 50 * time.Millisecond}
+	if _, err := c.Health(context.Background()); err == nil {
+		t.Fatal("unreachable server succeeded")
 	}
 	var errb bytes.Buffer
 	Main([]string{"ls"}, Env{Stdout: io.Discard, Stderr: &errb, Cwd: t.TempDir(),
@@ -470,6 +472,102 @@ func TestRestartRecovery(t *testing.T) {
 	}
 }
 
+// Admission closes before Drain waits; all already admitted jobs, including the
+// FIFO, finish through the normal HTTP API with their original exit statuses.
+func TestDrainAdmittedQueue(t *testing.T) {
+	ts := startServer(t, server.Config{MaxJobs: 1})
+	c := ts.client()
+	ctx := context.Background()
+	a, err := c.Create(ctx, api.CreateJob{Script: "echo before; sleep .3; echo after; exit 7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.Create(ctx, api.CreateJob{Script: "echo queued"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drained := make(chan bool, 1)
+	go func() { drained <- ts.srv.Drain(5 * time.Second) }()
+	eventually(t, "admission closed", func() bool {
+		resp, err := c.request(ctx, "POST", "/v1/jobs", strings.NewReader("{}"), 2)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		var se *StatusError
+		return errors.As(err, &se) && se.Code == 503
+	})
+	if !<-drained {
+		t.Fatal("drain timed out")
+	}
+	for _, want := range []struct {
+		id, output string
+		code       int
+	}{
+		{a.ID, "before\nafter\n", 7}, {b.ID, "queued\n", 0},
+	} {
+		j, err := c.Get(ctx, want.id)
+		if err != nil || j.ExitCode == nil || *j.ExitCode != want.code {
+			t.Fatalf("result: %+v %v", j, err)
+		}
+		var out bytes.Buffer
+		if _, err := c.Logs(ctx, want.id, "stdout", 0, true, &out); err != nil || out.String() != want.output {
+			t.Fatalf("logs %q: %v", out.String(), err)
+		}
+	}
+}
+
+func TestDrainTimeout(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	id := ts.detach("", "--no-workspace", "-c", "sleep 60")
+	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Running })
+	start := time.Now()
+	if ts.srv.Drain(30*time.Millisecond) || time.Since(start) > time.Second {
+		t.Fatal("drain did not respect timeout")
+	}
+	if _, err := ts.client().Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetryUnavailable(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var req api.CreateJob
+		if json.Unmarshal(b, &req) != nil || req.Script != "true" {
+			t.Errorf("replayed body: %q", b)
+		}
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(502)
+		case 2:
+			w.WriteHeader(503)
+		default:
+			fmt.Fprint(w, "{}")
+		}
+	}))
+	defer ts.Close()
+	var notices int
+	c := &Client{URL: ts.URL, RetryTimeout: 3 * time.Second, RetryLog: func() { notices++ }}
+	if _, err := c.Create(context.Background(), api.CreateJob{Script: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 || notices != 1 {
+		t.Fatalf("calls=%d notices=%d", calls.Load(), notices)
+	}
+}
+
+func TestRetryCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	defer ts.Close()
+	c := &Client{URL: ts.URL, RetryTimeout: time.Minute}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.Health(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error: %v", err)
+	}
+}
+
 // TestProxyErrorPage: an HTML error page from a proxy in front of tun (exe.dev's when the
 // server is down) is reduced to its text, not dumped whole.
 func TestProxyErrorPage(t *testing.T) {
@@ -483,10 +581,73 @@ func TestProxyErrorPage(t *testing.T) {
 	}))
 	defer hs.Close()
 	var errb bytes.Buffer
-	code := Main([]string{"status", "x"}, Env{Stdout: io.Discard, Stderr: &errb, Cwd: t.TempDir(),
-		Getenv: func(k string) string { return map[string]string{"TUN_URL": hs.URL, "TUN_TOKEN": "t"}[k] }})
+	// Exercise formatting without the CLI's 16-minute outage retry policy.
+	c := &Client{URL: hs.URL, Token: "t"}
+	_, err := c.Get(context.Background(), "x")
+	code := errorf(Env{Stderr: &errb}, "%v", err)
 	want := "tun: server: not tun but an HTML page (a proxy in front of tun; is the server down or restarting?): Port 7070 unbound. We dialed port 7070 on this VM and nobody answered. (HTTP 502)\n"
 	if code != 125 || errb.String() != want {
 		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+// The proxy loses the first successful response: replay must return the admitted job.
+func TestCreateAmbiguousProxyRetry(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	var calls atomic.Int32
+	var key string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			key = r.Header.Get("X-Tun-Request-Id")
+		} else if key == "" || key != r.Header.Get("X-Tun-Request-Id") {
+			t.Error("retry changed request key")
+		}
+		rec := httptest.NewRecorder()
+		ts.srv.Handler().ServeHTTP(rec, r)
+		if calls.Load() == 1 {
+			w.WriteHeader(502)
+			return
+		}
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		w.Write(rec.Body.Bytes())
+	}))
+	defer proxy.Close()
+	c := ts.client()
+	c.URL = proxy.URL
+	c.RetryTimeout = time.Second
+	j, err := c.Create(context.Background(), api.CreateJob{Script: "echo once"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := ts.client().List(context.Background(), 100, nil)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != j.ID {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+	// Keys survive a server restart.
+	ts.stop()
+	ts2 := startServer(t, server.Config{DataDir: ts.data})
+	body := strings.NewReader(`{"script":"echo once"}`)
+	resp, err := ts2.client().requestH(context.Background(), "POST", "/v1/jobs", body, int64(body.Len()), map[string]string{"X-Tun-Request-Id": key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var replay api.Job
+	if err := json.NewDecoder(resp.Body).Decode(&replay); err != nil || replay.ID != j.ID {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestTailHeartbeat(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	var out, diagnostics bytes.Buffer
+	e := ts.env(t.TempDir(), nil, &out, &diagnostics, nil)
+	e.HeartbeatInterval = 10 * time.Millisecond
+	code := Main([]string{"run", "--no-workspace", "--tail", "1", "-c", "echo first; echo error >&2; sleep .3; echo last"}, e)
+	if code != 0 || out.String() != "last\n" || !strings.Contains(diagnostics.String(), "stdout 1 lines, stderr 1 lines; tun logs ") {
+		t.Fatalf("code=%d out=%q stderr=%q", code, out.String(), diagnostics.String())
 	}
 }

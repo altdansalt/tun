@@ -42,7 +42,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     Packages: `-e PKGS='./internal/reapi ./internal/client'` (default `./...`).
     `tun run` says where the job runs: `tun: running on hub` or `tun: running on runner NAME`.
   - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
-    stderr once the job ends (same exit code); `tun logs --tail N [--stderr] <id>` for more.
+    stderr once the job ends (same exit code), with a progress heartbeat every 30s;
+    `tun logs --tail N [--stderr] <id>` for more.
   - CI runs the real CLI smoke suites once at the end by default (scripts/e2e.sh, and
     scripts/e2e-runners.sh: a hub without local slots plus two `tun runner` processes);
     `-e E2E=0` disables them (with `-run` they are skipped unless `-e E2E=1`).
@@ -73,3 +74,16 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 - Keep it small and readable. Stdlib only. `gofmt` everything.
 - Tests are required for behavior you add. Prefer integration tests through the real HTTP server.
 - Commit with clear messages. Don't rewrite others' history.
+
+## Deploy
+See [docs/deploy.md](docs/deploy.md): atomic binary replacement, client retries,
+SIGTERM draining, and required systemd KillMode/TimeoutStopSec overrides.
+
+- Client identity: use `tun token [--data DIR] new NAME` on the server host, then install the
+  secret as `~/.config/tun/token` on its agent VM. `$DATA/token` remains admin and provides
+  no client isolation. Never put it on new agent VMs. See docs/deploy.md for migration.
+- Tool caches: `--max-shared-cache` (5GB, Go/XDG caches) and `--max-client-cache` (1GB per
+  client's Bazel repository cache) are soft budgets; trimming evicts whole trees (Go modules,
+  tool dirs, repository cache entries), never while a job/session may use them (sharedcache.go).
+- Uploaded content (workspace blobs, tun bazel CAS) is per uploader; other clients' argv,
+  script and workspace are hidden in job views. Remaining isolation gaps: SPEC.md, Known gaps.

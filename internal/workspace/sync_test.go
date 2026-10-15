@@ -256,19 +256,19 @@ func TestBlobsRoundTrip(t *testing.T) {
 	}
 	zw.Close()
 	raw := buf.Bytes()
-	if n, err := ReadBlobs(bytes.NewReader(raw), true, 1<<20, dir); n != 1 || err != nil {
+	if n, err := ReadBlobs(bytes.NewReader(raw), true, 1<<20, dir, nil); n != 1 || err != nil {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, m[0].Sha)); string(b) != "alpha" {
 		t.Fatalf("blob = %q", b)
 	}
-	if _, err := ReadBlobs(bytes.NewReader(raw), true, 3, dir); err != ErrBlobsTooLarge {
+	if _, err := ReadBlobs(bytes.NewReader(raw), true, 3, dir, nil); err != ErrBlobsTooLarge {
 		t.Fatalf("limit: %v", err)
 	}
 	var bad bytes.Buffer // content that doesn't match its name
 	write(t, filepath.Join(root, "b"), "beta", 0o644)
 	WriteBlobs(&bad, root, map[string]string{m[0].Sha: "b"})
-	if _, err := ReadBlobs(&bad, false, 1<<20, t.TempDir()); err == nil || !strings.Contains(err.Error(), "hashes to") {
+	if _, err := ReadBlobs(&bad, false, 1<<20, t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "hashes to") {
 		t.Fatalf("bad hash: %v", err)
 	}
 }

@@ -44,6 +44,8 @@ usage:
                                      recent jobs as JSON lines, newest first
   tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
   tun runners                        live runners of the server as JSON lines
+  tun token [--data DIR] new NAME    issue a client token on the server host
+                                    install in ~/.config/tun/token; shared token is admin (no isolation)
   tun serve [flags]                  run the server (tun serve -h; --ephemeral for testing)
   tun runner --hub URL [flags]       run jobs for a server from another machine (tun runner -h)
   tun help                           this text; 'tun <cmd> -h' for per-command flags
@@ -52,6 +54,9 @@ tun run ships the workspace (the git toplevel of the cwd, else the cwd; tracked 
 non-ignored files, no .git) to the server, runs the command there in the same relative
 directory, streams stdout/stderr, and exits with the command's exit status.
 Stderr reports compressed workspace bytes (uploaded or cached) and final job run/queue times.
+
+Requests retry connection failures and HTTP 502/503 for up to 16m with backoff,
+printing "tun: server unavailable, retrying". Deploys can delay submissions while draining.
 
 exit status of tun run: the command's exit code; 128+N if it was killed by signal N;
 124 if it hit --timeout; 125 for tun's own errors (bad flags, server unreachable, upload
@@ -115,7 +120,7 @@ a runner, only paths within the --out paths given here exist). With --detach, --
 declares the paths (nothing is downloaded): tun run --detach --out dist -- make, then
 tun get <id> dist once it has ended.
 
---tail N streams nothing while the job runs; when it ends, tun prints the last N lines of its
+--tail N prints a progress heartbeat to stderr every 30s while the job runs; when it ends, tun prints the last N lines of its
 stdout (to stdout) and of its stderr (to stderr), then a "tun: job <id>: showed the last ..."
 line with line counts and the commands for the full logs (tun logs <id>; tun logs --stderr <id>).
 The exit status is the same as without --tail. N must be 0 or more.
@@ -125,10 +130,11 @@ flags:
 
 // Env is the process context for the CLI, injectable for tests.
 type Env struct {
-	Stdout, Stderr io.Writer
-	Getenv         func(string) string
-	Cwd            string
-	Signals        <-chan os.Signal // SIGINT/SIGTERM delivered to the client
+	HeartbeatInterval time.Duration // zero uses 30s; tests use a short interval
+	Stdout, Stderr    io.Writer
+	Getenv            func(string) string
+	Cwd               string
+	Signals           <-chan os.Signal // SIGINT/SIGTERM delivered to the client
 }
 
 // Main runs a client command (everything except serve) and returns the exit code.
@@ -172,7 +178,7 @@ func newClient(e Env) *Client {
 		}
 	}
 	name, _ := os.Hostname()
-	return &Client{URL: url, Token: token, Name: name}
+	return &Client{URL: url, Token: token, Name: name, RetryTimeout: 16 * time.Minute, RetryLog: func() { fmt.Fprintln(e.Stderr, "tun: server unavailable, retrying") }}
 }
 
 func newFlags(name, usage string, e Env) *flag.FlagSet {
@@ -432,6 +438,8 @@ func (t *lineTail) Write(p []byte) (int, error) {
 
 // counts returns the number of lines kept and seen; a final unterminated line counts.
 func (t *lineTail) counts() (kept, total int64) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	kept, total = int64(bytes.Count(t.buf, []byte("\n"))), t.lines
 	if t.partial {
 		total++
@@ -555,6 +563,8 @@ func (w *newlineWriter) Write(p []byte) (int, error) {
 
 // wait streams (or collects) the job's output until it ends and maps the result to an exit code.
 // With tailN >= 0 it prints only the last tailN lines of each stream once the job has ended.
+const heartbeatInterval = 30 * time.Second
+
 func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, tailN int, e Env) (int, *api.Job) {
 	if j.QueuePosition != nil && !jsonOut {
 		var code int
@@ -582,15 +592,32 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 	go func() { defer wg.Done(); _, errErr = c.Logs(ctx, j.ID, "stderr", 0, true, errw) }()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case sig := <-e.Signals:
-		cancel()
-		<-done
-		if tailN >= 0 {
-			printTails(e, j.ID, lOut, lErr)
+	interval := e.HeartbeatInterval
+	if interval <= 0 {
+		interval = heartbeatInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	started := time.Now()
+waiting:
+	for {
+		select {
+		case <-ticker.C:
+			if tailN >= 0 {
+				_, n := lOut.counts()
+				_, m := lErr.counts()
+				fmt.Fprintf(e.Stderr, "tun: job %s still running after %.0fs (stdout %d lines, stderr %d lines; tun logs %s)\n", j.ID, time.Since(started).Seconds(), n, m, j.ID)
+			}
+		case <-done:
+			break waiting
+		case sig := <-e.Signals:
+			cancel()
+			<-done
+			if tailN >= 0 {
+				printTails(e, j.ID, lOut, lErr)
+			}
+			return cancelOnSignal(c, j.ID, sig, e), nil
 		}
-		return cancelOnSignal(c, j.ID, sig, e), nil
 	}
 	if tailN >= 0 {
 		printTails(e, j.ID, lOut, lErr)
