@@ -218,6 +218,17 @@ Deviations from this plan:
   ~15 Bazel jobs in an hour filled a 25 GB host.
 - The default BUILD check is "every .go file appears in its BUILD.bazel", not gazelle's diff:
   building gazelle in a fresh output base cost 11-21 s per job even with warm caches (`GAZELLE=1`).
+- `scripts/gazelle.sh` (fix BUILD files in a job, `tun run --out gazelle.tar`) keeps the built
+  gazelle binary in the per-host shared cache (`tun-bazel/gazelle/KEY`, KEY from MODULE.bazel,
+  lockfile, root BUILD.bazel) and runs it without Bazel next time: through Bazel it was 47-65 s
+  even with warm repository/disk caches (loading + analysis of //:gazelle in a fresh output base;
+  critical path 1.9 s), cached 0.3-0.5 s, same diff (2026-10-15: jobs
+  20261015T131345646590-1b47d1a6, 20261015T131746465866-d0a77f3d via Bazel;
+  20261015T131452254147-d3b3828f, 20261015T131838459108-bfb2a396 cached). A cold host (empty
+  repository and disk cache) took 578 s (20261015T125047046629-28925134, tun-r1; critical path
+  392 s compiling gazelle). Same trust caveat as the shared disk cache (any job can plant a
+  binary; `GAZELLE_CACHE=0` opts out). It is a v0 stopgap: once warm sessions can run tools that
+  write source files (`tun bazel run //:gazelle` bringing back changed files), that replaces it.
 
 ### Measurements
 `run_sec` of tun jobs on the shared 2-CPU tun host (other agents' jobs ran at the same time: "load"
