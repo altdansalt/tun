@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ type RunnerConfig struct {
 	PrivateNet bool
 	KillGrace  time.Duration
 	KeepBlobs  time.Duration // cached workspace blobs unused this long are deleted; default 24h
+	MinFree    MinFree       // when free space is under it, cached blobs are deleted (see disk.go)
 	HTTP       *http.Client
 	Logf       func(format string, a ...any) // default: discard
 }
@@ -69,6 +71,7 @@ type Runner struct {
 	actionStore *reapi.Store
 	blobMu      sync.Mutex
 	blobLock    map[string]*sync.Mutex
+	reclaimed   atomic.Int64
 }
 
 type runnerJob struct {
@@ -115,6 +118,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Mount sources must have no symlink in their path (sandbox.openMountSource).
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return nil, err
+	}
+	cfg.DataDir = dir
 	// Two runners on one data dir would wipe and reuse each other's job dirs.
 	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -158,6 +166,7 @@ func (r *Runner) Run() {
 			r.sweepBlobs()
 			nextSweep = time.Now().Add(time.Hour)
 		}
+		r.reclaimBlobs()
 		resp, err := r.poll()
 		if err != nil {
 			if r.pollCtx.Err() != nil {
@@ -327,6 +336,9 @@ func (r *Runner) poll() (api.RunnerPollResponse, error) {
 		req.Slots = 0
 	}
 	r.mu.Unlock()
+	if req.Disk = diskInfo(r.cfg.DataDir, r.cfg.MinFree); req.Disk != nil {
+		req.Disk.ReclaimedBlobs = r.reclaimed.Load()
+	}
 	ctx, cancel := context.WithTimeout(r.pollCtx, 90*time.Second)
 	defer cancel()
 	var resp api.RunnerPollResponse

@@ -20,6 +20,7 @@ tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N]
           [--ephemeral] [--exit-on-eof]
           [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=false] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
+          [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -42,8 +43,11 @@ tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>      
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
-           [--net auto|private|host]
+           [--net auto|private|host] [--min-free 10%]
 tun runners                       (JSON lines: the server's live runners)
+tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
+tun sessions [--client NAME | --mine]   (JSON lines: the server's Bazel sessions)
+tun serve ... [--max-sessions 2] [--session-idle 30m]
 ```
 `tun logs --tail N`: only the last N lines (a final line without a newline counts); with `-f`,
 start at the last N lines present when it connects, then follow until the job ends.
@@ -192,6 +196,27 @@ A sweep at server startup and then periodically (a quarter of the shortest reten
   file's mtime) for `--keep-blobs` (24h) are deleted; clients just re-upload.
 - A duration of 0 disables that deletion.
 
+Disk space: when free space on the data dir's filesystem is under `--min-free` (bytes with
+KB/MB/GB, or a percentage of the filesystem; default 10%; 0 disables), the server deletes
+finished jobs' work dirs early, oldest first (as `--keep-work` would; `work_deleted: true`),
+until it is above again, then idle Bazel sessions, least recently used first. It checks
+before each job starts, before it unpacks a workspace, and every minute; it logs what it
+deleted. healthz `disk: {free_bytes, total_bytes, min_free_bytes, low, reclaimed_work_dirs,
+reclaimed_sessions}` (`low`: still under the minimum). A runner (whose job dirs are deleted
+when the job ends) does the same with its cached workspace blobs, least recently used first,
+before each poll (`tun runner --min-free`, default 10%), and reports its `disk` (with
+`reclaimed_blobs`) in polls; healthz shows it as `runners[].disk`.
+
+Logs: if writing a job's stdout or stderr log fails (e.g. the disk is full), the rest of that
+stream is discarded (the job never blocks on it) and the job's `error` says so; `tun run`
+prints it ("tun: job ID exited; server error: ...").
+
+Runner actions also check disk pressure before fetching/materializing inputs: cached workspace
+blobs are reclaimed first, then the runner CAS is evicted least recently used first while
+space remains below `--min-free`. Concurrent readers retain open descriptors; evicted inputs
+are fetched again from the hub. The CAS also retains its 10GB size budget.
+
+
 ## Services
 `tun run --service [--port N]... -- <cmd>` starts a job meant to run until canceled (dev server,
 database, test fixture):
@@ -325,15 +350,138 @@ client API is unchanged. Job state, logs and outputs live on the hub.
 - Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
   workspace. Runners fetch workspace blobs through `GET /v1/runner/blobs/{sha}`.
 
+## Bazel sessions (tun bazel)
+First step of docs/bazel.md (M1, hub-local only). `tun bazel [--session NAME] [--cold]
+[--timeout DUR] [--json] <bazel command> [args...]` runs `bazel <command> [args...]` in a warm session
+on the server and streams its output; the exit status is Bazel's (124 on timeout, 125 for
+tun's errors). The agent's args pass through unchanged; anything flag-like before the bazel
+command other than tun's flags (a Bazel startup option) is a usage error.
+- **Session** = (client, workspace root path on the client, name; default `default`), id =
+  first 20 hex of sha256(client NUL root NUL name). It lives in `$DATA/sessions/<id>/`:
+  `session.json`, `sync.json` (the last applied manifest plus the stat of each file tun
+  wrote), `tun.bazelrc`, `agent.log` (the sandbox's own output: the server copies it from a
+  pipe, capped at `--max-log` and at most 8MB, so the sandbox never holds a descriptor of a
+  server-owned file), and `sandbox/{work,home,tmp,out}`.
+- **Fixed paths.** Under bwrap the session sandbox has an empty root with the host's
+  top-level directories bound read-only (so new top-level paths can exist), and binds
+  `work` at `/work`, `home` at `/tun/home` (HOME), `tmp` at `/tmp` (TMPDIR), `out` at
+  `/tun/out` (Bazel's `--output_user_root`, output base `/tun/out/base`), and the client's
+  own Bazel caches from `$DATA/bazel/<sha256(client)[:16 hex]>/`: `repo` at `/tun/cache/repo`
+  (`--repository_cache`; Bazel 8+ keep the repository contents cache, fetched repository
+  trees, in its `contents/` by default), `disk` at `/tun/cache/disk` (`--disk_cache`),
+  `bazelisk` at `/tun/cache/bazelisk` (BAZELISK_HOME; a new one is seeded with a copy of
+  `--bazelisk-seed DIR`'s `downloads/` if given), `tun.bazelrc` read-only at `/tun/tun.bazelrc`, and
+  the tun executable at `/tun/bin/tun`. The server user's home and the data dir are hidden as
+  for jobs; with network isolation the session has its own network namespace and egress
+  proxy. With sandbox `none` the same dirs are used at their host paths. The root is
+  remounted read-only once everything is mounted. Every bind source of a job or session
+  sandbox (its tree, tmp, the shared caches, the session mounts) is opened one path component
+  at a time without following symlinks, must be a directory owned by the server user (or a
+  regular file, read-only) and is handed to bwrap as a descriptor (`--bind-fd`), so a symlink
+  planted where a sandbox can write never redirects a mount. The caches are per client
+  because none can be trusted once a sandbox wrote it (bazelisk runs a cached Bazel without
+  checking it again; Bazel trusts its repository contents and disk caches): a client can
+  only poison its own. Clients are told apart by the identity in `client` (see visibility):
+  behind exe.dev's proxy it can't be forged; otherwise it is self-reported.
+- **Long-lived sandbox.** The session sandbox's first process is an agent
+  (`tun __tun-session-agent`, under the network helper when isolated) that runs one command
+  at a time on request over a socketpair (fd 7): the server sends a `run` message with the
+  job's stdout/stderr pipes and the read end of a pipe (SCM_RIGHTS) that then carries argv and
+  dir (so argv may be larger than a socket buffer; up to 16MB); the agent starts the command
+  in its own process group, reports `started` and later the exit code or signal, delivers
+  `signal` requests to the group, and kills stragglers in the group when the command ends.
+  Under bwrap it then also kills every other process left in the sandbox (setsid'd or
+  daemonized leftovers) except itself, its ancestors and the Bazel server (the pid in
+  `out/base/server/server.pid.txt`) with its descendants, so nothing a command started can
+  read or forge a later command's output or modify `/work` during a sync. (A command can
+  still protect a process by writing its pid there; without bwrap there is no sweep.) Bazel's
+  server daemonizes into its own session inside the sandbox (its pid and network namespace),
+  so it survives
+  between commands. The sandbox is started by the first command of a session (output: "tun:
+  session N: started a new session sandbox ...") and lives until the session is stopped or
+  the server exits (`--die-with-parent`). Before starting a bwrap sandbox for an existing
+  session, `out/base/server` (pid/port files of a server in a dead pid namespace) is removed.
+- **Command:** `bazel --output_user_root=<out> --output_base=<out>/base --bazelrc=<rc>
+  --max_idle_secs=<session-idle + 5m> <args...>` in `<work>/<cwd>`, with env PATH, LANG,
+  TERM=dumb, USER, HOME, TMPDIR, BAZELISK_HOME, TUN_SESSION (constant per session, so Bazel's
+  client env doesn't change between commands). `tun.bazelrc` has `common
+  --repository_cache=...`, `common --disk_cache=...`, `common
+  --experimental_disk_cache_gc_max_size=5G`; it is the "user" rc, so the workspace's own
+  `.bazelrc` still applies.
+- **Jobs.** Each command is a job (`POST /v1/jobs` with `bazel`, see the API) in the normal
+  FIFO; it needs a hub-local slot (a hub with `--local-slots 0` answers 409) and is never
+  given to a runner. It also needs its session: a session runs one command at a time, so the
+  scheduler skips a bazel job whose session is busy (later jobs may start first) and sets
+  `queue_reason` on it (tun prints it with the queued line). The job object has `session`,
+  `session_id`, and `argv` = `["bazel", args...]`. Once it has a slot and its session, the job
+  is `running`: with `--cold` (or `cold: true`) the session's sandbox is stopped and its dir
+  deleted first ("tun: --cold: discarded ..."); then the manifest is applied (stderr: "tun:
+  session N (id): synced workspace in Xs: a added, u updated, d deleted, k unchanged (BB
+  written)"); then the command runs in the session sandbox. Timeout and cancel send SIGINT to
+  the bazel client (Bazel cancels the command), SIGKILL after the kill grace, and if the
+  command still hasn't ended after twice the grace, kill the session sandbox. A server
+  shutdown kills the sandboxes; the next server marks running bazel jobs failed. `tun get` of
+  a bazel job is a 409 (outputs stay in the session's output base).
+- **Sync.** The client lists the same files as for `tun run` (minus top-level `bazel-*`
+  symlinks: Bazel's convenience links) and builds a manifest: entries `{p, t: f|d|l, m (perm
+  bits), s (sha256), n (size), l (link target)}`, each parent directory listed before its
+  contents. File digests are cached in `$XDG_CACHE_HOME/tun` (else `~/.cache/tun`) by size,
+  mtime, ctime and inode (files modified in the last 2s are always rehashed). The job request
+  is sent gzip-compressed (`Content-Encoding: gzip`). If the server lacks some contents it
+  answers 409 `{error, missing: [sha...]}`; the client uploads them with `POST /v1/cas` (a
+  gzip-compressed tar, entries named by sha256, batches of at most 64MB) and creates the job
+  again (up to 3 times). The client prints "tun: sync: N manifest entries (XB sent), uploaded
+  k of n files (YB sent) in Zs". The server validates the manifest (clean relative paths, no
+  `..`, parents listed as directories, no duplicates, sha256 digests, permission bits only,
+  links relative and lexically inside; total file size under `--max-workspace`, else 413),
+  and when the job starts applies it in place through an `os.Root`: paths of the previous
+  manifest that are gone are deleted (directories only if empty); a file whose sha256, mode,
+  size, mtime, ctime and inode match what tun last wrote is left alone (its mtime stays, so Bazel's
+  and other stat-based caches stay valid); other files are written to a temp file and renamed
+  over; paths tun never wrote (e.g. `bazel-*` links) are left alone unless the manifest needs
+  them; links are checked against the final tree (chains that leave it are removed and fail
+  the job); directory modes are applied last.
+- **Results.** For `build`, `test`, `coverage` and `run`, tun inserts
+  `--build_event_json_file=<out>/tun-bep.json` right after the command (any earlier file is
+  removed first). When Bazel exits the server reads it (through an `os.Root`, no links,
+  regular file, at most 256MB) with `internal/bep`, sets Bazel's exit status as the result,
+  appends one line to the job's stderr (`tun: bazel test exit=3 after 12.4s: 2 of 40 tests
+  failed: //a:b_test //c:d_test`; labels capped at 20; a BEP read error is appended in
+  parentheses) and records it as the job's `summary`. For every command whose Bazel ran,
+  the bounded summary object (`bep.Summary.JSON`: command, exit_code, exit_name, success,
+  complete, duration_sec, targets, tests, failed_actions, counts, omitted) is stored as
+  `jobs/<id>/bep.json` and served by `GET /v1/jobs/{id}/bep` (404 without one). `tun bazel
+  --json` sends Bazel's stdout to stderr and prints that object on stdout, adding `job`,
+  `state` and `error` (only those, plus `exit_code`, when the command never ran).
+- **Lifetime.** A session is deleted (Bazel `shutdown` through the agent, then the sandbox is
+  closed and the dir removed) after `--session-idle` (default 30m) without a command. At most
+  `--max-sessions` (default 2) exist; a bazel job for a new session when that many exist
+  evicts the least recently used idle one (one eviction at a time) and waits for it. Sessions
+  survive a server restart on disk (`bazel_server: false` until the next command starts a new
+  sandbox).
+- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root,
+  created_at, last_used, commands, last_job, state (idle|busy|stopping), job, bazel_server,
+  expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.
+
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
 - `GET /v1/blobs/{sha256}` — the blob's bytes (runners fetch workspaces with it).
+- `POST /v1/cas`: tun bazel's file contents, a tar (gzip if `Content-Encoding: gzip`) of
+  regular files named by their sha256; each is verified; over `--max-upload` is a 413.
+  Stored in `$DATA/cas/`, deleted unused for `--keep-blobs` (job creation marks the ones a
+  manifest names as used).
 - `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace, service, ports, outputs}` -> job object (201).
+  Or `{cwd, timeout_sec, bazel: {session, cold, root, manifest, args}}` for tun bazel (see
+  Bazel sessions; 409 `{error, missing}` if file contents must be uploaded first). The body
+  may be gzip-compressed (`Content-Encoding: gzip`); it is limited to `--max-upload`
+  (compressed) and 256MB of JSON.
+- `GET /v1/sessions` (see Bazel sessions). `GET /v1/jobs/{id}/bep`: a tun bazel job's
+  summary object (see Bazel sessions, Results).
   `outputs`: at most 256 paths valid for the files endpoint (see Runners).
   `timeout_sec` <= 0 means the default (1800), except for services where 0 (or less) means none; over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position}`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason, summary}`.
 - `GET /v1/jobs?limit=N&state=S[,S...]&client=NAME&mine=1` -> list, newest first, filtered
   before the limit (`mine=1`: client = this request's client identity; with `client` it's a 400;
   unknown states are a 400). `POST /v1/jobs/{id}/cancel`.
@@ -361,7 +509,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, disk}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 - `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
@@ -397,4 +545,4 @@ execution limits and benchmarks.
 Service-to-service networking (with isolation, jobs can't reach each other at all),
 raw TCP/UDP egress and DNS from isolated jobs, unauthenticated/public URLs, TLS
 termination, multi-host scheduling beyond runners (labels, affinity, services on runners), persistent
-workspaces, snapshots, incremental (per-file) upload.
+workspaces and incremental upload for `tun run` (tun bazel has both), snapshots.

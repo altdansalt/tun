@@ -203,3 +203,28 @@ func TestUploadKeepsIncrementalHash(t *testing.T) {
 		t.Fatal("finished upload missing")
 	}
 }
+
+func TestDiskPressureReclaimsLRU(t *testing.T) {
+	s, err := Open(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := []byte("old"), []byte("new")
+	if err = s.put("cas-", digest(a), a); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.put("cas-", digest(b), b); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	s.Reclaim(func() bool {
+		// Reentry would deadlock if the callback were called under the index lock.
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		checks++
+		return s.total > int64(len(b))
+	})
+	if checks == 0 || s.has(digest(a)) || !s.has(digest(b)) {
+		t.Fatal("wrong disk-pressure eviction")
+	}
+}

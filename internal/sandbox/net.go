@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,7 +55,6 @@ func init() {
 // selfExe is an O_PATH handle on the running executable, so the helper is this exact binary
 // even if the file on disk is replaced while the server runs.
 var selfExe = sync.OnceValues(func() (*os.File, error) {
-	const oPath = 0o10000000 // O_PATH; missing from package syscall
 	return os.OpenFile("/proc/self/exe", oPath|syscall.O_CLOEXEC, 0)
 })
 
@@ -69,6 +69,9 @@ func NetUsable() error {
 		return err
 	}
 	defer os.RemoveAll(dir)
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return err
+	}
 	var out strings.Builder
 	cmd, n, err := Start(Spec{Mode: Bwrap, PrivateNet: true, Argv: []string{"sleep", "10"}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: dir, Root: dir, Tmp: dir, DataDir: dir}, &out, &out)
 	if err != nil {
@@ -288,7 +291,11 @@ func helperMain(argv []string) int {
 		return fail(err)
 	}
 	ctl := c.(*net.UnixConn)
-	closeOnExecAll() // e.g. the bound executable's fd; the command gets only stdio
+	var pass *os.File // Spec.Pass, handed on to the command
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, PassFD, syscall.F_GETFD, 0); errno == 0 {
+		pass = os.NewFile(PassFD, "pass")
+	}
+	closeOnExecAll() // e.g. the bound executable's fd; the command gets only stdio (and pass)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fail(err)
@@ -308,9 +315,16 @@ func helperMain(argv []string) int {
 	signal.Notify(make(chan os.Signal, 1), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = env, os.Stdin, os.Stdout, os.Stderr
+	if pass != nil {
+		cmd.ExtraFiles = make([]*os.File, PassFD-2)
+		cmd.ExtraFiles[PassFD-3] = pass
+	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "tun: %v\n", err)
 		return 127
+	}
+	if pass != nil {
+		pass.Close() // the command's end of the server's channel is the command's alone
 	}
 	go serveCtl(ctl, ln.(*net.TCPListener))
 	cmd.Wait()

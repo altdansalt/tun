@@ -48,4 +48,25 @@ done
 grep -Eq '"state":[[:space:]]*"canceled"' status
 tun ls > jobs
 grep -q "$job" jobs
+# tun bazel: a genrule workspace (no downloads); the second command finds the server warm.
+if command -v bazel >/dev/null; then
+  mkdir "$tmp/bz" && cd "$tmp/bz"
+  echo 'module(name = "smoke")' > MODULE.bazel
+  echo 9.3.0 > .bazelversion
+  echo 'genrule(name = "g", outs = ["g.txt"], cmd = "echo hi > $@")' > BUILD.bazel
+  tun bazel build //:g 2> "$tmp/first"
+  grep -q "Starting local Bazel server" "$tmp/first"
+  tun bazel build //:g 2> "$tmp/second"
+  if grep -q "Starting local Bazel server" "$tmp/second"; then exit 1; fi # (! is exempt from set -e)
+  grep -q "uploaded 0 of 3 files (0B sent)" "$tmp/second"
+  grep -Eq "^tun: bazel build exit=0 after .*: 1 targets built$" "$tmp/second"
+  code=0
+  tun bazel build //:missing 2>/dev/null || code=$?
+  [ "$code" -ne 0 ]
+  [ "$code" -ne 125 ]
+  tun bazel --json build //:g > "$tmp/json" 2>/dev/null
+  grep -q '"path":"bazel-bin/g.txt"' "$tmp/json"
+  tun sessions | grep -q '"commands":4'
+  cd "$tmp"
+fi
 echo 'e2e: passed'

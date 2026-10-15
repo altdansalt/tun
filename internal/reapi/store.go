@@ -186,15 +186,26 @@ func (s *Store) evict() {
 	if !over {
 		return
 	}
+	s.Reclaim(func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.total > s.max
+	})
+}
+
+// Reclaim deletes least recently used cache entries while low reports disk pressure.
+// The callback runs outside index and file locks. Open readers keep their descriptors; missing
+// inputs are fetched again, as with budget eviction.
+func (s *Store) Reclaim(low func() bool) {
 	s.eviction.Lock()
 	defer s.eviction.Unlock()
 	s.mu.Lock()
 	remaining := s.lru.Len()
 	s.mu.Unlock()
-	for remaining > 0 {
+	for remaining > 0 && low() {
 		remaining--
 		s.mu.Lock()
-		if s.total <= s.max || s.lru.Len() == 0 {
+		if s.lru.Len() == 0 {
 			s.mu.Unlock()
 			return
 		}

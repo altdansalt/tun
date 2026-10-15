@@ -46,13 +46,24 @@ service's port without the token). healthz reports "network_isolation".
 Retention: a sweep at startup and periodically deletes finished jobs' sandbox dir (work,
 home, tmp) after --keep-work (the job then shows "work_deleted": true; status and logs still
 work), whole job records (job.json + logs) after --keep-jobs, and workspace blobs not used by
-a queued/running job for --keep-blobs. A duration of 0 keeps forever. Each job's stdout and
+a queued/running job for --keep-blobs. A duration of 0 keeps forever. When free space on
+the data dir's filesystem is under --min-free, finished jobs' work dirs are deleted before
+--keep-work, oldest first, then idle tun bazel sessions, least recently used first (checked
+before each job starts and every minute; healthz "disk" reports it). Each job's stdout and
 stderr are capped at --max-log; the workspace's unpacked size at --max-workspace.
 
 Runners: other machines can run this server's jobs with 'tun runner --hub URL' (they poll
 it; it never connects to them). Queued jobs go FIFO to any free slot: one of the
 --local-slots or a runner's. --local-slots 0 makes a pure hub. Services always run here.
 A runner job keeps only the files declared with tun run --out (uploaded when it ends).
+
+Bazel sessions (tun bazel): each (client, workspace, session name) gets a persistent dir
+under $DATA/sessions with the synced workspace and Bazel's output base, and a long-lived
+sandbox in which the Bazel server stays up between commands. A session is deleted after
+--session-idle without a command; at most --max-sessions exist (a Bazel server takes 1GB+ of
+memory): a new one evicts the least recently used idle one. tun bazel commands take local
+slots like other jobs. Each client has its own Bazel caches (bazelisk downloads, repository
+cache, disk cache) in $DATA/bazel.
 
 flags:
 `
@@ -94,7 +105,11 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxLog := fs.String("max-log", "256MB", "max bytes kept of each job's stdout and of its stderr; past it the server appends a marker and discards the rest")
 	keepWork := fs.Duration("keep-work", time.Hour, "delete a finished job's sandbox dir (work, home, tmp) this long after it ends (0: never)")
 	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
+	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, finished jobs' work dirs (oldest first), then idle tun bazel sessions (least recently used) are deleted before a job starts")
 	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
+	maxSessions := fs.Int("max-sessions", 2, "tun bazel sessions at once (each can hold a Bazel server, 1GB+ of memory); a new one evicts the least recently used idle one")
+	bazeliskSeed := fs.String("bazelisk-seed", "", "copy this bazelisk home's downloads/ (e.g. ~/.cache/bazelisk; must not be writable by jobs) into each client's new bazelisk home for tun bazel, so Bazel isn't downloaded again")
+	sessionIdle := fs.Duration("session-idle", 30*time.Minute, "delete a tun bazel session (its Bazel server, output base and workspace copy) after this long without a command")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -154,6 +169,10 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *keepWork < 0 || *keepJobs < 0 || *keepBlobs < 0 {
 		return fail("--keep-work, --keep-jobs and --keep-blobs must not be negative")
 	}
+	mf, err := ParseMinFree(*minFree)
+	if err != nil {
+		return fail("--min-free: %v", err)
+	}
 	if *mode, err = resolveSandbox(*mode); err != nil {
 		return fail("%v", err)
 	}
@@ -169,11 +188,15 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	} else if *maxJobs < 1 {
 		return fail("--max-jobs must be at least 1 (for a hub that only dispatches to runners: --local-slots 0)")
 	}
+	if *maxSessions < 1 || *sessionIdle <= 0 {
+		return fail("--max-sessions must be at least 1 and --session-idle positive")
+	}
 	if *runnerTimeout < time.Second {
 		return fail("--runner-timeout must be at least 1s")
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
-		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
+		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf,
+		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}

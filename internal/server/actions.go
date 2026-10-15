@@ -130,6 +130,7 @@ func (s *Server) runnerCAS(w http.ResponseWriter, r *http.Request) {
 }
 func (r *Runner) executeAction(j *runnerJob) (procResult, api.RunnerDone) {
 	var done api.RunnerDone
+	r.reclaimBlobs() // also check before action input materialization, not only polls
 	r.mu.Lock()
 	store := r.actionStore
 	var err error
@@ -146,6 +147,9 @@ func (r *Runner) executeAction(j *runnerJob) (procResult, api.RunnerDone) {
 	defer cancel()
 	if err != nil {
 		return failed("CAS: %v", err), done
+	}
+	if r.cfg.MinFree.set() {
+		store.Reclaim(func() bool { d := diskInfo(r.cfg.DataDir, r.cfg.MinFree); return d != nil && d.Low })
 	}
 	remote := &reapi.RemoteStore{Local: store, Fetch: func(d []byte) ([]byte, error) {
 		var out casTransfer

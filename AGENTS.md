@@ -20,6 +20,11 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
   - CI runs the real CLI smoke suites once at the end by default (scripts/e2e.sh, and
     scripts/e2e-runners.sh: a hub without local slots plus two `tun runner` processes);
     `-e E2E=0` disables them (with `-run` they are skipped unless `-e E2E=1`).
+  - `tun bazel` (warm Bazel sessions) needs a server built from a branch that has it: try yours with
+    `tun run -c 'scripts/dev-tun.sh tun bazel build //...'`. Its tests use a fake bazel; TestBazelReal
+    and scripts/e2e.sh also run the real one when `bazel` is on PATH (it is on the tun hosts).
+    It ends with a BEP summary line; `tun bazel --json ...` prints the result as one object.
+    Bazel caches are per client on the server; dev-tun.sh seeds bazelisk from the job's cache.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
 - Fallback if tun is down or you suspect tun itself: `scripts/bb-ci.sh` (same CI on a BuildBuddy runner).
 - If tun gets in your way (missing feature, confusing error, slow), note it in your final report under

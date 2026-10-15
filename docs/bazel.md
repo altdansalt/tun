@@ -1,8 +1,9 @@
 # tun v1 direction: Bazel-native remote execution
 
-Status: direction agreed 2026-10-15; the standalone M1 BEP results package is implemented
-(see results below). SPEC.md stays the contract for
-what exists (`tun run`); this file is the target and the order we get there.
+Status: direction agreed 2026-10-15. The core of M1 exists (branch feat/bazel-sessions:
+`tun bazel`, sessions, manifest sync on the hub; see "M1 status" below). SPEC.md stays the
+contract for what exists; this file is the target and the order we get there.
+The standalone M1 BEP results package is implemented (see results below).
 
 ## Goal
 An agent sends a Bazel command; tun makes it fast. Caching, warm servers and remote execution
@@ -100,6 +101,81 @@ long-lived. `tun bazel run --service --port 8080 //svc` reuses v0's port proxy.
 Targets to beat, set at M1 from real numbers: warm one-line-change `test` faster than `bb remote`;
 no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms.
 
+## M1 status (feat/bazel-sessions)
+Built: `tun bazel [--session NAME] [--cold] [--json] <cmd> [args...]`, `tun sessions`, sessions
+on the hub's local slots (fixed `/work`, `/tun/home`, `/tmp`, output base `/tun/out/base`), a
+long-lived session sandbox whose agent runs each command (so the Bazel server survives between
+commands), manifest sync with in-place apply, idle expiry (`--session-idle`, 30m) and LRU
+eviction (`--max-sessions`, 2), per-client Bazel caches (bazelisk, repository, disk), the BEP
+summary line and `--json` (internal/bep). Contract in SPEC.md ("Bazel sessions").
+
+Deviations from the model above, and why:
+- **A busy session queues** the next command of the same session instead of starting a new
+  cold one. A second Bazel server costs 1GB+ on a 4GB host and a cold analysis; `--session
+  NAME` gets the parallel one explicitly. Waiting jobs show `queue_reason`.
+- **All Bazel caches per client** (`$DATA/bazel/<client>/`), not per session and not per host:
+  `--cold` and a second `--session` of the same client reuse them, and one client can't poison
+  another's. The plan said "per-host repository cache"; a security review showed why not: Bazel
+  8+/9 keep fetched repository trees (the repo contents cache) in `<repository_cache>/contents`
+  by default (verified on 9.3.0, job 20261015T085624196657-2083995d) and trust them, and
+  bazelisk runs a cached Bazel binary without checking it again, so a shared writable cache lets
+  one client run code in another's builds. The cost is a Bazel download per client and
+  version (`tun serve --bazelisk-seed DIR` copies a server-owned bazelisk cache into new client
+  homes) and repository fetches per client. None of these dirs can be written by v0 jobs (they
+  used to be: bazelisk's home was in the shared XDG cache). The disk cache is size-capped by
+  Bazel (`--experimental_disk_cache_gc_max_size=5G`); tun doesn't delete per-client dirs yet.
+  Isolation is as good as the client identity: unforgeable behind exe.dev's proxy only.
+- **Bazel startup options from the agent are rejected** (tun's own must stay constant per
+  session or Bazel restarts its server).
+- The client identifies its workspace by its absolute root path; two checkouts of one repo are
+  two sessions (they share the client's disk cache).
+
+- **Summary only for build, test, coverage, run.** Bazel 9.3.0 accepts
+  `--build_event_json_file` for query, cquery and aquery too (contrary to the note in "M1
+  results" below, verified in job 20261015T085624196657-2083995d), and silently ignores it for
+  info, clean, mod, config; a "N targets built" line would mislead there, so those get only
+  the `--json` object (exit code, duration). The full uncapped snapshot is not kept (only the
+  bounded JSON in the job dir), since `tun get` by label is not built yet.
+- **Leftover processes are killed after each command** (bwrap only): everything in the session
+  sandbox except the agent, its ancestors and the Bazel server (`server.pid.txt`) with its
+  descendants, so a command can't leave something behind that tampers with the next one.
+
+Not done yet in M1: the optional
+BuildBuddy remote cache; sessions on runners and placement; `tun get` of outputs; `bazel run`
+as a separate job; measuring tun's own `bazel test //...` (needs M0's BUILD files) and an
+outside repo, and against `bb remote`.
+
+Measured (2026-10-15, private dev server on a tun host via `tun run -c 'scripts/dev-tun.sh
+...'`, client on the same host, so no network round trips; tun job 20261015T081338167547-8eeb4d65):
+
+| genrule workspace (4 files)      | wall  | Bazel elapsed | sent (manifest + contents) | job |
+|----------------------------------|-------|---------------|---------------------------|-----|
+| first command, new session       | 6.60s | 6.44s, "Starting local Bazel server" | 840B + 409B | 20261015T081339359149-6bcd15ac |
+| second (no-op)                   | 0.37s | 0.33s, 0 packages loaded | 420B + 0B | 20261015T081345972324-a7ea86da |
+| third (no-op)                    | 0.11s | 0.09s | 420B + 0B | 20261015T081346347993-a343996c |
+| one-line change of an input      | 0.17s | 0.12s | 838B + 140B | 20261015T081346468837-bed213e2 |
+| `--cold`                         | 6.91s | 6.34s, new server | 427B + 0B | 20261015T081346640293-da0e4076 |
+| v0: `tun run -- bazel build` (every time) | 6.5-7.8s | new server, full analysis | tarball | |
+
+After the security fixes and with the BEP summary (same setup, tun job
+20261015T091046678975-d7e2d5f7, hub under load): first command 9.9s (Bazel elapsed 9.7s, new
+server; job 20261015T091049121021-84c87d9a), no-op 0.40s (Bazel 0.36s;
+20261015T091059030954-db282b89), one-line change 0.37s (Bazel 0.28s, 140B uploaded;
+20261015T091059429520-40590e2e), each ending in `tun: bazel build exit=0 after 0.4s: 1 targets
+built`; `--json` returns `bazel-bin/g.txt` as the output. The cost of the BEP file, its
+parsing and the per-command sweep was not measured separately (the earlier run had a 0.11s
+third no-op; a single sample on a loaded host can't tell them apart).
+
+Cost of a warm session on the trivial workspace: Bazel server RSS 223MB, 117MB on disk
+(nearly all Bazel's install base, extracted per session; sharing it across sessions would save
+that and ~1s per new session, but makes it writable by every session).
+
+tun's own tree (78 entries, 66 files) with `bazel info`: first sync 6.9KB manifest + 176KB
+contents; no-op 3.5KB; one-line change 6.9KB (the manifest is sent twice: once answered with
+the missing digest) + 2.8KB; `tun run` uploads a 164KB tarball for every change. From a
+remote client add ~4 round trips (create, two log streams, status; ~35ms each from an exe.dev
+VM to the shared server) and 2 more for a change (409, upload).
+
 ## Open questions / risks
 - **Stdlib only vs gRPC — decision revised 2026-10-15.** No HTTP cache detour and no
   third-party gRPC/protobuf dependencies. Go 1.25 `http.Server.Protocols` with
@@ -109,9 +185,11 @@ no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms
 - **Nested sandboxing:** Bazel's linux-sandbox inside tun's bwrap needs nested user namespaces;
   verify in M0, else run Bazel with `processwrapper-sandbox` and rely on tun's boundary.
 - **Memory:** 4 GB runners, JVM servers. Tune `--host_jvm_args`, cap sessions per host, evict LRU.
-- **Trust:** shared per-host caches are writable by every job today (v0 limitation); in M1 the
-  repository cache is content-checked by Bazel, and the disk cache is per-session until M2/M3 move
-  shared results to the executor-written remote cache.
+- **Trust:** shared per-host caches are writable by every v0 job today (v0 limitation). Session
+  caches are per client (see M1 status: the repository contents cache and bazelisk downloads
+  are not content-checked on use), until M2/M3 move shared results to the executor-written
+  remote cache. Every bind mount source is opened without following symlinks and passed to
+  bwrap by descriptor.
 - **Bazel versions:** bazelisk + the repo's `.bazelversion`; installs cached per host.
 
 ## M1 results (implemented in internal/bep)
@@ -421,3 +499,40 @@ and returned a workspace-upload HTTP 502, requiring the documented BuildBuddy
 fallback until it recovered. No shared server was restarted by this work.
 Superseded CI jobs were canceled. Fallback testing also exposed inherited Bazel
 configuration; integration builds and benchmarks now ignore host bazelrc files.
+
+## Integration with warm sessions and disk retention (2026-10-15)
+
+Merged origin/main (cd41306) into feat/reapi-exec. Runner scheduling skips warm
+session commands and skips actions on runners without action support, preserving
+ordinary job scheduling behind either. Polls retain both the disk report and action
+capability. Network-disabled action sandboxes now use the common descriptor layout
+(including the exact-environment helper) and openMountSource for every mutable bind
+source. All /v1/runner/* routes continue to require the dedicated runner token and
+instance header.
+
+Before materializing action inputs, runners reclaim workspace blobs and then evict
+their CAS in LRU order while below --min-free. This extends the existing retention
+policy to action storage; it does not impose admission control when active data or
+unrelated files still keep the disk below the threshold. Concurrent readers retain
+their descriptors and evicted inputs can be fetched again. No new direction change.
+
+The repeated 200-genrule benchmark (0.5s sleep per rule, private hub with zero local
+slots, two runner processes with two slots each) completed with **200 remote actions**
+in **70.607s wall / 63.532s Bazel elapsed**, job
+`20261015T093730077050-86312200` (80.477s total job time, 0.809s queue).
+All Bazel output roots were under TMPDIR. Shared-host contention and cold startup
+are included; this is not a controlled comparison with the earlier 50.189s run.
+
+Shutdown investigation: the historical job
+`20261015T091722785773-65cba55c` remains queryable: runner tun-r3, started
+09:17:22.937 UTC, failed 09:18:06.013 with signal 15 and "runner tun-r3 shut down
+while the job was running". That establishes shutdown reporting, not the cause of
+the subsequent health timeouts/HTTP 502. Inspection of the merged handlers and
+origin/main shows runner body reads for poll, exited, done and leave outside
+Server.mu; CAS and log/output transfers also perform network reads outside it.
+Regression TestStalledRunnerReportsAllowHealth deliberately holds those JSON
+reports incomplete over a pipe and checks health still responds through the HTTP
+handler. No historical hub/proxy logs or goroutine/resource traces were available,
+so overload versus another bug remains undetermined. State persistence and some
+responses still run under the hub mutex; the test does not exclude disk stalls or
+slow response writers. No shared server was restarted.

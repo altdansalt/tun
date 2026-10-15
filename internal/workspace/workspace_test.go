@@ -236,3 +236,27 @@ func TestRemoveAllReadOnlyDirs(t *testing.T) {
 		t.Fatalf("symlink target touched: %v %v", fi, err)
 	}
 }
+
+// A directory swapped for a symlink between RemoveAll listing it and fixing its mode (a
+// process still running in the tree) must not lead the chmod outside the tree.
+func TestRemoveAllChmodRace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "job")
+	write(t, filepath.Join(dir, "a", "f"), "x", 0o444)
+	os.Chmod(filepath.Join(dir, "a"), 0o500)
+	outside := filepath.Join(t.TempDir(), "keep")
+	write(t, filepath.Join(outside, "f"), "x", 0o644)
+	os.Chmod(outside, 0o555)
+	defer os.Chmod(outside, 0o755)
+	beforeChmod = func(p string) {
+		if filepath.Base(p) == "a" {
+			os.Chmod(p, 0o700)
+			os.RemoveAll(p)
+			os.Symlink(outside, p)
+		}
+	}
+	defer func() { beforeChmod = func(string) {} }()
+	RemoveAll(dir)
+	if fi, err := os.Stat(outside); err != nil || fi.Mode().Perm() != 0o555 {
+		t.Fatalf("chmod followed a swapped-in symlink out of the tree: %v %v", fi, err)
+	}
+}

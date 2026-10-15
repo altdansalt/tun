@@ -43,6 +43,7 @@ type runnerState struct {
 	name, instance, sandbox, source string
 	actions                         bool
 	privateNet                      bool
+	disk                            *api.Disk
 	slots                           int
 	lastSeen                        time.Time
 	retiredAt                       time.Time       // when a newer instance took the name (or it was dropped)
@@ -233,7 +234,8 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
 	rn.actions = p.Actions && p.Sandbox == "bwrap"
-	rn.privateNet = p.NetworkIsolation
+	rn.privateNet, rn.disk = p.NetworkIsolation, p.Disk
+
 	return rn
 }
 
@@ -332,16 +334,14 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 		}
 	}
 	var out []*job
-	for free := rn.slots - busy; free > 0 && len(s.queue) > 0 && !s.closed; free-- {
-		index := 0
-		for index < len(s.queue) && s.queue[index].Action != nil && !rn.actions {
-			index++
-		}
-		if index == len(s.queue) {
+	for free := rn.slots - busy; free > 0 && !s.closed; free-- {
+		i := slices.IndexFunc(s.queue, func(j *job) bool { return j.bz == nil && (j.Action == nil || rn.actions) })
+		if i < 0 {
 			break
 		}
-		j := s.queue[index]
-		s.queue = append(s.queue[:index], s.queue[index+1:]...)
+		j := s.queue[i]
+		s.queue = slices.Delete(s.queue, i, i+1)
+
 		j.Runner, j.rn, j.assignedAt = rn.name, rn, time.Now()
 		rn.jobs[j.ID] = j
 		out = append(out, j)
@@ -632,6 +632,7 @@ func (s *Server) startReaper() {
 				return
 			case now := <-t.C:
 				s.reap(now)
+				s.expireSessions(now)
 			}
 		}
 	}()
@@ -685,7 +686,7 @@ func (s *Server) runnerInfo() (slots, running int, list []api.RunnerInfo) {
 		slots += rn.slots
 		running += len(rn.jobs)
 		list = append(list, api.RunnerInfo{Name: rn.name, Slots: rn.slots, Running: len(rn.jobs),
-			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet})
+			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet, Disk: rn.disk})
 	}
 	for _, rn := range s.retired {
 		running += len(rn.jobs) // still finishing on a superseded instance

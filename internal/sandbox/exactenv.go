@@ -27,7 +27,7 @@ func exactExec(argv []string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("missing command")
 	}
-	f := os.NewFile(5, "action-environment")
+	f := os.NewFile(envFD, "action-environment")
 	data, err := io.ReadAll(io.LimitReader(f, (4<<20)+1))
 	f.Close()
 	if err != nil {
