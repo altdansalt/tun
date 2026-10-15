@@ -366,6 +366,14 @@ while its actions need slots too; with only local slots and `--max-sessions` ses
 actions could starve. Sessions should not count against action slots (or actions get their
 own pool).
 
+Merging feat/reapi-exec (trial merge 2026-10-15 at db5eea0): conflicts in main.go/server.go
+(both moved the cache setup; Execution should be created in `server.New` next to the cache
+handler, so session sockets get it through `ForClient`), store.go `read` (take reapi-exec's
+verified read; `readName` is the namespaced variant) and the docs. reapi-exec makes
+`--cache-action-writes` default to false because writes went to the one shared namespace; with
+per-client namespaces client writes can't poison anyone else, so the default can stay true.
+Then `executionSlots` returns local slots plus action-capable runner slots when Execution is on.
+
 Deviations from the plan above: sessions upload local results (own namespace, see Trust);
 the per-client disk cache is kept for now (see the measurements); the socket lives under the
 session dir (not `/tun/cache.sock`, since the bind source must be a server-owned directory).
