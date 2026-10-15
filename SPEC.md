@@ -582,12 +582,11 @@ while the job remains retained. Failed admissions do not consume the key.
 
 ### Runner session transport
 Runners advertise `session_support`, `memory_available` (MemAvailable bytes), `load`
-(one-minute load average) and live `sessions` IDs in polls; `tun runners` exposes
+(one-minute load average divided by CPU count) and live `sessions` IDs in polls; `tun runners` exposes
 memory, load and session count. Assignments carry a Bazel manifest, session metadata and
 limits (including upload, workspace and disk-cache limits); runners fetch verified file contents
 in batches from `POST /v1/runner/cas` (up to 256 requested digests, tar response),
-with four concurrent requests. Both hosts
-use the same session engine, agent, manifest sync, per-client caches and BEP parser.
+with four concurrent requests. Both hosts use the same session engine, agent, manifest sync, per-client caches and BEP parser.
 Logs use the existing offset protocol; exit/done also carries the summary and BEP JSON.
 The hub's poll response carries authoritative session leases; revoked idle sessions stop.
 
@@ -595,8 +594,7 @@ On runners `/tun/sock/cache.sock` serves an HTTP/2 reverse proxy to the hub REAP
 The server issues a random per-session credential in the assignment, kept in runner memory;
 the sandbox sees only its socket. `/v1/session-cache/{rpc}` authenticates with `X-Tun-Session` and
 `X-Tun-Session-Credential` headers, using a session map lookup and constant-time comparison,
-and fixes the client
-namespace from the lease, ignoring request identity headers. It grants no ordinary API access
+and fixes the client namespace from the lease, ignoring request identity headers. It grants no ordinary API access
 and is revoked with the lease. Hub and runner traffic must use a trusted network or HTTPS,
 as with existing runner credentials. Cache action writes follow the hub's policy.
 

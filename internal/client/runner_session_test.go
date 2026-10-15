@@ -241,3 +241,16 @@ func TestRunnerSessionTimeoutDuringSync(t *testing.T) {
 		t.Fatalf("sync must be inside the command timeout: %+v", r)
 	}
 }
+
+func TestRunnerSessionHubDiskCacheLimit(t *testing.T) {
+	cfg := hubConfig("")
+	cfg.DiskCacheMax = "123M"
+	ts := startServer(t, cfg)
+	sessionRunner(t, ts, "r")
+	ts.waitRunners(1)
+	ws := bazelWS(t, map[string]string{})
+	r := ts.tun(ws, "bazel", "sh", `cat "$HOME/../../tun.bazelrc"`)
+	if r.code != 0 || !strings.Contains(r.stdout, "--experimental_disk_cache_gc_max_size=123M") {
+		t.Fatalf("runner did not apply hub disk cache limit: %+v", r)
+	}
+}

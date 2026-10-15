@@ -177,7 +177,7 @@ func fmtBytes(n int64) string {
 	return fmt.Sprintf("%dB", n)
 }
 
-// reclaimBlobs is the runner's reclaimDisk: cached workspace blobs, least recently used first.
+// reclaimBlobs is the runner's reclaimDisk: workspace and session CAS blobs, least recently used first.
 func (r *Runner) reclaimBlobs() {
 	if !r.cfg.MinFree.set() {
 		return
@@ -187,14 +187,13 @@ func (r *Runner) reclaimBlobs() {
 		return
 	}
 	dir := filepath.Join(r.cfg.DataDir, "blobs")
-	ents, _ := os.ReadDir(dir)
 	type blob struct {
 		name string
 		used time.Time
 	}
 	var list []blob
 	for _, base := range []string{dir, filepath.Join(r.cfg.DataDir, "session-host", "cas")} {
-		ents, _ = os.ReadDir(base)
+		ents, _ := os.ReadDir(base)
 		for _, e := range ents {
 			if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
 				list = append(list, blob{filepath.Join(base, e.Name()), fi.ModTime()})
@@ -213,5 +212,5 @@ func (r *Runner) reclaimBlobs() {
 	}
 	r.reclaimed.Add(int64(n))
 	free, _, _ := diskStat(r.cfg.DataDir)
-	r.cfg.Logf("tun runner: disk space is low (under --min-free %v): deleted %d cached workspaces; %s free now", r.cfg.MinFree, n, fmtBytes(free))
+	r.cfg.Logf("tun runner: disk space is low (under --min-free %v): deleted %d cached workspace/session blobs; %s free now", r.cfg.MinFree, n, fmtBytes(free))
 }

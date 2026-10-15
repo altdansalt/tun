@@ -114,7 +114,7 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	data := fs.String("data", DefaultRunnerDataDir(), "data dir (blob cache, job dirs, build caches); not a tun serve data dir")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none, as for tun serve")
 	netMode := fs.String("net", "auto", "auto|private|host, as for tun serve: private gives each job its own network namespace, with outbound HTTP(S) through a proxy this runner serves")
-	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, cached workspaces are deleted, least recently used first")
+	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, cached workspace blobs and session file contents are deleted, least recently used first")
 	fs.Usage = func() { fmt.Fprint(stderr, runnerUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
