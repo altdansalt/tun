@@ -375,6 +375,12 @@ Both endpoints accept `x-tun-token` or `authorization: Bearer TOKEN` gRPC metada
 `--cache-action-writes=true` opts into client action updates (default deny; executor results are written internally). Socket permissions
 are 0600. See docs/bazel.md for protocol limits and Bazel flags.
 
+REAPI actions use the same FIFO and slots as v0 jobs. Runners advertise action support
+in their polls; older runners receive v0 work only. Runner CAS inputs are cached in
+`DATA/reapi-cas`; action outputs and logs are uploaded to the hub CAS. bwrap actions
+use no network or proxy and exactly the Command environment. See docs/bazel.md for
+execution limits and benchmarks.
+
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).
 - Integration tests that start a real server in-process on a random port with a temp data dir and

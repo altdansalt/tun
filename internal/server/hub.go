@@ -567,7 +567,7 @@ func (s *Server) runnerDone(w http.ResponseWriter, r *http.Request) {
 	if j == nil {
 		return
 	}
-	j.ActionResult = d.ActionResult
+	j.ActionResult, j.ActionStatus = d.ActionResult, d.ActionStatus
 	j.OutMissing, j.OutSkipped, j.OutError = d.OutputsMissing, d.OutputsSkipped, d.OutputsError
 	s.finishRunnerJob(j, d, "")
 	writeJSON(w, 200, struct{}{})

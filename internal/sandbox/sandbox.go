@@ -106,6 +106,19 @@ func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, *Net, error) {
 			}
 			argv = append([]string{helperPath(s), helperArg}, argv...)
 		}
+		if s.NetworkOff && !s.PrivateNet {
+			exe, err := selfExe()
+			if err != nil {
+				closeAll()
+				return nil, nil, err
+			}
+			files = append(files, exe) // fd4; selfExe is a shared O_PATH handle
+			if err = addPipe(s.Env); err != nil {
+				closeAll()
+				return nil, nil, err
+			} // fd5
+			argv = append([]string{helperPath(s), execHelperArg}, argv...)
+		}
 		cmd = exec.Command("bwrap", append([]string{"--args", "3", "--"}, argv...)...)
 		cmd.Env = []string{}
 		cmd.ExtraFiles = files
@@ -162,7 +175,7 @@ func bwrapArgs(s Spec) []string {
 	}
 	a = append(a, "--tmpfs", s.DataDir, "--bind", s.Root, s.Root)
 	if s.NetworkOff {
-		a = append(a, "--unshare-net")
+		a = append(a, "--unshare-net", "--ro-bind-fd", "4", helperPath(s))
 	}
 	if s.PrivateNet {
 		a = append(a, "--unshare-net", "--ro-bind-fd", strconv.Itoa(exeFD), helperPath(s))
@@ -171,7 +184,7 @@ func bwrapArgs(s Spec) []string {
 		a = append(a, "--bind", c, c)
 	}
 	a = append(a, "--clearenv")
-	if s.PrivateNet {
+	if s.PrivateNet || s.NetworkOff {
 		return append(a, "--chdir", s.Dir) // the helper sets the env
 	}
 	for _, kv := range s.Env {

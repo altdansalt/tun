@@ -86,9 +86,17 @@ func TestBazelExecution(t *testing.T) {
 	h.AllowActionWrites = false
 	work := t.TempDir()
 	os.WriteFile(filepath.Join(work, "MODULE.bazel"), nil, 0600)
-	os.WriteFile(filepath.Join(work, "BUILD.bazel"), []byte(`genrule(name="leaf", outs=["leaf.txt"], cmd="echo remote-output > $@")
-genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf) > $@")
+	os.WriteFile(filepath.Join(work, "BUILD.bazel"), []byte(`load(":tree.bzl", "tree_rule")
+tree_rule(name="tree")
+genrule(name="leaf", outs=["leaf.txt"], cmd="echo remote-output > $@")
+genrule(name="top", srcs=[":leaf", ":tree"], outs=["top.txt"], cmd="cat $(location :leaf) $(location :tree)/sub/file > $@")
 genrule(name="bad", outs=["bad.txt"], cmd="echo deliberate-action-failure >&2; exit 1")`), 0600)
+	os.WriteFile(filepath.Join(work, "tree.bzl"), []byte(`def _tree(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name + ".dir")
+    ctx.actions.run_shell(outputs=[out], command="mkdir -p %s/sub; echo tree-output > %s/sub/file" % (out.path, out.path))
+    return [DefaultInfo(files=depset([out]))]
+tree_rule = rule(implementation=_tree)
+`), 0600)
 	run := func(target string, wantSuccess bool) string {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -108,7 +116,7 @@ genrule(name="bad", outs=["bad.txt"], cmd="echo deliberate-action-failure >&2; e
 		t.Fatal(out)
 	}
 	b, err := os.ReadFile(filepath.Join(work, "bazel-bin", "top.txt"))
-	if err != nil || string(b) != "remote-output\n" {
+	if err != nil || string(b) != "remote-output\ntree-output\n" {
 		t.Fatalf("output %q %v", b, err)
 	}
 	out = run("//:top", true)
@@ -203,5 +211,81 @@ func TestDoNotCacheAndReconnect(t *testing.T) {
 	}
 	if _, err = store.read("ac-", d); !os.IsNotExist(err) {
 		t.Fatalf("do_not_cache wrote AC: %v", err)
+	}
+}
+
+func TestRemoteExecutorInputCache(t *testing.T) {
+	hub, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(b []byte) []byte {
+		d := digest(b)
+		if err := hub.PutBlob(d, b); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	file := put([]byte("original"))
+	root := put(bytesField(1, msg(bytesField(1, []byte("in")), bytesField(2, file))))
+	fetches := 0
+	remote := &RemoteStore{Local: local, Fetch: func(d []byte) ([]byte, error) { fetches++; return hub.ReadBlob(d) }, Upload: hub.PutBlob}
+	command := msg(bytesField(1, []byte("/bin/sh")), bytesField(1, []byte("-c")), bytesField(1, []byte("cat in > out; echo mutated > in")), bytesField(7, []byte("out")))
+	execute := LocalExecutor(remote, t.TempDir(), "none")
+	for i := 0; i < 2; i++ {
+		result, err := execute(context.Background(), bytesField(2, root), command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := hub.ReadBlob(get(get(result, 2).b, 2).b)
+		if err != nil || string(out) != "original" {
+			t.Fatalf("CAS modified: %q %v", out, err)
+		}
+	}
+	if fetches != 2 {
+		t.Fatalf("re-downloaded inputs: %d fetches, want directory + file", fetches)
+	}
+}
+
+func TestExecutorIsolation(t *testing.T) {
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap unavailable")
+	}
+	if err := sandbox.NetUsable(); err != nil {
+		t.Skipf("private network unavailable: %v", err)
+	}
+	store, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := digest(nil)
+	if err = store.PutBlob(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	action := bytesField(2, root)
+	execute := LocalExecutor(store, t.TempDir(), sandbox.Bwrap)
+	// No proxy, HOME, PATH, or tun job environment may be injected by the executor.
+	command := msg(bytesField(1, []byte("/usr/bin/env")), bytesField(2, msg(bytesField(1, []byte("ONLY")), bytesField(2, []byte("specified")))))
+	result, err := execute(context.Background(), action, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := store.ReadBlob(get(result, 6).b)
+	if err != nil || string(out) != "ONLY=specified\n" {
+		t.Fatalf("environment %q %v", out, err)
+	}
+	command = msg(bytesField(1, []byte("/usr/bin/readlink")), bytesField(1, []byte("/proc/self/ns/net")))
+	result, err = execute(context.Background(), action, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = store.ReadBlob(get(result, 6).b)
+	host, _ := os.Readlink("/proc/self/ns/net")
+	if err != nil || strings.TrimSpace(string(out)) == host {
+		t.Fatalf("network not isolated: %q host=%s error=%v", out, host, err)
 	}
 }

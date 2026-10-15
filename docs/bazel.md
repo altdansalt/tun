@@ -193,7 +193,7 @@ to this cache. This is a cache milestone, not the complete remote execution prot
 
 `scripts/bench-reapi.sh` generates 200 independent genrules, seeds the remote cache, then
 rebuilds twice with fresh output roots under TMPDIR. Run via `scripts/dev-tun.sh` with
-`DEV_TUN_SERVE_ARGS='--cache-dir=reapi'` in a tun job, or on the VM host with
+`DEV_TUN_SERVE_ARGS='--cache-dir=reapi --cache-action-writes=true'` in a tun job, or on the VM host with
 `CACHE_URL=grpcs://remote.buildbuddy.dev` and `BUILDBUDDY_API_KEY`. Wall times include
 Bazel installation extraction and cold JVM/analysis; Bazel's elapsed time is printed too.
 
@@ -314,3 +314,17 @@ the two runner processes add slots on the same physical job host.
 Local protocol/Bazel integration passed in `20261015T083709369850-ccfa30fd`;
 the separate-runner Bazel integration and operation tests passed with race in
 `20261015T084211471977-eea1803f` (44.047s job time).
+
+Final hardening: bwrap itself injects PWD even after --clearenv; execution uses a
+small in-namespace exec helper to install exactly the Command environment after
+bwrap enters its namespaces. The helper has no egress proxy and replaces itself
+with the action. A regression compares the complete environment and network
+namespace against the host. WaitExecution honors gRPC deadlines without canceling
+the action. Scheduler/runner infrastructure timeouts preserve DEADLINE_EXCEEDED.
+
+Full vet/build/race tests, both real Bazel integrations, and both CLI smoke suites
+passed in `20261015T084344724408-eec341c1` (306.947s under concurrent self-build
+load). Subsequent vet/build/race tests covering the hardened paths and both local
+and separate-runner Bazel builds passed in `20261015T084836390529-304e8ec6`
+(111.518s). Exact-environment/network namespace tests and both Bazel execution
+integrations passed in `20261015T085232460964-85588474`.

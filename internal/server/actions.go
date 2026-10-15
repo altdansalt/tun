@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,7 +44,7 @@ func (s *Server) executeAction(ctx context.Context, action, command []byte) ([]b
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if j.State != api.Exited {
-		return nil, fmt.Errorf("action executor: %s", j.Error)
+		return nil, &reapi.ExecutionError{Code: j.ActionStatus, Message: j.Error}
 	}
 	return j.ActionResult, nil
 }
@@ -66,6 +67,7 @@ func (s *Server) runAction(j *job) {
 	defer s.mu.Unlock()
 	j.ActionResult = result
 	if err != nil {
+		j.ActionStatus = actionStatus(err)
 		s.finish(j, api.Failed, nil, nil, err.Error())
 	} else {
 		code := 0
@@ -131,9 +133,20 @@ func (r *Runner) executeAction(j *runnerJob) (procResult, api.RunnerDone) {
 	}
 	result, err := reapi.LocalExecutor(remote, r.cfg.DataDir, r.cfg.Sandbox)(ctx, j.spec.Action, j.spec.Command)
 	if err != nil {
+		done.ActionStatus = actionStatus(err)
 		return failed("executing action: %v", err), done
 	}
 	done.ActionResult = result
 	code := 0
 	return procResult{State: api.Exited, Code: &code}, done
+}
+
+func actionStatus(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return 4
+	}
+	if errors.Is(err, context.Canceled) {
+		return 1
+	}
+	return 13
 }

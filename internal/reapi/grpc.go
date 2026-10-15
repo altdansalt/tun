@@ -1,6 +1,7 @@
 package reapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
@@ -170,7 +171,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(12, fmt.Errorf("execution disabled"))
 			return
 		}
-		c, err := h.Execution.stream(r.Context(), method, b, write)
+		ctx := r.Context()
+		if !deadline.IsZero() {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+			defer cancel()
+		}
+		c, err := h.Execution.stream(ctx, method, b, write)
 		if err != nil {
 			fail(c, err)
 		}

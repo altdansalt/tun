@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+// ExecutionError carries an executor infrastructure status through the scheduler.
+type ExecutionError struct {
+	Code    int
+	Message string
+}
+
+func (e *ExecutionError) Error() string { return e.Message }
+
 const executionType = "type.googleapis.com/build.bazel.remote.execution.v2."
 
 type operation struct {
@@ -39,6 +47,7 @@ type Execution struct {
 	next              uint64
 }
 
+// NewExecution uses slots workers, or delegates all queueing to Run when slots < 0.
 func NewExecution(store *Store, slots int, run func(context.Context, []byte, []byte) ([]byte, error)) *Execution {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Execution{externalScheduler: slots < 0, Store: store, Run: run, ops: map[string]*operation{}, wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel}
@@ -85,6 +94,9 @@ func validatePlatform(p []byte) error {
 	return nil
 }
 func (e *Execution) start(b []byte) (*operation, int, error) {
+	if f := get(b, 9).v; f != 0 && f != 1 {
+		return nil, 3, fmt.Errorf("only SHA256 execution is supported")
+	}
 	d := get(b, 6).b
 	if _, err := key(d); err != nil {
 		return nil, 3, err
@@ -99,6 +111,12 @@ func (e *Execution) start(b []byte) (*operation, int, error) {
 	command, err := e.Store.read("cas-", get(action, 1).b)
 	if err != nil {
 		return nil, 9, fmt.Errorf("missing Command: %w", err)
+	}
+	if _, err = decode(command); err != nil {
+		return nil, 3, err
+	}
+	if _, err = actionTimeout(action); err != nil {
+		return nil, 3, err
 	}
 	if err = validatePlatform(get(action, 10).b); err != nil {
 		return nil, 9, err
@@ -136,6 +154,9 @@ func (e *Execution) start(b []byte) (*operation, int, error) {
 func (e *Execution) worker() {
 	defer e.wg.Done()
 	for {
+		if e.ctx.Err() != nil {
+			return
+		}
 		e.mu.Lock()
 		var o *operation
 		if len(e.queue) > 0 {
@@ -176,6 +197,10 @@ func (e *Execution) execute(o *operation) {
 	response := bytesField(1, result)
 	if err != nil {
 		code := int64(13)
+		var status *ExecutionError
+		if errors.As(err, &status) && status.Code != 0 {
+			code = int64(status.Code)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = 4
 		} else if errors.Is(err, context.Canceled) {
@@ -228,6 +253,9 @@ func (e *Execution) stream(ctx context.Context, method string, b []byte, write f
 		}
 		select {
 		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return 4, ctx.Err()
+			}
 			return 1, ctx.Err()
 		case <-e.ctx.Done():
 			return 14, fmt.Errorf("executor stopped")
@@ -238,7 +266,7 @@ func (e *Execution) stream(ctx context.Context, method string, b []byte, write f
 
 // safeRelative permits the empty working_directory but never an absolute or escaping path.
 func safeRelative(p string) error {
-	if strings.ContainsRune(p, 0) || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(filepath.Clean(p), "../") {
+	if strings.ContainsRune(p, 0) || filepath.IsAbs(p) || strings.Contains("/"+p+"/", "/../") {
 		return fmt.Errorf("unsafe execution path %q", p)
 	}
 	return nil

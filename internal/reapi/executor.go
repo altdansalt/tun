@@ -49,6 +49,14 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		if err = safeRelative(cwd); err != nil {
 			return nil, err
 		}
+		cwdRoot, err := fs.OpenRoot(cwd)
+		if err != nil && cwd == "" {
+			cwdRoot, err = fs.OpenRoot(".")
+		}
+		if err != nil {
+			return nil, err
+		}
+		cwdRoot.Close()
 		var argv, env []string
 		for _, a := range all(command, 1) {
 			argv = append(argv, string(a))
@@ -275,7 +283,7 @@ func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, erro
 	}
 	// REAPI directories must be lexicographically sorted.
 	sort.Slice(ents, func(i, j int) bool { return ents[i].Name() < ents[j].Name() })
-	var dir []byte
+	var files, dirs, links []byte
 	var children [][]byte
 	for _, ent := range ents {
 		name := filepath.Join(p, ent.Name())
@@ -288,7 +296,7 @@ func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, erro
 			if err != nil {
 				return nil, nil, err
 			}
-			dir = append(dir, bytesField(3, msg(bytesField(1, []byte(ent.Name())), bytesField(2, []byte(target))))...)
+			links = append(links, bytesField(3, msg(bytesField(1, []byte(ent.Name())), bytesField(2, []byte(target))))...)
 		} else if info.IsDir() {
 			child, desc, err := collectDirectory(s, r, name)
 			if err != nil {
@@ -298,7 +306,7 @@ func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, erro
 			if err = s.put("cas-", d, child); err != nil {
 				return nil, nil, err
 			}
-			dir = append(dir, bytesField(2, msg(bytesField(1, []byte(ent.Name())), bytesField(2, d)))...)
+			dirs = append(dirs, bytesField(2, msg(bytesField(1, []byte(ent.Name())), bytesField(2, d)))...)
 			children = append(children, child)
 			children = append(children, desc...)
 		} else {
@@ -306,10 +314,10 @@ func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, erro
 			if err != nil {
 				return nil, nil, err
 			}
-			dir = append(dir, bytesField(1, node)...)
+			files = append(files, bytesField(1, node)...)
 		}
 	}
-	return dir, children, nil
+	return msg(files, dirs, links), children, nil
 }
 
 // BlobStore is the executor's CAS interface. Remote executors retain verified

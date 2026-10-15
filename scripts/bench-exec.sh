@@ -27,7 +27,7 @@ if [[ $mode != local ]]; then
 fi
 cd "$bench_dir/work"
 start=$(date +%s%N)
-timeout 240 bazel --output_user_root="$bench_dir/root" --host_jvm_args=-Xmx512m --batch build //... \
+timeout -k 10s 240 bazel --output_user_root="$bench_dir/root" --host_jvm_args=-Xmx512m --batch build //... \
  --jobs=50 --enable_bzlmod=false "${flags[@]}" >"$bench_dir/log" 2>&1 || { cat "$bench_dir/log"; for f in "$bench_dir"/runner-*.log; do [[ ! -f $f ]] || cat "$f"; done; exit 1; }
 end=$(date +%s%N)
 echo "$mode wall_ms=$(((end-start)/1000000))"

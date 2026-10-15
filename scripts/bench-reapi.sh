@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run inside scripts/dev-tun.sh with --cache-dir=reapi, or on the host with
+# Run inside scripts/dev-tun.sh with --cache-dir=reapi --cache-action-writes=true, or on the host with
 # CACHE_URL=grpcs://remote.buildbuddy.dev BUILDBUDDY_API_KEY set. No credentials printed.
 set -euo pipefail
 bench_dir=$(mktemp -d "${TMPDIR:-/tmp}/reapi-bench.XXXXXX")

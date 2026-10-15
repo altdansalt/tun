@@ -80,6 +80,7 @@ type job struct {
 	actionCtx    context.Context
 	Action       []byte             `json:"action,omitempty"`
 	Command      []byte             `json:"command,omitempty"`
+	ActionStatus int                `json:"action_status,omitempty"`
 	ActionResult []byte             `json:"action_result,omitempty"`
 	Env          map[string]string  `json:"env,omitempty"`
 	done         chan struct{}      // closed when the job reaches a terminal state
