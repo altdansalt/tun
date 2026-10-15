@@ -34,12 +34,14 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/workspace"
 )
 
 // runnerState is the hub's view of one runner. Guarded by Server.mu.
 type runnerState struct {
 	name, instance, sandbox, source string
+	actions                         bool
 	privateNet                      bool
 	slots                           int
 	lastSeen                        time.Time
@@ -226,6 +228,7 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 		s.runners[name] = rn
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
+	rn.actions = p.Actions
 	rn.privateNet = p.NetworkIsolation
 	return rn
 }
@@ -324,8 +327,15 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 	}
 	var out []*job
 	for free := rn.slots - busy; free > 0 && len(s.queue) > 0 && !s.closed; free-- {
-		j := s.queue[0]
-		s.queue = s.queue[1:]
+		index := 0
+		for index < len(s.queue) && s.queue[index].Action != nil && !rn.actions {
+			index++
+		}
+		if index == len(s.queue) {
+			break
+		}
+		j := s.queue[index]
+		s.queue = append(s.queue[:index], s.queue[index+1:]...)
 		j.Runner, j.rn, j.assignedAt = rn.name, rn, time.Now()
 		rn.jobs[j.ID] = j
 		out = append(out, j)
@@ -336,7 +346,7 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 // assignment is what a runner gets to run j.
 func (s *Server) assignment(j *job) api.RunnerJob {
 	return api.RunnerJob{
-		ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
+		Action: j.Action, Command: j.Command, ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
 		Workspace: j.Workspace, Outputs: j.Outputs,
 		MaxLog: s.cfg.MaxLog, MaxWorkspace: s.cfg.MaxWorkspace, MaxDownload: s.maxDownload(),
 	}
@@ -393,6 +403,9 @@ func (s *Server) runnerStarted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if j.State == api.Queued {
+		if j.Action != nil && j.actionCtx != nil {
+			reapi.MarkExecuting(j.actionCtx)
+		}
 		now := time.Now().UTC()
 		j.State, j.StartedAt = api.Running, &now
 		if j.rn.sandbox != "" {
@@ -554,6 +567,7 @@ func (s *Server) runnerDone(w http.ResponseWriter, r *http.Request) {
 	if j == nil {
 		return
 	}
+	j.ActionResult = d.ActionResult
 	j.OutMissing, j.OutSkipped, j.OutError = d.OutputsMissing, d.OutputsSkipped, d.OutputsError
 	s.finishRunnerJob(j, d, "")
 	writeJSON(w, 200, struct{}{})

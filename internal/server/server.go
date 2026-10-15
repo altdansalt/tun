@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 )
 
@@ -56,8 +58,9 @@ type Config struct {
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
 type Server struct {
-	cfg   Config
-	token string
+	actionStore *reapi.Store
+	cfg         Config
+	token       string
 
 	mu      sync.Mutex
 	jobs    map[string]*job
@@ -74,10 +77,14 @@ type Server struct {
 
 type job struct {
 	api.Job
-	Env  map[string]string  `json:"env,omitempty"`
-	done chan struct{}      // closed when the job reaches a terminal state
-	kill func(state string) // set while running; requests termination with the given end state
-	net  *sandbox.Net       // set while running with a private network namespace
+	actionCtx    context.Context
+	Action       []byte             `json:"action,omitempty"`
+	Command      []byte             `json:"command,omitempty"`
+	ActionResult []byte             `json:"action_result,omitempty"`
+	Env          map[string]string  `json:"env,omitempty"`
+	done         chan struct{}      // closed when the job reaches a terminal state
+	kill         func(state string) // set while running; requests termination with the given end state
+	net          *sandbox.Net       // set while running with a private network namespace
 	// cancelReq is set by a cancel that arrives after the job left the queue (or, for a
 	// service, was admitted) but before run started it; run then finishes it as canceled.
 	cancelReq bool
@@ -302,6 +309,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("HEAD /v1/blobs/{sha}", auth(s.headBlob))
 	mux.HandleFunc("PUT /v1/blobs/{sha}", auth(s.putBlob))
 	mux.HandleFunc("GET /v1/blobs/{sha}", auth(s.getBlob))
+	mux.HandleFunc("POST /v1/runner/cas", auth(s.runnerCAS))
 	mux.HandleFunc("POST /v1/runner/poll", auth(s.runnerPoll))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/started", auth(s.runnerStarted))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/done", auth(s.runnerDone))

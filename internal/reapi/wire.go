@@ -1,4 +1,4 @@
-// Package reapi implements the cache subset of REAPI using the protobuf wire format.
+// Package reapi implements the supported subset of REAPI using the protobuf wire format.
 package reapi
 
 import (

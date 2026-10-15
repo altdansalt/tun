@@ -18,7 +18,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
           [--net auto|private|host] [--local-slots N] [--runner-timeout 30s]
           [--ephemeral] [--exit-on-eof]
-          [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
+          [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=false] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
@@ -370,9 +370,9 @@ Errors: JSON `{"error": "..."}` with proper status codes; malformed query parame
 and `DATA/cache.sock` (override with `--cache-socket`). Relative DIR is under DATA.
 Both endpoints accept `x-tun-token` or `authorization: Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS
 (FindMissingBlobs, BatchUpdateBlobs, BatchReadBlobs, GetTree), ActionCache and ByteStream
-(Read, Write, QueryWriteStatus), SHA256 and identity compression. No execution service.
+(Read, Write, QueryWriteStatus), SHA256 and identity compression. Execution.Execute and WaitExecution run actions through the shared job FIFO on local slots and action-capable runners; operations remain reconnectable until hub shutdown.
 `--cache-max-size` bounds disk storage with LRU eviction, including partial uploads;
-`--cache-action-writes=false` denies action updates (default allow). Socket permissions
+`--cache-action-writes=true` opts into client action updates (default deny; executor results are written internally). Socket permissions
 are 0600. See docs/bazel.md for protocol limits and Bazel flags.
 
 ## Tests (required)

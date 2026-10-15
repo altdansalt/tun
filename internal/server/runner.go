@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
 )
@@ -60,19 +61,21 @@ type Runner struct {
 	pollCtx  context.Context // canceled to stop taking work
 	stopPoll context.CancelFunc
 
-	mu         sync.Mutex
-	jobs       map[string]*runnerJob
-	draining   bool
-	superseded string // the hub's message once a newer instance took this runner's name
-	wg         sync.WaitGroup
-	blobMu     sync.Mutex
-	blobLock   map[string]*sync.Mutex
+	mu          sync.Mutex
+	jobs        map[string]*runnerJob
+	draining    bool
+	superseded  string // the hub's message once a newer instance took this runner's name
+	wg          sync.WaitGroup
+	actionStore *reapi.Store
+	blobMu      sync.Mutex
+	blobLock    map[string]*sync.Mutex
 }
 
 type runnerJob struct {
-	spec      api.RunnerJob
-	proc      *proc  // once started
-	killState string // a kill requested before the command started
+	actionCancel context.CancelFunc
+	spec         api.RunnerJob
+	proc         *proc  // once started
+	killState    string // a kill requested before the command started
 }
 
 var errGone = errors.New("the hub no longer wants this job")
@@ -308,7 +311,7 @@ func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
 func (r *Runner) poll() (api.RunnerPollResponse, error) {
 	r.mu.Lock()
 	r.seq++
-	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Previous: r.previous, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
+	req := api.RunnerPoll{Actions: true, Name: r.cfg.Name, Instance: r.instance, Previous: r.previous, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
 		NetworkIsolation: r.cfg.PrivateNet, Running: []string{}}
 	for id := range r.jobs {
 		req.Running = append(req.Running, id)
@@ -366,6 +369,8 @@ func (r *Runner) cancelJob(id, state string) {
 	j := r.jobs[id]
 	switch {
 	case j == nil:
+	case j.actionCancel != nil:
+		j.actionCancel()
 	case j.proc != nil:
 		j.proc.kill(state)
 	case j.killState == "":
@@ -407,6 +412,9 @@ func failed(format string, a ...any) procResult {
 
 // execute prepares, starts and waits for the job, ships its logs and uploads its outputs.
 func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
+	if j.spec.Action != nil {
+		return r.executeAction(j)
+	}
 	spec := j.spec
 	var done api.RunnerDone
 	if err := prepareJobDir(r.cfg.DataDir, spec.ID); err != nil {

@@ -33,6 +33,7 @@ type Spec struct {
 	DataDir string   // the server data dir: hidden under bwrap except Root and Caches
 	Caches  []string // read-write shared cache dirs
 	// PrivateNet (bwrap only) gives the job its own network namespace; see net.go.
+	NetworkOff bool // isolate network without an egress proxy or injected environment
 	PrivateNet bool
 }
 
@@ -160,6 +161,9 @@ func bwrapArgs(s Spec) []string {
 		}
 	}
 	a = append(a, "--tmpfs", s.DataDir, "--bind", s.Root, s.Root)
+	if s.NetworkOff {
+		a = append(a, "--unshare-net")
+	}
 	if s.PrivateNet {
 		a = append(a, "--unshare-net", "--ro-bind-fd", strconv.Itoa(exeFD), helperPath(s))
 	}

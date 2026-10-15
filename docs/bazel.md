@@ -105,7 +105,7 @@ no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms
   third-party gRPC/protobuf dependencies. Go 1.25 `http.Server.Protocols` with
   `SetUnencryptedHTTP2` supplies h2c; HTTP trailers supply gRPC status. `internal/reapi`
   implements framing and the protobuf wire subset for cache services, citing the official
-  remote-apis and ByteStream protos. Execution remains M3 work.
+  remote-apis and ByteStream protos. Execution is implemented below (M3 core).
 - **Nested sandboxing:** Bazel's linux-sandbox inside tun's bwrap needs nested user namespaces;
   verify in M0, else run Bazel with `processwrapper-sandbox` and rely on tun's boundary.
 - **Memory:** 4 GB runners, JVM servers. Tune `--host_jvm_args`, cap sessions per host, evict LRU.
@@ -169,10 +169,10 @@ to 10GB; committed CAS, action results and interrupted uploads share an on-disk 
 budget. Reads touch mtimes; writes verify SHA256 before atomic publication. Instances
 share the same content and action namespace. GetTree streams all reachable directories
 (no pagination); batch RPCs are limited to 2MiB of payload. Identity compression only.
-The advertised API version is 2.0, SHA256, with no execution capability.
+The advertised API version is 2.0, SHA256, with SHA256 execution enabled.
 
 `--cache-action-writes=false` rejects action updates with PERMISSION_DENIED and advertises
-updates disabled. Default is allow while builds execute locally. The handler's write
+updates disabled. Default is now deny; use `--cache-action-writes=true` explicitly for cache-only local builds. The handler's write
 policy is the future executor-only authorization seam; executor credentials and sandbox
 socket binding are not part of this change. Both TCP and Unix endpoints accept
 `x-tun-token` or `authorization: Bearer TOKEN` metadata. Thus the future token-free sandbox socket described above remains
@@ -242,3 +242,75 @@ An earlier superseded full CI job (`20261015T082110926143-4d167784`) stopped
 producing package results after REAPI/sandbox; it was canceled after the final full
 run passed. Its stall cause was not established. Separate server/workspace race
 tests passed in `20261015T082410099198-c3a8b234` (4.655s job time).
+
+
+## M3 execution core
+
+`--cache-dir` now enables Execution alongside the cache. Use
+`--remote_executor=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN
+--noremote_upload_local_results`. Client AC writes are **disabled by default**;
+only successful executor results populate the AC unless the operator explicitly
+allows client writes. Execute honors `skip_cache_lookup` and Action.do_not_cache.
+Failed commands return their exit code and stdout/stderr CAS digests without
+caching the result. Infrastructure errors use ExecuteResponse.status.
+
+Execute and WaitExecution stream google.longrunning.Operation messages, with
+ExecuteOperationMetadata and ExecuteResponse Any type URLs. Operations are kept
+in memory for the hub lifetime, independently of the client's connection. They
+are not durable across hub restarts and currently have no retention limit.
+Actions share the hub's v0 FIFO and local/runner slot limits. Runner polls
+advertise action support; older runners continue receiving only v0 jobs.
+The existing assignment, heartbeat, lost-runner and completion protocol applies.
+Action and Command bytes (including platform properties) are recorded with the
+internal executor job. Unsupported platform properties return FAILED_PRECONDITION;
+currently OSFamily=Linux/linux and an empty container-image are accepted. Other
+properties, including a nonempty container-image, are rejected. Tools come from
+the executor host or the action's hermetic inputs, never a container image.
+
+Executors copy verified inputs from CAS into fresh exec roots. Each runner has
+a persistent 10GB LRU CAS under its data dir (`reapi-cas`), so repeated inputs
+are not downloaded again. Copies rather than hard links prevent actions from
+mutating the CAS. bwrap actions have network off, without the v0 egress proxy
+or extra environment variables; Command.environment_variables is the complete
+environment. `--sandbox=none` remains the explicit unisolated development mode.
+Working directories, v2.0 output_files/output_directories, v2.1 output_paths,
+symlinks, output directory Trees, executable bits and action timeouts are handled.
+Timeouts kill the whole process group. Default action timeout is 30 minutes;
+explicit timeouts above 24h are rejected.
+
+Deviations / limits: exec-root paths currently vary per action (fixed `/work`
+mounts remain session work); runner CAS transport uses an authenticated HTTP/JSON
+extension of the existing pull protocol, rather than an outbound HTTP/2 gRPC
+client. It currently buffers each transferred blob and limits the JSON request
+to 128MiB (about 96MiB raw), so very large individual inputs/outputs need a
+streaming runner transfer follow-up. Hub CAS eviction can cause an in-flight
+action's input fetch to fail; inputs are not pinned for the whole operation.
+There is no Execution cancellation RPC yet. Warm-session integration and label
+artifact retrieval remain outside this core.
+
+Real Bazel integration tests run with bounded 90s subprocess contexts and Go's
+CI timeout: dependency chains, outputs, failing-action stderr, a clean rebuild
+with remote cache hits, and a separate runner process against a hub with zero
+local slots. Codec and executor regressions cover operation Any wrappers,
+WaitExecution reconnects, cache bypass/no-write, paths, output directories,
+working directories, environments and timeouts.
+
+`scripts/bench-exec.sh` generates 200 independent genrules, each sleeping 0.5s,
+with `--jobs=50`; all output roots live under TMPDIR. Run `local` directly in a
+tun job, or `remote` / `runners` inside scripts/dev-tun.sh with
+`DEV_TUN_SERVE_ARGS='--cache-dir=reapi --local-slots=2'` / `--local-slots=0`.
+The runners mode starts two private runner processes with two slots each.
+
+Measured 2026-10-15, Bazel 9.3.0, cold JVM/output roots:
+
+| Mode | Wall | Bazel elapsed | Process summary | tun job |
+| --- | --- | --- | --- | --- |
+| Local Bazel | 63.048s | 60.273s | 200 linux-sandbox | `20261015T083812607482-cf9f6d2c` |
+| Remote, hub local slots=2 | 61.189s | 58.889s | 200 remote | `20261015T083844410219-6fe2d8b2` |
+| Remote, hub local slots=0, 2 runners x 2 slots | 39.969s | 37.121s | 200 remote | `20261015T083957200089-badce30b` |
+
+These are shared-host end-to-end observations, not isolated scaling measurements;
+the two runner processes add slots on the same physical job host.
+Local protocol/Bazel integration passed in `20261015T083709369850-ccfa30fd`;
+the separate-runner Bazel integration and operation tests passed with race in
+`20261015T084211471977-eea1803f` (44.047s job time).

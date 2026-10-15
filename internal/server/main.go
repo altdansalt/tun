@@ -84,9 +84,9 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
-	cacheDir := fs.String("cache-dir", "", "enable REAPI gRPC cache in this directory (relative to data dir); disabled if empty")
+	cacheDir := fs.String("cache-dir", "", "enable REAPI gRPC cache and execution in this directory (relative to data dir); disabled if empty")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
-	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
+	cacheWrites := fs.Bool("cache-action-writes", false, "allow clients to update the REAPI action cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
@@ -199,6 +199,9 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return fail("cache: %v", err)
 		}
 		cache := &reapi.Handler{Store: store, Token: s.Token(), AllowActionWrites: *cacheWrites}
+		s.actionStore = store
+		cache.Execution = reapi.NewExecution(store, -1, s.executeAction)
+		defer cache.Execution.Close()
 		apiHandler := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") &&
