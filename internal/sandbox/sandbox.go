@@ -109,7 +109,10 @@ func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, *Net, error) {
 				f.Close()
 			}
 		}()
-		args, srcs := bwrapArgs(s)
+		args, srcs, err := bwrapArgs(s)
+		if err != nil {
+			return nil, nil, err
+		}
 		if err := addPipe(3, args); err != nil {
 			return nil, nil, err
 		}
@@ -199,8 +202,8 @@ type mountSource struct {
 	ro   bool
 }
 
-// bwrapArgs: read-only root, fresh /dev /proc and pid namespace, the job's tmp at /tmp,
-// the server user's home and the data dir hidden behind tmpfs, then the job's tree and shared
+// bwrapArgs: read-only root, fresh /dev /proc and pid namespace, the server user's home and
+// the data dir hidden behind tmpfs, the job's tmp at /tmp, then the job's tree and shared
 // caches bound back read-write at their real paths (so env paths are valid inside), and the
 // job's env. Values must not contain NUL (the server rejects such jobs).
 //
@@ -209,9 +212,34 @@ type mountSource struct {
 // descriptors firstMountFD, firstMountFD+1, ... (--bind-fd), so a symlink a job planted in
 // a directory it can write never redirects a mount, and with FixedRoot the root is
 // remounted read-only once everything is in place.
-func bwrapArgs(s Spec) ([]string, []mountSource) {
+//
+// bwrap creates a missing mount point with mkdir on the host, following symlinks, when its
+// parent is a bind mount. So everything that only hides (the tmpfs) comes before the first
+// bind the job can write, and with FixedRoot (a session: its tmp and mounts outlive each
+// sandbox, so the job could have planted a link in them) no mount may go under an earlier
+// writable one. Without FixedRoot the job's tree and tmp are new and empty when the sandbox
+// starts, so mount points inside them (Root under Tmp when the data dir is under /tmp, as
+// with tun serve --ephemeral) are made in a dir nobody could have prepared.
+func bwrapArgs(s Spec) ([]string, []mountSource, error) {
 	var srcs []mountSource
+	var writable []string // destinations of earlier read-write binds
+	var bad error
+	place := func(dst string) {
+		if !s.FixedRoot || bad != nil {
+			return
+		}
+		for _, w := range writable {
+			if within(dst, w) {
+				bad = fmt.Errorf("sandbox mount %s is inside %s, which the sandbox can write", dst, w)
+				return
+			}
+		}
+	}
 	bind := func(src, dst string, ro bool) []string {
+		place(dst)
+		if !ro {
+			writable = append(writable, dst)
+		}
 		srcs = append(srcs, mountSource{src, ro})
 		op := "--bind-fd"
 		if ro {
@@ -225,7 +253,6 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 	}
 	a = append(a, "--dev", "/dev", "--proc", "/proc",
 		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent")
-	a = append(a, bind(s.Tmp, "/tmp", false)...)
 	if home, err := os.UserHomeDir(); err == nil && home != "/" && filepath.IsAbs(home) {
 		// Hide the server user's home (it may hold the client token, ssh keys, ...), but keep
 		// toolchains on PATH that live under it (e.g. ~/go/bin -> ~/go) readable.
@@ -243,6 +270,7 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 		}
 	}
 	a = append(a, "--tmpfs", s.DataDir)
+	a = append(a, bind(s.Tmp, "/tmp", false)...)
 	if s.Root != "" {
 		a = append(a, bind(s.Root, s.Root, false)...)
 	}
@@ -250,6 +278,8 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 		a = append(a, "--unshare-net")
 	}
 	if s.PrivateNet || s.NetworkOff || s.ExePath != "" {
+		// After /tmp: a data dir under /tmp would hide it. (It is no job-writable bind.)
+		place(helperPath(s))
 		a = append(a, "--ro-bind-fd", strconv.Itoa(exeFD), helperPath(s))
 	}
 	for _, c := range s.Caches {
@@ -258,6 +288,9 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 	for _, m := range s.Mounts {
 		a = append(a, bind(m.Src, m.Dst, m.RO)...)
 	}
+	if bad != nil {
+		return nil, nil, bad
+	}
 	if s.FixedRoot {
 		// The root is a tmpfs holding only mount points: nothing may be written there (it
 		// would live in memory until the sandbox ends). Not recursive: the binds keep theirs.
@@ -265,13 +298,13 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 	}
 	a = append(a, "--clearenv")
 	if s.PrivateNet || s.NetworkOff {
-		return append(a, "--chdir", s.Dir), srcs
+		return append(a, "--chdir", s.Dir), srcs, nil
 	}
 	for _, kv := range s.Env {
 		k, v, _ := strings.Cut(kv, "=")
 		a = append(a, "--setenv", k, v)
 	}
-	return append(a, "--chdir", s.Dir), srcs
+	return append(a, "--chdir", s.Dir), srcs, nil
 }
 
 const oPath = 0o10000000 // O_PATH; missing from package syscall
