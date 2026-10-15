@@ -23,7 +23,10 @@ each job's workspace (cached by sha), runs it in a fresh per-job dir and sandbox
 tun serve would, streams stdout/stderr to the hub, and when the job ends uploads the paths the
 client declared with tun run --out, then reports the exit status. Clients see no difference
 except the job's "runner" field (and that only declared --out paths can be fetched with
-tun get). tun runners (or the hub's /v1/healthz) lists live runners.
+tun get). Bazel commands reuse the same session engine as the hub, retaining a warm
+sandbox and per-client caches on this runner. The hub controls per-host session capacity
+and affinity. Cache requests forward through a per-session socket without exposing credentials
+to the sandbox. tun runners (or the hub's /v1/healthz) lists live runners.
 
 If the hub hears nothing from a runner for its --runner-timeout (default 30s), the runner's
 running jobs fail and unstarted ones are requeued. On SIGINT/SIGTERM the runner stops taking
@@ -160,7 +163,13 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	if err != nil {
 		return fail("--min-free: %v", err)
 	}
-	r, err := NewRunner(RunnerConfig{Hub: *hub, Token: token, Name: *name, Slots: *slots, DataDir: *data, Sandbox: sb, PrivateNet: private, MinFree: mf, Logf: logf})
+	seed := ""
+	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
+		if _, err := os.Stat(filepath.Join(x, "bazelisk", "downloads")); err == nil {
+			seed = filepath.Join(x, "bazelisk")
+		}
+	}
+	r, err := NewRunner(RunnerConfig{BazeliskSeed: seed, Hub: *hub, Token: token, Name: *name, Slots: *slots, DataDir: *data, Sandbox: sb, PrivateNet: private, MinFree: mf, Logf: logf})
 	if err != nil {
 		return fail("runner: %v", err)
 	}

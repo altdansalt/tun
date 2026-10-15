@@ -518,3 +518,44 @@ Exercise deviations: bounded test targets instead of full suites on the shared
 2-CPU/4GB host, and GoogleTest uses host GCC 13.3 rather than a hermetic C++ toolchain
 (the explicit customer-exercise exception). No change to the agreed hermetic-toolchain
 product direction or milestone order. No local heavy Bazel baseline was run.
+
+## Runner session placement (feat/session-placement)
+
+M2 session placement now runs the existing session engine on runners as well as the hub.
+A lease binds a session to a runner **instance**, not just its name. Every command keeps
+that affinity while the lease lives; a busy host queues its own session's commands rather
+than moving a warm JVM. Lost/restarted hosts lose their leases; their active commands fail
+and the next command creates a session elsewhere. A pure hub accepts Bazel commands and
+waits for a session-capable runner. Old runners do not advertise this capability and receive
+only v0 jobs.
+
+The hub applies `--max-sessions` per host. Placement prefers hosts with spare session
+capacity, then available memory, one-minute load and assigned jobs; hosts below their disk
+reserve receive no new sessions. New JVMs reserve 1.5GiB against the memory sample so
+pending assignments cannot all consume the same reported headroom. Memory can reduce a
+host's effective capacity; at least one session remains possible. If all eligible hosts
+are full, evict an idle LRU session on the chosen host. Polls include memory available,
+load and live session IDs; `tun runners` exposes these and `tun sessions` includes `host`.
+
+Runner code lives in `runner_session.go`; placement and cache authorization live in
+`session_placement.go`. There is no second copy of session execution: the runner owns a
+small server instance as its session engine, reusing `bazelCommand`, the sandbox agent,
+manifest sync, per-client caches and BEP parser. Runner log chunks, cancellation and
+exit/done acknowledgements use the existing transport. The engine's parent runner data dir
+is hidden in bwrap, including v0 jobs. Session caches remain per client on each host.
+
+The runner's Unix cache socket is an HTTP/2 reverse proxy to the hub. Each lease has a
+random server-issued cache credential, retained outside the sandbox. The hub binds that
+credential to the lease's client namespace and revokes it on eviction or host loss; it
+cannot authorize the ordinary tun API. Identity headers from the sandbox cannot change
+the namespace. The forwarding seam passes the whole REAPI request/response, including
+trailers, so the remote-execution branch can serve Execute through the same socket.
+The runner still holds a job slot for the session command; separating session admission
+from future action slots remains the remote-execution branch's responsibility.
+
+Direction/deviations: this implements the agreed M2 placement direction. Existing sessions
+stay on a full/busy host until eviction or loss, to preserve affinity. Explicit/default
+session names still serialize concurrent commands; automatic unnamed-session splitting,
+live JVM migration and remote lease recovery after a hub restart remain future work.
+Two runner processes in one dev job share physical resources: this measures protocol and
+retention behavior, not the throughput of two independent 4GB machines.

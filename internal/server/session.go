@@ -13,9 +13,9 @@ package server
 // Under bwrap the session sandbox sees them at fixed paths (/work, /tun/home, /tmp,
 // /tun/out, ...), so the output base and every path-keyed cache stay valid across commands.
 // The sandbox (see sandbox/agent.go) lives between commands, and with it the Bazel server.
-// Each tun bazel command is a job in the normal FIFO that takes a local slot and its
+// Each tun bazel command is a job in the normal FIFO that takes a host slot and its
 // session; a session runs one command at a time. Sessions expire after SessionIdle without a
-// command; at most MaxSessions exist (the least recently used idle one is evicted for a new
+// command; at most MaxSessions exist per host (the least recently used idle one is evicted for a new
 // one). Session dirs survive a server restart; their Bazel servers don't.
 
 import (
@@ -53,13 +53,17 @@ const DefaultSession = "default"
 var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 type session struct {
-	api.Session                     // the persisted part
-	job         *job                // the job holding the session (running, or about to)
-	stopping    bool                // being stopped and deleted; no new commands until then
-	sb          *sandbox.Session    // the live sandbox (and Bazel server), if any
-	cache       *cacheSocket        // the session's REAPI socket while it has a sandbox
-	state       workspace.SyncState // owned by whoever holds the session; nil: load sync.json
-	loaded      bool
+	api.Session                // the persisted part
+	runner        *runnerState // remote lease owner; nil on the hub
+	idleSeconds   int
+	cacheReadOnly bool
+	credential    string              // scoped cache credential, never exposed to the sandbox
+	job           *job                // the job holding the session (running, or about to)
+	stopping      bool                // being stopped and deleted; no new commands until then
+	sb            *sandbox.Session    // the live sandbox (and Bazel server), if any
+	cache         *cacheSocket        // the session's REAPI socket while it has a sandbox
+	state         workspace.SyncState // owned by whoever holds the session; nil: load sync.json
+	loaded        bool
 }
 
 // sessionID is the id of the session (client, root, name).
@@ -98,12 +102,21 @@ func (s *Server) loadSessions() error {
 			log.Printf("tun: ignoring session dir %s: bad session.json", p)
 			continue
 		}
+		if sess.Host == "" {
+			sess.Host = api.LocalRunner
+		}
+		if sess.Host != api.LocalRunner {
+			continue
+		}
 		s.sessions[sess.ID] = &sess
 	}
 	return nil
 }
 
 func (s *Server) persistSession(sess *session) error {
+	if sess.runner != nil {
+		return nil
+	}
 	b, err := json.MarshalIndent(sess.Session, "", "  ")
 	if err != nil {
 		return err
@@ -137,8 +150,6 @@ func (s *Server) checkBazelJob(req *api.CreateJob, client string) (int, error) {
 	switch {
 	case len(req.Argv) > 0 || req.Script != "" || req.Workspace != "" || req.Service || len(req.Ports) > 0 || len(req.Outputs) > 0:
 		return 400, errors.New("a bazel job has no argv, script, workspace, service, ports or outputs")
-	case s.cfg.HubOnly:
-		return 409, errors.New("tun bazel needs job slots on the server itself, and this one has none (tun serve --local-slots 0); sessions on runners are not supported yet")
 	case len(b.Args) == 0:
 		return 400, errors.New("bazel args are empty: give a bazel command, e.g. build //...")
 	case strings.HasPrefix(b.Args[0], "-"):
@@ -214,16 +225,23 @@ func (s *Server) putCAS(w http.ResponseWriter, r *http.Request) {
 // (evicting the least recently used idle one if MaxSessions exist) if needed. It reports
 // whether j can start now. Caller holds s.mu.
 func (s *Server) claimSession(j *job) bool {
+	return s.claimSessionOn(j, api.LocalRunner)
+}
+
+func (s *Server) claimSessionOn(j *job, host string) bool {
 	if sess := s.sessions[j.SessionID]; sess != nil {
-		if sess.job != nil || sess.stopping {
+		if sess.Host != host || sess.job != nil || sess.stopping {
 			return false
 		}
 		sess.job = j
 		return true
 	}
-	if len(s.sessions) >= s.cfg.MaxSessions {
+	if s.hostSessions(host) >= s.sessionCapacity(host) {
 		var victim *session
 		for _, o := range s.sessions {
+			if o.Host != host {
+				continue
+			}
 			if o.stopping {
 				return false // an eviction is under way; wait for it
 			}
@@ -238,7 +256,11 @@ func (s *Server) claimSession(j *job) bool {
 	}
 	now := time.Now().UTC()
 	b := j.bz
-	sess := &session{Session: api.Session{ID: j.SessionID, Name: b.Session, Client: j.Client, Root: b.Root, CreatedAt: now, LastUsed: now}, loaded: true}
+	sess := &session{Session: api.Session{Host: host, ID: j.SessionID, Name: b.Session, Client: j.Client, Root: b.Root, CreatedAt: now, LastUsed: now}, loaded: true}
+	if host != api.LocalRunner {
+		sess.runner = s.runners[host]
+		sess.credential = randHex(32)
+	}
 	s.sessions[sess.ID] = sess
 	sess.job = j
 	return true
@@ -297,7 +319,7 @@ func (s *Server) expireSessions(now time.Time) {
 		return
 	}
 	for _, sess := range s.sessions {
-		if sess.job == nil && !sess.stopping && now.Sub(sess.LastUsed) > s.cfg.SessionIdle && !s.queuedFor(sess) {
+		if sess.job == nil && !sess.stopping && now.Sub(sess.LastUsed) > s.sessionIdle(sess) && !s.queuedFor(sess) {
 			s.stopSession(sess, fmt.Sprintf("idle for %v (tun serve --session-idle)", s.cfg.SessionIdle))
 		}
 	}
@@ -332,6 +354,9 @@ func (s *Server) sessionView(sess *session) api.Session {
 	default:
 		v.State = "idle"
 	}
+	if sess.runner != nil {
+		v.Server = true
+	}
 	if sess.sb != nil {
 		select {
 		case <-sess.sb.Done():
@@ -339,7 +364,7 @@ func (s *Server) sessionView(sess *session) api.Session {
 			v.Server = true
 		}
 	}
-	v.ExpiresAt = v.LastUsed.Add(s.cfg.SessionIdle)
+	v.ExpiresAt = v.LastUsed.Add(s.sessionIdle(sess))
 	return v
 }
 
@@ -351,15 +376,23 @@ func (s *Server) queueReason(j *job) string {
 		return fmt.Sprintf("session %s is running job %s (commands in a session run one at a time; --session NAME for another)", sess.Name, sess.job.ID)
 	case sess != nil && sess.stopping:
 		return fmt.Sprintf("session %s is being stopped", sess.Name)
-	case sess == nil && len(s.sessions) >= s.cfg.MaxSessions:
-		return fmt.Sprintf("the server has its maximum of %d sessions; waiting until an idle one is evicted (tun serve --max-sessions)", s.cfg.MaxSessions)
+	case sess == nil:
+		host := s.sessionHost(j)
+		if host == "" {
+			return "waiting for a session-capable host with job slots and free disk"
+		}
+		if s.hostSessions(host) >= s.sessionCapacity(host) {
+			return fmt.Sprintf("host %s has its session capacity; waiting for an idle session to be evicted (--max-sessions is per host)", host)
+		}
 	}
 	return ""
 }
 
 // sessionPaths are a session's directories as the bazel command sees them.
 type sessionPaths struct {
+	idleSeconds                                               int
 	work, home, tmp, out, repo, disk, bazelisk, rc, exe, sock string
+	cacheDisabled, cacheReadOnly                              bool
 }
 
 // cacheSock is the name of a session's REAPI socket in its sock dir.
@@ -376,10 +409,16 @@ func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandb
 		out: filepath.Join(sb, "out"), repo: filepath.Join(caches, "repo"), disk: filepath.Join(caches, "disk"),
 		bazelisk: filepath.Join(caches, "bazelisk"), rc: filepath.Join(dir, "tun.bazelrc"), sock: filepath.Join(dir, "sock"),
 	}
+	host.cacheDisabled = s.sessionProxy != nil && sess.credential == ""
+	host.cacheReadOnly = sess.cacheReadOnly
+	host.idleSeconds = sess.idleSeconds
 	in = host
 	spec = sandbox.Spec{Mode: s.cfg.Sandbox, Tmp: host.tmp, DataDir: s.cfg.DataDir}
+	if s.sessionDataDir != "" {
+		spec.DataDir = s.sessionDataDir
+	}
 	if s.cfg.Sandbox == sandbox.Bwrap {
-		in = sessionPaths{work: "/work", home: "/tun/home", tmp: "/tmp", out: "/tun/out", repo: "/tun/cache/repo",
+		in = sessionPaths{cacheDisabled: host.cacheDisabled, cacheReadOnly: host.cacheReadOnly, idleSeconds: host.idleSeconds, work: "/work", home: "/tun/home", tmp: "/tmp", out: "/tun/out", repo: "/tun/cache/repo",
 			disk: "/tun/cache/disk", bazelisk: "/tun/cache/bazelisk", rc: "/tun/tun.bazelrc", exe: "/tun/bin/tun", sock: "/tun/sock"}
 		spec.FixedRoot, spec.PrivateNet, spec.ExePath = true, s.cfg.PrivateNet, in.exe
 		spec.Mounts = []sandbox.Mount{
@@ -387,7 +426,7 @@ func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandb
 			{Src: host.repo, Dst: in.repo}, {Src: host.disk, Dst: in.disk}, {Src: host.bazelisk, Dst: in.bazelisk},
 			{Src: host.rc, Dst: in.rc, RO: true},
 		}
-		if s.cache != nil {
+		if s.hasSessionCache() {
 			// The socket's dir, read-only: connecting needs no write access to the mount.
 			spec.Mounts = append(spec.Mounts, sandbox.Mount{Src: host.sock, Dst: in.sock, RO: true})
 		}
@@ -411,8 +450,12 @@ func (s *Server) clientCaches(client string) string {
 // startupOptions are the bazel startup options tun adds (they must not change between
 // commands of a session, or Bazel restarts its server).
 func (s *Server) startupOptions(p sessionPaths) []string {
+	idle := int(s.cfg.SessionIdle.Seconds())
+	if p.idleSeconds > 0 {
+		idle = p.idleSeconds
+	}
 	return []string{"--output_user_root=" + p.out, "--output_base=" + p.out + "/base", "--bazelrc=" + p.rc,
-		fmt.Sprintf("--max_idle_secs=%d", int((s.cfg.SessionIdle + 5*time.Minute).Seconds()))}
+		fmt.Sprintf("--max_idle_secs=%d", idle+300)}
 }
 
 // prepareSession creates the session's dirs and files if needed.
@@ -457,14 +500,14 @@ const maxSocketPath = 107
 
 // remoteSetup says which remote flags a session with paths in gets.
 func (s *Server) remoteSetup(in sessionPaths) remoteSetup {
-	if s.cache == nil {
+	if !s.hasSessionCache() || in.cacheDisabled {
 		return remoteSetup{}
 	}
 	sock := path.Join(in.sock, cacheSock)
 	if len(sock) > maxSocketPath { // sandbox none: the host path, which may be long
 		return remoteSetup{note: fmt.Sprintf("no remote cache: its socket path %s is over %d bytes (tun serve --data with a shorter path, or bwrap)", sock, maxSocketPath)}
 	}
-	return remoteSetup{socket: sock, executors: s.executionSlots(), readOnly: s.cfg.CacheReadOnly}
+	return remoteSetup{socket: sock, executors: s.executionSlots(), readOnly: s.cfg.CacheReadOnly || in.cacheReadOnly}
 }
 
 // executionSlots is the number of actions the server can execute at once for sessions
@@ -519,7 +562,7 @@ func (s *Server) startCacheSocket(sess *session) error {
 	s.mu.Lock()
 	running := sess.cache != nil
 	s.mu.Unlock()
-	if s.cache == nil || running {
+	if !s.hasSessionCache() || running {
 		return nil
 	}
 	dir, err := os.OpenFile(filepath.Join(s.sessionDir(sess.ID), "sock"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
@@ -535,7 +578,7 @@ func (s *Server) startCacheSocket(sess *session) error {
 		return fmt.Errorf("session cache socket: %v", err)
 	}
 	ln.(*net.UnixListener).SetUnlinkOnClose(false)
-	srv := &http.Server{Handler: s.cache.ForClient(sess.Client), Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: s.sessionCacheHandler(sess), Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
 	go srv.Serve(ln)
 	s.mu.Lock()
 	sess.cache = &cacheSocket{srv: srv, dir: dir}
@@ -739,7 +782,7 @@ func (s *Server) runBazel(j *job) {
 	s.mu.Lock()
 	sess := s.sessions[j.SessionID]
 	br := &bazelRun{killed: make(chan struct{}), ended: make(chan struct{})}
-	logs, err := openLogs(s.jobDir(j.ID), s.cfg.MaxLog)
+	logs, err := openLogs(s.jobDir(j.ID), s.bazelLogLimit(j))
 	if err == nil && s.closed {
 		logs.close()
 		err = errors.New("server is shutting down")

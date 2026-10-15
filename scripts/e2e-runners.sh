@@ -69,6 +69,20 @@ if curl -fsS "$TUN_URL/v1/healthz" | grep -q '"network_isolation":true'; then
   echo 'e2e-runners: network isolation checked'
 fi
 
+# Warm Bazel sessions route through the hub to a runner, including its cache socket.
+if command -v bazel >/dev/null; then
+  echo 'module(name="runner_smoke")' > MODULE.bazel
+  echo 9.3.0 > .bazelversion
+  echo 'genrule(name="hello", outs=["hello.txt"], cmd="echo hello > $@")' > BUILD.bazel
+  tun bazel build //:hello 2>"$tmp/bazel.log" || fail "runner bazel: $(cat "$tmp/bazel.log")"
+  grep -Eq '^tun: running on runner r[12]$' "$tmp/bazel.log" || fail "bazel placement"
+  host=$(tun sessions | sed -n 's/.*"host":"\([^"]*\)".*/\1/p')
+  tun bazel build //:hello 2>"$tmp/bazel-warm.log" || fail "warm runner bazel"
+  grep -q 'Starting local Bazel server' "$tmp/bazel-warm.log" && fail "lost warm server"
+  [ "$(tun sessions | sed -n 's/.*"host":"\([^"]*\)".*/\1/p')" = "$host" ] || fail "bazel affinity"
+  echo 'e2e-runners: bazel affinity and cache socket checked'
+fi
+
 # Both runners take work at once.
 a=$(tun run --detach --no-workspace -- sleep 3)
 b=$(tun run --detach --no-workspace -- sleep 3)

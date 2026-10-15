@@ -307,7 +307,7 @@ func openOwn(name string, flag int, perm os.FileMode) (*os.File, error) {
 func (s *Server) schedule() {
 	for i := 0; !s.closed && s.running < s.cfg.MaxJobs && i < len(s.queue); {
 		j := s.queue[i]
-		if j.bz != nil && !s.claimSession(j) {
+		if j.bz != nil && (s.sessionHost(j) != api.LocalRunner || !s.claimSession(j)) {
 			i++ // its session is busy (or full): later jobs may go first
 			continue
 		}

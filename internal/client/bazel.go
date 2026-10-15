@@ -43,7 +43,9 @@ commands, so the second command skips Bazel's startup and reuses its analysis ca
 in one session run one at a time (a second one queues behind the first; use --session to run
 in parallel, at the cost of a second Bazel server). The server deletes a session after
 30 minutes without a command (tun serve --session-idle) or to make room for a new one (LRU);
-then the next command starts it again, slower. tun sessions lists them.
+then the next command starts it again, using the remote cache. Sessions live on the hub
+or a runner, keep host affinity, and recreate elsewhere after host loss. --max-sessions
+is per host. tun sessions lists them and their host.
 
 Sync: instead of uploading the workspace (the same files tun run ships: git tracked and
 untracked-not-ignored; Bazel's bazel-* convenience symlinks at the root are left out), tun

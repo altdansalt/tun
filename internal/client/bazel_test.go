@@ -539,14 +539,6 @@ func TestBazelSessionRestart(t *testing.T) {
 	}
 }
 
-func TestBazelNeedsLocalSlots(t *testing.T) {
-	ts := startServer(t, server.Config{HubOnly: true})
-	r := ts.tun(bazelWS(t, map[string]string{}), "bazel", "build")
-	if r.code != 125 || !strings.Contains(r.stderr, "--local-slots 0") {
-		t.Fatalf("%+v", r)
-	}
-}
-
 // TestBazelReal runs the real Bazel (skipped without bazel and bwrap): a genrule workspace
 // needs no downloads. The second command must find the server warm and its analysis cached.
 func TestBazelReal(t *testing.T) {

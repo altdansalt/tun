@@ -42,6 +42,10 @@ type runnerState struct {
 	name, instance, sandbox, source string
 	privateNet                      bool
 	disk                            *api.Disk
+	sessionSupport                  bool
+	memoryAvailable                 int64
+	load                            float64
+	liveSessions                    int
 	slots                           int
 	lastSeen                        time.Time
 	retiredAt                       time.Time       // when a newer instance took the name (or it was dropped)
@@ -107,6 +111,12 @@ func (s *Server) takeJobs(rn *runnerState, held map[string]bool) []api.RunnerJob
 func (s *Server) runnerJobEnded(j *job) {
 	if rn := j.rn; rn != nil && rn.jobs[j.ID] == j {
 		delete(rn.jobs, j.ID)
+		if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+			sess.job = nil
+			if s.runners[rn.name] != rn {
+				delete(s.sessions, sess.ID)
+			}
+		}
 		rn.poke()
 	}
 }
@@ -201,6 +211,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	if s.runners[name] == rn {
 		rn.lastSeen = time.Now()
 	}
+	resp.Sessions = s.runnerSessionLeases(rn)
 	s.mu.Unlock()
 	writeJSON(w, 200, resp)
 }
@@ -228,6 +239,7 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
 	rn.privateNet, rn.disk = p.NetworkIsolation, p.Disk
+	rn.sessionSupport, rn.memoryAvailable, rn.load, rn.liveSessions = p.SessionSupport, p.MemoryAvailable, p.Load, len(p.Sessions)
 	return rn
 }
 
@@ -247,6 +259,11 @@ func (s *Server) retire(rn *runnerState, now time.Time) {
 			s.requeue(j)
 		}
 	}
+	for id, sess := range s.sessions {
+		if sess.runner == rn && sess.job == nil {
+			delete(s.sessions, id)
+		}
+	}
 	rn.poke()
 }
 
@@ -254,6 +271,11 @@ func (s *Server) retire(rn *runnerState, now time.Time) {
 // with msg, or with the result it already reported via .../exited). Caller holds s.mu.
 func (s *Server) dropRunner(rn *runnerState, msg string) {
 	s.retire(rn, time.Now())
+	for id, sess := range s.sessions {
+		if sess.runner == rn {
+			delete(s.sessions, id)
+		}
+	}
 	for _, j := range rn.jobs {
 		if d := j.exited; d != nil {
 			s.finishRunnerJob(j, *d, msg+" before it finished shipping the job's logs and outputs")
@@ -274,7 +296,27 @@ func (s *Server) finishRunnerJob(j *job, d api.RunnerDone, note string) {
 	if note != "" {
 		msg = strings.TrimPrefix(msg+"; "+note, "; ")
 	}
+	if j.bz != nil {
+		if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+			sess.LastUsed = time.Now().UTC()
+			sess.LastJob = j.ID
+			sess.Commands++
+			if d.Session != nil {
+				sess.Commands = d.Session.Commands
+				sess.CreatedAt = d.Session.CreatedAt
+			}
+		}
+		j.Summary = d.Summary
+		if len(d.BEP) > 0 {
+			if err := writeOwn(filepath.Join(s.jobDir(j.ID), "bep.json"), d.BEP); err != nil {
+				msg = joinMsg(msg, err.Error())
+			}
+		}
+	}
 	s.finish(j, state, d.ExitCode, d.Signal, msg)
+	if j.bz != nil {
+		s.schedule()
+	}
 }
 
 // reconcile compares what runner rn holds (held, as of a poll that arrived at arrival) with
@@ -308,6 +350,11 @@ func (s *Server) reconcile(rn *runnerState, held map[string]bool, arrival time.T
 func (s *Server) requeue(j *job) {
 	if j.rn != nil {
 		delete(j.rn.jobs, j.ID)
+		if j.bz != nil {
+			if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+				sess.job = nil
+			}
+		}
 	}
 	j.Runner, j.rn, j.assignedAt = "", nil, time.Time{}
 	i := sort.Search(len(s.queue), func(i int) bool { return s.queue[i].ID > j.ID })
@@ -325,7 +372,7 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 	}
 	var out []*job
 	for free := rn.slots - busy; free > 0 && !s.closed; free-- {
-		i := slices.IndexFunc(s.queue, func(j *job) bool { return j.bz == nil }) // bazel jobs run here
+		i := slices.IndexFunc(s.queue, func(j *job) bool { return j.bz == nil || (s.sessionHost(j) == rn.name && s.claimSessionOn(j, rn.name)) })
 		if i < 0 {
 			break
 		}
@@ -340,11 +387,19 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 
 // assignment is what a runner gets to run j.
 func (s *Server) assignment(j *job) api.RunnerJob {
-	return api.RunnerJob{
+	out := api.RunnerJob{
 		ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
 		Workspace: j.Workspace, Outputs: j.Outputs,
 		MaxLog: s.cfg.MaxLog, MaxWorkspace: s.cfg.MaxWorkspace, MaxDownload: s.maxDownload(),
 	}
+	if j.bz != nil {
+		sess := s.sessions[j.SessionID]
+		out.Bazel = &api.RunnerBazel{Command: *j.bz, Session: sess.Session, CacheReadOnly: s.cfg.CacheReadOnly, SessionIdleSec: int(s.cfg.SessionIdle.Seconds())}
+		if s.cache != nil {
+			out.Bazel.CacheCredential = sess.credential
+		}
+	}
+	return out
 }
 
 func (s *Server) maxDownload() int64 {
@@ -671,7 +726,7 @@ func (s *Server) runnerInfo() (slots, running int, list []api.RunnerInfo) {
 		slots += rn.slots
 		running += len(rn.jobs)
 		list = append(list, api.RunnerInfo{Name: rn.name, Slots: rn.slots, Running: len(rn.jobs),
-			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet, Disk: rn.disk})
+			MemoryAvailable: rn.memoryAvailable, Load: rn.load, Sessions: rn.liveSessions, LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet, Disk: rn.disk})
 	}
 	for _, rn := range s.retired {
 		running += len(rn.jobs) // still finishing on a superseded instance

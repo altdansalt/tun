@@ -122,6 +122,9 @@ func (s *Server) reclaimDisk() {
 		s.mu.Lock()
 		var victim *session
 		for _, o := range s.sessions {
+			if o.runner != nil {
+				continue
+			} // remote sessions cannot free the hub filesystem
 			if o.job == nil && !o.stopping && !s.queuedFor(o) && (victim == nil || o.LastUsed.Before(victim.LastUsed)) {
 				victim = o
 			}

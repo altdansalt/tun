@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Runner protocol (see SPEC.md, Runners). Everything is runner-initiated: a runner long-polls
 // the hub for work, fetches workspace blobs, and pushes logs, outputs and the end state.
@@ -32,14 +35,19 @@ type RunnerPoll struct {
 	Running []string `json:"running"` // job ids the runner holds (received and not yet reported done)
 	Sandbox string   `json:"sandbox"` // the runner's sandbox mode (bwrap|none)
 	// NetworkIsolation: the runner gives each job its own network namespace (--net private).
-	NetworkIsolation bool  `json:"network_isolation"`
-	Disk             *Disk `json:"disk,omitempty"` // the runner's data dir
+	NetworkIsolation bool     `json:"network_isolation"`
+	Disk             *Disk    `json:"disk,omitempty"` // the runner's data dir
+	SessionSupport   bool     `json:"session_support,omitempty"`
+	MemoryAvailable  int64    `json:"memory_available,omitempty"`
+	Load             float64  `json:"load,omitempty"`
+	Sessions         []string `json:"sessions,omitempty"`
 }
 
 // RunnerPollResponse is the hub's answer: jobs to start and job ids to kill and drop.
 type RunnerPollResponse struct {
-	Jobs   []RunnerJob `json:"jobs"`
-	Cancel []string    `json:"cancel"`
+	Jobs     []RunnerJob `json:"jobs"`
+	Cancel   []string    `json:"cancel"`
+	Sessions []string    `json:"sessions,omitempty"` // authoritative session leases for this instance
 	// Superseded is set when a newer instance took over this runner's name: this instance
 	// gets no more work, should finish the jobs it holds (polling on as its heartbeat), then
 	// exit.
@@ -55,6 +63,7 @@ type RunnerLeave struct {
 // RunnerJob is one job assignment: everything the runner needs to run it.
 type RunnerJob struct {
 	ID         string            `json:"id"`
+	Bazel      *RunnerBazel      `json:"bazel,omitempty"`
 	Argv       []string          `json:"argv,omitempty"`
 	Script     string            `json:"script,omitempty"`
 	Cwd        string            `json:"cwd"`
@@ -79,10 +88,13 @@ type LogAck struct {
 // as the command has ended, before the remaining logs and the outputs are shipped; the
 // outputs fields are then empty).
 type RunnerDone struct {
-	State    string `json:"state"`
-	ExitCode *int   `json:"exit_code"`
-	Signal   *int   `json:"signal"`
-	Error    string `json:"error,omitempty"`
+	Session  *Session        `json:"session,omitempty"`
+	State    string          `json:"state"`
+	ExitCode *int            `json:"exit_code"`
+	Signal   *int            `json:"signal"`
+	Error    string          `json:"error,omitempty"`
+	Summary  string          `json:"summary,omitempty"`
+	BEP      json.RawMessage `json:"bep,omitempty"`
 	// Outcome of collecting the declared outputs (uploaded before done).
 	OutputsMissing []string `json:"outputs_missing,omitempty"`
 	OutputsSkipped []string `json:"outputs_skipped,omitempty"`
@@ -92,6 +104,9 @@ type RunnerDone struct {
 // RunnerInfo describes a live runner in GET /v1/healthz.
 type RunnerInfo struct {
 	Name             string    `json:"name"`
+	MemoryAvailable  int64     `json:"memory_available,omitempty"`
+	Load             float64   `json:"load,omitempty"`
+	Sessions         int       `json:"sessions"`
 	Slots            int       `json:"slots"`
 	Running          int       `json:"running"` // jobs assigned to it and not yet ended
 	LastSeen         time.Time `json:"last_seen"`
@@ -99,4 +114,13 @@ type RunnerInfo struct {
 	NetworkIsolation bool      `json:"network_isolation"`
 	Source           string    `json:"source,omitempty"` // who connected (exe.dev source VM, else IP)
 	Disk             *Disk     `json:"disk,omitempty"`   // as of its last poll
+}
+
+// RunnerBazel carries a session command. CacheCredential never enters the sandbox.
+type RunnerBazel struct {
+	Command         BazelJob `json:"command"`
+	Session         Session  `json:"session"`
+	CacheCredential string   `json:"cache_credential,omitempty"`
+	CacheReadOnly   bool     `json:"cache_read_only,omitempty"`
+	SessionIdleSec  int      `json:"session_idle_sec"`
 }

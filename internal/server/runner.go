@@ -32,12 +32,14 @@ import (
 
 // RunnerConfig configures a Runner.
 type RunnerConfig struct {
-	Hub     string // hub base URL
-	Token   string // sent as X-Tun-Token (the hub's client token, for now)
-	Name    string
-	Slots   int
-	DataDir string // blob cache, job dirs, shared build caches
-	Sandbox string // sandbox.Bwrap or sandbox.None (already resolved)
+	Hub          string // hub base URL
+	BazelCommand string
+	BazeliskSeed string
+	Token        string // sent as X-Tun-Token (the hub's client token, for now)
+	Name         string
+	Slots        int
+	DataDir      string // blob cache, job dirs, shared build caches
+	Sandbox      string // sandbox.Bwrap or sandbox.None (already resolved)
 	// PrivateNet (bwrap only): a network namespace per job, egress through an HTTP(S) proxy
 	// this runner serves (check sandbox.NetUsable first).
 	PrivateNet bool
@@ -51,16 +53,18 @@ type RunnerConfig struct {
 // Runner is a running tun runner. Create with NewRunner, run with Run; stop with Shutdown
 // (graceful: running jobs finish within a deadline) or Kill (like a crash).
 type Runner struct {
-	cfg      RunnerConfig
-	instance string
-	host     string
-	previous string          // the instance that used the data dir before
-	lock     *os.File        // flock on the data dir: one runner process per data dir
-	seq      int64           // polls sent (only the Run goroutine touches it)
-	ctx      context.Context // canceled by Kill: no more requests, jobs abandoned
-	kill     context.CancelFunc
-	pollCtx  context.Context // canceled to stop taking work
-	stopPoll context.CancelFunc
+	sessionTransport *http.Transport
+	sessions         *Server
+	cfg              RunnerConfig
+	instance         string
+	host             string
+	previous         string          // the instance that used the data dir before
+	lock             *os.File        // flock on the data dir: one runner process per data dir
+	seq              int64           // polls sent (only the Run goroutine touches it)
+	ctx              context.Context // canceled by Kill: no more requests, jobs abandoned
+	kill             context.CancelFunc
+	pollCtx          context.Context // canceled to stop taking work
+	stopPoll         context.CancelFunc
 
 	mu         sync.Mutex
 	jobs       map[string]*runnerJob
@@ -73,9 +77,10 @@ type Runner struct {
 }
 
 type runnerJob struct {
-	spec      api.RunnerJob
-	proc      *proc  // once started
-	killState string // a kill requested before the command started
+	sessionJob *job
+	spec       api.RunnerJob
+	proc       *proc  // once started
+	killState  string // a kill requested before the command started
 }
 
 var errGone = errors.New("the hub no longer wants this job")
@@ -147,6 +152,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	r := &Runner{cfg: cfg, instance: instance, previous: strings.TrimSpace(string(prev)), lock: lock, host: host, jobs: map[string]*runnerJob{}, blobLock: map[string]*sync.Mutex{}}
 	r.ctx, r.kill = context.WithCancel(context.Background())
 	r.pollCtx, r.stopPoll = context.WithCancel(r.ctx)
+	if err := r.newSessionHost(); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -181,6 +190,7 @@ func (r *Runner) Run() {
 		for _, id := range resp.Cancel {
 			r.cancelJob(id, api.Canceled)
 		}
+		r.sessionLeases(resp.Sessions)
 		for _, j := range resp.Jobs {
 			r.startJob(j)
 		}
@@ -199,6 +209,8 @@ func (r *Runner) Run() {
 		}
 	}
 	r.wg.Wait()
+	r.sessions.Close()
+	r.sessionTransport.CloseIdleConnections()
 	r.lock.Close()
 }
 
@@ -216,6 +228,7 @@ func (r *Runner) Kill() {
 	r.kill()
 	r.mu.Lock()
 	for _, j := range r.jobs {
+		r.cancelSessionJob(j, "")
 		if j.proc != nil {
 			j.proc.kill("")
 		}
@@ -320,6 +333,13 @@ func (r *Runner) poll() (api.RunnerPollResponse, error) {
 		req.Slots = 0
 	}
 	r.mu.Unlock()
+	req.SessionSupport = true
+	req.MemoryAvailable, req.Load = hostResources()
+	r.sessions.mu.Lock()
+	for id := range r.sessions.sessions {
+		req.Sessions = append(req.Sessions, id)
+	}
+	r.sessions.mu.Unlock()
 	if req.Disk = diskInfo(r.cfg.DataDir, r.cfg.MinFree); req.Disk != nil {
 		req.Disk.ReclaimedBlobs = r.reclaimed.Load()
 	}
@@ -372,6 +392,8 @@ func (r *Runner) cancelJob(id, state string) {
 	j := r.jobs[id]
 	switch {
 	case j == nil:
+	case j.sessionJob != nil:
+		r.cancelSessionJob(j, state)
 	case j.proc != nil:
 		j.proc.kill(state)
 	case j.killState == "":
@@ -413,6 +435,9 @@ func failed(format string, a ...any) procResult {
 
 // execute prepares, starts and waits for the job, ships its logs and uploads its outputs.
 func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
+	if j.spec.Bazel != nil {
+		return r.executeBazel(j)
+	}
 	spec := j.spec
 	var done api.RunnerDone
 	if err := prepareJobDir(r.cfg.DataDir, spec.ID); err != nil {
@@ -588,9 +613,13 @@ func (r *Runner) sweepBlobs() {
 // shipLogs sends whatever the hub doesn't have yet of the job's stdout and stderr. sent
 // holds the hub's offsets; a retried or overlapping chunk is harmless.
 func (r *Runner) shipLogs(id string, sent *[2]int64) error {
+	return r.shipLogsDir(id, r.jobDir(id), sent)
+}
+
+func (r *Runner) shipLogsDir(id, dir string, sent *[2]int64) error {
 	buf := make([]byte, 1<<20)
 	for i, stream := range []string{"stdout", "stderr"} {
-		f, err := os.Open(filepath.Join(r.jobDir(id), stream))
+		f, err := os.Open(filepath.Join(dir, stream))
 		if err != nil {
 			return err
 		}

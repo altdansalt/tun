@@ -28,6 +28,7 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     and scripts/e2e.sh also run the real one when `bazel` is on PATH (it is on the tun hosts).
     It ends with a BEP summary line; `tun bazel --json ...` prints the result as one object.
     Bazel caches are per client on the server; dev-tun.sh seeds bazelisk from the job's cache.
+    Sessions run on the hub or runners with host affinity; --max-sessions is per host.
     Sessions use the server's REAPI remote cache automatically (`tun serve --cache-dir`, on by
     default) through a per-session socket; action results are per client.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.

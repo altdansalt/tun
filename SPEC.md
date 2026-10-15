@@ -95,7 +95,7 @@ Queueing is visible: if the created job is waiting in the FIFO (`queue_position`
 `running` from healthz), polls the job every 500ms, and when it starts prints
 `tun: started after Xs in queue` before streaming output. Non-JSON attached runs then print
 where the job runs, once the server decided: `tun: running on hub` (the server itself) or
-`tun: running on runner NAME` (also `tun bazel`, whose jobs run on the hub). SIGINT/SIGTERM while queued cancel it.
+`tun: running on runner NAME` (also `tun bazel`, with session affinity). SIGINT/SIGTERM while queued cancel it.
 `tun run --json` adds `queue_sec` and `run_sec` to its object.
 On completion, non-JSON attached runs (including `--tail`) print a final stderr line:
 `tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)` with seconds to three
@@ -414,8 +414,10 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `--remote_cache=`) override it. The first command of a sandbox says "started a new session
   sandbox ...; remote cache: tun's, through /tun/sock/cache.sock" (or why there is none).
 - **Jobs.** Each command is a job (`POST /v1/jobs` with `bazel`, see the API) in the normal
-  FIFO; it needs a hub-local slot (a hub with `--local-slots 0` answers 409) and is never
-  given to a runner. It also needs its session: a session runs one command at a time, so the
+  FIFO; it needs a slot on its session host (hub or runner). New sessions are placed by
+  available memory, load, free disk and per-host session capacity; existing sessions retain
+  affinity to one host instance, even while its slots are busy. A pure hub queues until a
+  session-capable runner is available. It also needs its session: a session runs one command at a time, so the
   scheduler skips a bazel job whose session is busy (later jobs may start first) and sets
   `queue_reason` on it (tun prints it with the queued line). The job object has `session`,
   `session_id`, and `argv` = `["bazel", args...]`. Once it has a slot and its session, the job
@@ -461,11 +463,15 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `state` and `error` (only those, plus `exit_code`, when the command never ran).
 - **Lifetime.** A session is deleted (Bazel `shutdown` through the agent, then the sandbox is
   closed and the dir removed) after `--session-idle` (default 30m) without a command. At most
-  `--max-sessions` (default 2) exist; a bazel job for a new session when that many exist
+  `--max-sessions` (default 2) exist **per host**; memory can lower the effective capacity
+  (1.5GiB reserved per new JVM, always allowing one session). A new session first tries
+  another host with capacity; when all hosts are full it
   evicts the least recently used idle one (one eviction at a time) and waits for it. Sessions
-  survive a server restart on disk (`bazel_server: false` until the next command starts a new
-  sandbox).
-- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root,
+  on the hub survive a server restart on disk (`bazel_server: false` until the next command
+  starts a new sandbox). Runner leases belong to a process instance: host loss fails its
+  active commands and the next command recreates the session elsewhere, using the hub
+  remote cache. A hub restart also recreates remote leases.
+- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root, host (local or runner name),
   created_at, last_used, commands, last_job, state (idle|busy|stopping), job, bazel_server,
   expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.
 
@@ -573,3 +579,19 @@ Crashes and expired drain timeouts retain the failure behavior described above.
 Job creation sends a random `X-Tun-Request-Id` per request, reused on retries. The server
 returns the existing job for the same client and key for 24 hours, including across restarts,
 while the job remains retained. Failed admissions do not consume the key.
+
+### Runner session transport
+Runners advertise `session_support`, `memory_available` (MemAvailable bytes), `load`
+(one-minute load average) and live `sessions` IDs in polls; `tun runners` exposes
+memory, load and session count. Assignments carry a Bazel manifest, session metadata and
+limits; runners fetch verified file contents from `GET /v1/runner/cas/{sha}`. Both hosts
+use the same session engine, agent, manifest sync, per-client caches and BEP parser.
+Logs use the existing offset protocol; exit/done also carries the summary and BEP JSON.
+The hub's poll response carries authoritative session leases; revoked idle sessions stop.
+
+On runners `/tun/sock/cache.sock` serves an HTTP/2 reverse proxy to the hub REAPI cache.
+The server issues a random per-session credential in the assignment, kept in runner memory;
+the sandbox sees only its socket. `/v1/session-cache/{credential}/{rpc}` fixes the client
+namespace from the lease, ignoring request identity headers. It grants no ordinary API access
+and is revoked with the lease. Hub and runner traffic must use a trusted network or HTTPS,
+as with existing runner credentials. Cache action writes follow the hub's policy.

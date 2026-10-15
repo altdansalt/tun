@@ -1,0 +1,189 @@
+package server
+
+// Session placement and remote leases belong to the hub. The runner executes the same
+// session engine; the hub keeps its public metadata and binds it to a runner instance.
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/altdansalt/tun/internal/api"
+)
+
+const sessionMemory = int64(1536 << 20)
+
+func hostResources() (available int64, load float64) {
+	b, _ := os.ReadFile("/proc/meminfo")
+	for line := range strings.SplitSeq(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "MemAvailable:" {
+			n, _ := strconv.ParseInt(f[1], 10, 64)
+			available = n * 1024
+		}
+	}
+	b, _ = os.ReadFile("/proc/loadavg")
+	if f := strings.Fields(string(b)); len(f) > 0 {
+		load, _ = strconv.ParseFloat(f[0], 64)
+	}
+	return
+}
+
+func (s *Server) hostSessions(host string) int {
+	n := 0
+	for _, sess := range s.sessions {
+		if sess.Host == host {
+			n++
+		}
+	}
+	return n
+}
+
+// sessionHost preserves affinity even when another machine becomes less busy. New
+// sessions prefer spare capacity to eviction, then memory and load. Unknown memory
+// (older hosts) is not assumed to have space for a JVM. A busy host can queue work.
+// Caller holds s.mu.
+func (s *Server) sessionHost(j *job) string {
+	if sess := s.sessions[j.SessionID]; sess != nil {
+		if sess.runner != nil && s.runners[sess.Host] != sess.runner {
+			return ""
+		}
+		return sess.Host
+	}
+	best := ""
+	score := -1e30
+	consider := func(host string, mem int64, load float64, busy, slots int, disk *api.Disk) {
+		if slots <= 0 {
+			return
+		}
+		n := s.hostSessions(host)
+		// Reserve for leases assigned since the last resource sample. Existing JVMs are
+		// already reflected in MemAvailable; don't subtract their memory a second time.
+		pending := 0
+		for _, sess := range s.sessions {
+			if sess.Host == host && sess.Commands == 0 {
+				pending++
+			}
+		}
+		mem -= int64(pending) * sessionMemory
+		if disk != nil && disk.FreeBytes < disk.MinFreeBytes {
+			return
+		}
+		v := float64(mem)/float64(sessionMemory) - load - float64(busy)/float64(slots)
+		if n >= s.sessionCapacity(host) {
+			v -= 1000
+		} else {
+			v += 100
+		}
+		v -= float64(n) * 2
+		if v > score || (v == score && host < best) {
+			best, score = host, v
+		}
+	}
+	if !s.cfg.HubOnly {
+		mem, load := hostResources()
+		consider(api.LocalRunner, mem, load, s.running, s.cfg.MaxJobs, diskInfo(s.cfg.DataDir, s.cfg.MinFree))
+	}
+	for _, rn := range s.runners {
+		if rn.sessionSupport && time.Since(rn.lastSeen) <= s.cfg.RunnerDeadAfter {
+			consider(rn.name, rn.memoryAvailable, rn.load, len(rn.jobs), rn.slots, rn.disk)
+		}
+	}
+	return best
+}
+
+func (s *Server) runnerSessionLeases(rn *runnerState) []string {
+	out := []string{}
+	for _, sess := range s.sessions {
+		if sess.runner == rn && !sess.stopping {
+			out = append(out, sess.ID)
+		}
+	}
+	return out
+}
+
+func (s *Server) hasSessionCache() bool { return s.cache != nil || s.sessionProxy != nil }
+func (s *Server) sessionCacheHandler(sess *session) http.Handler {
+	if s.sessionProxy != nil {
+		return s.sessionProxy(sess)
+	}
+	return s.cache.ForClient(sess.Client)
+}
+
+// This credential authorizes only REAPI for one session's client namespace, never the
+// ordinary tun API. Removing the lease revokes it, including after runner loss.
+func (s *Server) remoteSessionCache(w http.ResponseWriter, r *http.Request) {
+	credential := r.PathValue("credential")
+	s.mu.Lock()
+	client := ""
+	for _, sess := range s.sessions {
+		if sess.runner != nil && !sess.stopping && sess.credential == credential && credential != "" {
+			client = sess.Client
+			break
+		}
+	}
+	s.mu.Unlock()
+	if client == "" || s.cache == nil {
+		writeErr(w, 403, "expired session cache credential")
+		return
+	}
+	r.URL.Path = "/" + r.PathValue("rpc")
+	s.cache.ForClient(client).ServeHTTP(w, r)
+}
+
+func (s *Server) runnerCAS(w http.ResponseWriter, r *http.Request) {
+	sha := r.PathValue("sha")
+	if !shaRE.MatchString(sha) {
+		writeErr(w, 400, "invalid CAS digest")
+		return
+	}
+	f, err := os.Open(s.casPath(sha))
+	if err != nil {
+		writeErr(w, 404, fmt.Sprintf("missing CAS blob %s", sha))
+		return
+	}
+	defer f.Close()
+	http.ServeContent(w, r, sha, time.Time{}, f)
+}
+
+// Grow only when a sampled host can afford another JVM; otherwise reuse its
+// existing budget by evicting an idle session. Always allow one session so a host
+// with temporarily low memory can make progress instead of queueing forever.
+func (s *Server) sessionCapacity(host string) int {
+	mem, _ := hostResources()
+	if host != api.LocalRunner {
+		if rn := s.runners[host]; rn != nil {
+			mem = rn.memoryAvailable
+		}
+	}
+	if mem == 0 {
+		return s.cfg.MaxSessions
+	}
+	live, pending := 0, 0
+	for _, sess := range s.sessions {
+		if sess.Host == host {
+			if sess.Commands == 0 {
+				pending++
+			} else {
+				live++
+			}
+		}
+	}
+	return max(1, min(s.cfg.MaxSessions, live+int(max(int64(0), mem-int64(pending)*sessionMemory)/sessionMemory)+pending))
+}
+
+func (s *Server) bazelLogLimit(j *job) int64 {
+	if j.runnerMaxLog != nil {
+		return *j.runnerMaxLog
+	}
+	return s.cfg.MaxLog
+}
+
+func (s *Server) sessionIdle(sess *session) time.Duration {
+	if sess.idleSeconds > 0 {
+		return time.Duration(sess.idleSeconds) * time.Second
+	}
+	return s.cfg.SessionIdle
+}

@@ -65,9 +65,10 @@ A runner job keeps only the files declared with tun run --out (uploaded when it 
 Bazel sessions (tun bazel): each (client, workspace, session name) gets a persistent dir
 under $DATA/sessions with the synced workspace and Bazel's output base, and a long-lived
 sandbox in which the Bazel server stays up between commands. A session is deleted after
---session-idle without a command; at most --max-sessions exist (a Bazel server takes 1GB+ of
-memory): a new one evicts the least recently used idle one. tun bazel commands take local
-slots like other jobs. Each client has its own Bazel caches (bazelisk downloads, repository
+--session-idle without a command; at most --max-sessions exist per host (a Bazel server
+takes 1-2GB of memory). New sessions use memory/load/disk to choose a hub or runner; all
+commands retain affinity there. Full hosts evict an idle session when needed. Commands take
+slots on their session host; a lost host means a cold session on the next command. Each client has its own Bazel caches (bazelisk downloads, repository
 cache, disk cache) in $DATA/bazel.
 
 Remote cache (--cache-dir, default "reapi" in the data dir; --cache-dir= disables it): Bazel's
@@ -120,7 +121,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
 	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, finished jobs' work dirs (oldest first), then idle tun bazel sessions (least recently used) are deleted before a job starts")
 	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
-	maxSessions := fs.Int("max-sessions", 2, "tun bazel sessions at once (each can hold a Bazel server, 1GB+ of memory); a new one evicts the least recently used idle one")
+	maxSessions := fs.Int("max-sessions", 2, "tun bazel sessions per host (memory may lower capacity); full hosts evict the least recently used idle session")
 	bazeliskSeed := fs.String("bazelisk-seed", "", "copy this bazelisk home's downloads/ (e.g. ~/.cache/bazelisk; must not be writable by jobs) into each client's new bazelisk home for tun bazel, so Bazel isn't downloaded again")
 	sessionIdle := fs.Duration("session-idle", 30*time.Minute, "delete a tun bazel session (its Bazel server, output base and workspace copy) after this long without a command")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
