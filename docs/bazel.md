@@ -130,6 +130,10 @@ Measured (2026-10-15, private dev server on a tun host via `tun run -c 'scripts/
 | `--cold`                         | 6.91s | 6.34s, new server | 427B + 0B | 20261015T081346640293-da0e4076 |
 | v0: `tun run -- bazel build` (every time) | 6.5-7.8s | new server, full analysis | tarball | |
 
+Cost of a warm session on the trivial workspace: Bazel server RSS 223MB, 117MB on disk
+(nearly all Bazel's install base, extracted per session; sharing it across sessions would save
+that and ~1s per new session, but makes it writable by every session).
+
 tun's own tree (78 entries, 66 files) with `bazel info`: first sync 6.9KB manifest + 176KB
 contents; no-op 3.5KB; one-line change 6.9KB (the manifest is sent twice: once answered with
 the missing digest) + 2.8KB; `tun run` uploads a 164KB tarball for every change. From a
