@@ -31,8 +31,12 @@ func (s *Server) blobPath(sha string) string {
 }
 
 func (s *Server) headBlob(w http.ResponseWriter, r *http.Request) {
+	// Only content this client uploaded exists for it (see owners.go).
 	sha := r.PathValue("sha")
-	if !shaRE.MatchString(sha) || !s.useBlob(sha) {
+	s.gc.blobMu.Lock()
+	ok := shaRE.MatchString(sha) && s.owns(owner(r), "blobs", sha, s.blobPath(sha))
+	s.gc.blobMu.Unlock()
+	if !ok {
 		w.WriteHeader(404)
 		return
 	}
@@ -68,7 +72,7 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 	default:
 		if err := tmp.Close(); err != nil {
 			writeErr(w, 500, err.Error())
-		} else if err := os.Rename(tmp.Name(), s.blobPath(sha)); err != nil {
+		} else if err := s.store(owner(r), "blobs", sha, tmp.Name(), s.blobPath(sha)); err != nil {
 			writeErr(w, 500, err.Error())
 		} else {
 			w.WriteHeader(201)
@@ -126,7 +130,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, code, err.Error())
 			return
 		}
-		if missing := s.missingBlobs(req.Bazel.Manifest); len(missing) > 0 {
+		if missing := s.missingBlobs(owner(r), req.Bazel.Manifest); len(missing) > 0 {
 			writeJSON(w, 409, api.MissingBlobs{Error: fmt.Sprintf("%d file contents are not on the server: upload them (POST /v1/cas) and create the job again", len(missing)), Missing: missing})
 			return
 		}
@@ -173,6 +177,16 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if req.Workspace != "" && !shaRE.MatchString(req.Workspace) {
 		writeErr(w, 400, "workspace must be a sha256 of an uploaded blob")
 		return
+	}
+	if req.Workspace != "" {
+		// Another client's workspace is "not uploaded" too: no hint that it exists.
+		s.gc.blobMu.Lock()
+		ok := s.owns(owner(r), "blobs", req.Workspace, s.blobPath(req.Workspace))
+		s.gc.blobMu.Unlock()
+		if !ok {
+			writeErr(w, 400, fmt.Sprintf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", req.Workspace, req.Workspace))
+			return
+		}
 	}
 	j := &job{RequestID: key, done: make(chan struct{}), Env: req.Env, Job: api.Job{
 		ID: newID(), State: api.Queued, CreatedAt: time.Now().UTC(), Argv: req.Argv, Script: req.Script,

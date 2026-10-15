@@ -35,6 +35,7 @@ const maxRemoveTries = 3
 type gcState struct {
 	blobMu sync.Mutex // serializes blob deletion against HEAD/job creation touching blobs
 	workMu sync.Mutex // serializes the sweep and reclaimDisk (and guards fails)
+	trimMu sync.Mutex // one tool cache trim at a time (sharedcache.go)
 	stop   chan struct{}
 	done   chan struct{}
 	fails  map[string]int // path -> failed removals
@@ -62,7 +63,7 @@ func (c *Config) gcInterval() time.Duration {
 
 // startGC runs the first sweep now and then every gcInterval until stopGC.
 func (s *Server) startGC() {
-	if s.cfg.KeepWork <= 0 && s.cfg.KeepJobs <= 0 && s.cfg.KeepBlobs <= 0 && !s.cfg.MinFree.set() {
+	if s.cfg.KeepWork <= 0 && s.cfg.KeepJobs <= 0 && s.cfg.KeepBlobs <= 0 && !s.cfg.MinFree.set() && s.cfg.MaxSharedCache <= 0 && s.cfg.MaxClientCache <= 0 {
 		return
 	}
 	s.gc.stop, s.gc.done = make(chan struct{}), make(chan struct{})
@@ -72,6 +73,9 @@ func (s *Server) startGC() {
 		defer t.Stop()
 		for {
 			s.sweep(time.Now())
+			if !s.diskLow() {
+				s.trimSharedCaches()
+			}
 			s.reclaimDisk()
 			select {
 			case <-s.gc.stop:
@@ -153,6 +157,7 @@ func (s *Server) sweepCAS(now time.Time) {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
+	s.sweepOwners("cas", s.casPath)
 }
 
 // sweepOrphans deletes job dirs that no loaded job owns (half-created, or unreadable job.json).
@@ -206,6 +211,7 @@ func (s *Server) sweepBlobs(now time.Time, inUse map[string]bool) {
 			log.Printf("tun: gc: deleting blob %s: %v", e.Name(), err)
 		}
 	}
+	s.sweepOwners("blobs", s.blobPath)
 }
 
 // useBlob reports whether blob sha exists and, if so, marks it used now. Callers use the
