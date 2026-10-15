@@ -136,3 +136,22 @@ func TestActionCancellationAndNoJobRecords(t *testing.T) {
 	s.finish(j, api.Canceled, nil, nil, "canceled")
 	s.mu.Unlock()
 }
+
+func TestLostActionRunnerUnavailable(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), HubOnly: true, Sandbox: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rn := &runnerState{name: "lost", instance: "i", jobs: map[string]*job{}}
+	j := &job{Action: []byte{1}, done: make(chan struct{}), Job: api.Job{ID: "lost-action", State: api.Running, Runner: "lost"}, rn: rn}
+	rn.jobs[j.ID] = j
+	s.mu.Lock()
+	s.jobs[j.ID] = j
+	s.runners[rn.name] = rn
+	s.dropRunner(rn, "runner lost")
+	s.mu.Unlock()
+	if j.ActionStatus != 14 {
+		t.Fatal(j.ActionStatus)
+	}
+}

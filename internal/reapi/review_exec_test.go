@@ -244,3 +244,31 @@ func TestExecutorCanonicalOutputs(t *testing.T) {
 		t.Fatalf("%x %v", result, err)
 	}
 }
+
+type slowInputStore struct {
+	BlobStore
+	directory []byte
+}
+
+func (s slowInputStore) read(kind string, d []byte) ([]byte, error) {
+	if string(d) == string(s.directory) {
+		time.Sleep(300 * time.Millisecond)
+	}
+	return s.BlobStore.read(kind, d)
+}
+func TestActionTimeoutStartsAfterInputs(t *testing.T) {
+	s, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := digest(nil)
+	if err = s.PutBlob(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	action := msg(bytesField(2, root), bytesField(6, intField(2, 200000000)))
+	command := bytesField(1, []byte("/bin/true"))
+	_, err = LocalExecutor(slowInputStore{s, root}, t.TempDir(), "none")(context.Background(), action, command)
+	if err != nil {
+		t.Fatalf("input fetching consumed execution timeout: %v", err)
+	}
+}

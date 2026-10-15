@@ -38,3 +38,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 - Keep it small and readable. Stdlib only. `gofmt` everything.
 - Tests are required for behavior you add. Prefer integration tests through the real HTTP server.
 - Commit with clear messages. Don't rewrite others' history.
+
+Runner authentication uses a separate credential: the hub creates `$DATA/runner-token`;
+copy it securely to runners and use `tun runner --token-file /path/to/runner-token`.
+Client tokens cannot call runner endpoints. `scripts/dev-tun.sh` exports both
+`TUN_TOKEN` (clients) and `TUN_RUNNER_TOKEN` (runners) for private tests.
