@@ -48,14 +48,26 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 			return nil, err
 		}
 		defer fs.Close()
-		if err = materializeContext(ctx, store, fs, ".", get(action, 2).b, 0, &inputBudget{}); err != nil {
-			return nil, err
-		}
-		fetched := time.Now()
 		cwd := string(get(command, 6).b)
 		if err = safeRelative(cwd); err != nil {
 			return nil, err
 		}
+		outputs := all(command, 7)
+		if len(outputs) == 0 {
+			outputs = append(all(command, 3), all(command, 4)...)
+		}
+		var plan *inputPlan
+		if mode == sandbox.Bwrap { // the tree cache needs read-only bind mounts
+			plan = &inputPlan{cache: treeCacheFor(dataDir), work: work, cwd: filepath.Clean(cwd)}
+			for _, out := range outputs {
+				plan.outputs = append(plan.outputs, filepath.Join(cwd, string(out)))
+			}
+			defer plan.done()
+		}
+		if err = materializeContext(ctx, store, fs, ".", get(action, 2).b, 0, &inputBudget{}, plan); err != nil {
+			return nil, err
+		}
+		fetched := time.Now()
 		cwdRoot, err := fs.OpenRoot(cwd)
 		if err != nil && cwd == "" {
 			cwdRoot, err = fs.OpenRoot(".")
@@ -78,10 +90,6 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 			}
 			env = append(env, k+"="+val)
 		}
-		outputs := all(command, 7)
-		if len(outputs) == 0 {
-			outputs = append(all(command, 3), all(command, 4)...)
-		}
 		for _, out := range outputs {
 			p := string(out)
 			if err = safeRelative(p); err != nil {
@@ -94,7 +102,11 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 		stdout, stderr := &limitedBuffer{overflow: cancel}, &limitedBuffer{overflow: cancel}
-		cmd, net, err := sandbox.Start(sandbox.Spec{Mode: mode, Argv: argv, Env: env, Dir: filepath.Join(work, cwd), Root: root, Tmp: tmp, DataDir: dataDir, NetworkOff: true}, stdout, stderr)
+		spec := sandbox.Spec{Mode: mode, Argv: argv, Env: env, Dir: filepath.Join(work, cwd), Root: root, Tmp: tmp, DataDir: dataDir, NetworkOff: true}
+		if plan != nil {
+			spec.Mounts = plan.mounts
+		}
+		cmd, net, err := sandbox.Start(spec, stdout, stderr)
 		if err != nil {
 			return nil, err
 		}
@@ -197,6 +209,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		return result, nil
 	}
 }
+
 // executionMetadata is an ExecutedActionMetadata: worker start, input fetch, execution and
 // output upload times (worker_start = input_fetch_start, execution_completed =
 // output_upload_start, output_upload_completed = worker_completed).
@@ -264,9 +277,12 @@ type inputBudget struct {
 }
 
 func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
-	return materializeContext(context.Background(), s, r, p, d, depth, &inputBudget{})
+	return materializeContext(context.Background(), s, r, p, d, depth, &inputBudget{}, nil)
 }
-func materializeContext(ctx context.Context, s BlobStore, r *os.Root, p string, d []byte, depth int, budget *inputBudget) error {
+
+// materializeContext copies directory d's contents to path p in r. With a plan, large shared
+// subdirectories come from its tree cache instead (bound read-only when the action starts).
+func materializeContext(ctx context.Context, s BlobStore, r *os.Root, p string, d []byte, depth int, budget *inputBudget, plan *inputPlan) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -343,10 +359,19 @@ func materializeContext(ctx context.Context, s BlobStore, r *os.Root, p string, 
 					return ce
 				}
 			case 2:
+				if plan != nil {
+					mounted, err := plan.mount(ctx, s, r, name, get(node, 2).b, budget)
+					if err != nil {
+						return err
+					}
+					if mounted {
+						continue
+					}
+				}
 				if err = r.Mkdir(name, 0755); err != nil {
 					return err
 				}
-				if err = materializeContext(ctx, s, r, name, get(node, 2).b, depth+1, budget); err != nil {
+				if err = materializeContext(ctx, s, r, name, get(node, 2).b, depth+1, budget, plan); err != nil {
 					return err
 				}
 			case 3:

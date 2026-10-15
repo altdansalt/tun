@@ -98,7 +98,7 @@ tree_rule = rule(implementation=_tree)
 `), 0600)
 	run := func(target string, wantSuccess bool) string {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second) // a cold --batch Bazel on a loaded host can take 90s
 		defer cancel()
 		args := []string{"--ignore_all_rc_files", "--output_user_root=" + t.TempDir(), "--host_jvm_args=-Xmx512m", "--batch", "build", target, "--jobs=2", "--remote_executor=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=15", "--noremote_upload_local_results", "--enable_bzlmod=false"}
 		cmd := exec.CommandContext(ctx, "bazel", args...)
@@ -317,5 +317,70 @@ func TestOutputDirectoryCanonical(t *testing.T) {
 	expected := msg(bytesField(1, msg(bytesField(1, []byte("z")), bytesField(2, empty))), bytesField(2, msg(bytesField(1, []byte("a")), bytesField(2, digest(child)))), bytesField(2, msg(bytesField(1, []byte("empty")), bytesField(2, empty))))
 	if !bytes.Equal(actual, expected) || len(children) != 2 || !bytes.Equal(children[0], child) || len(children[1]) != 0 {
 		t.Fatalf("noncanonical Directory\n got %x children %x\nwant %x child %x", actual, children, expected, child)
+	}
+}
+
+// A large input directory that actions share comes from the tree cache the second time: bound
+// read-only into the exec root instead of copied. Never one that holds an output.
+func TestExecutorTreeCache(t *testing.T) {
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap unavailable")
+	}
+	store, err := Open(t.TempDir(), 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(b []byte) []byte {
+		d := digest(b)
+		if err := store.put("cas-", d, b); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	var files []byte
+	for i := range treeMinFiles + 6 {
+		node := msg(bytesField(1, []byte(fmt.Sprintf("f%03d", i))), bytesField(2, put([]byte(fmt.Sprint(i)))))
+		files = append(files, bytesField(1, node)...)
+	}
+	tool := put(files)
+	root := put(bytesField(2, msg(bytesField(1, []byte("tool")), bytesField(2, tool))))
+	action := msg(bytesField(2, root), bytesField(6, intField(1, 30)))
+	data := t.TempDir()
+	execute := LocalExecutor(store, data, sandbox.Bwrap)
+	run := func(script string, outputs ...string) []byte {
+		t.Helper()
+		command := msg(bytesField(1, []byte("/bin/sh")), bytesField(1, []byte("-c")), bytesField(1, []byte(script)))
+		for _, o := range outputs {
+			command = append(command, bytesField(7, []byte(o))...)
+		}
+		result, err := execute(context.Background(), action, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	cached := func() int {
+		ents, _ := os.ReadDir(filepath.Join(data, treeCacheDir))
+		return len(ents)
+	}
+	stdout := func(result []byte) string {
+		b, _ := store.ReadBlob(get(result, 6).b)
+		return string(b)
+	}
+	// First use: copied (and remembered); writable like any copied input.
+	if r := run("cat tool/f007 > out; touch tool/new && echo writable", "out"); get(r, 4).v != 0 || stdout(r) != "writable\n" || cached() != 0 {
+		t.Fatalf("first: exit %d %q, %d cached", get(r, 4).v, stdout(r), cached())
+	}
+	// Second use: from the cache, read-only.
+	r := run("cat tool/f069 > out; grep -q '/work/tool [^ ]* ro,' /proc/self/mounts && echo mounted; touch tool/new || echo read-only", "out")
+	if get(r, 4).v != 0 || stdout(r) != "mounted\nread-only\n" || cached() != 1 {
+		t.Fatalf("second: exit %d %q, %d cached", get(r, 4).v, stdout(r), cached())
+	}
+	if b, _ := store.ReadBlob(get(get(r, 2).b, 2).b); string(b) != "69" {
+		t.Fatalf("output %q", b)
+	}
+	// An output inside the tree: copied, so the action can write it.
+	if r := run("cp tool/f001 tool/out && echo copied", "tool/out"); get(r, 4).v != 0 || stdout(r) != "copied\n" {
+		t.Fatalf("output inside: exit %d %q", get(r, 4).v, stdout(r))
 	}
 }

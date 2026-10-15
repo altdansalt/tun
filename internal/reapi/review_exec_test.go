@@ -107,14 +107,14 @@ func TestExecutorReviewLimits(t *testing.T) {
 	}
 	defer r.Close()
 	// Start near the limit to keep the regression fast.
-	err = materializeContext(context.Background(), s, r, ".", d, 0, &inputBudget{nodes: 99990})
+	err = materializeContext(context.Background(), s, r, ".", d, 0, &inputBudget{nodes: 99990}, nil)
 	var ex *ExecutionError
 	if !errors.As(err, &ex) || ex.Code != 8 {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err = materializeContext(ctx, s, r, ".", empty, 0, &inputBudget{}); !errors.Is(err, context.Canceled) {
+	if err = materializeContext(ctx, s, r, ".", empty, 0, &inputBudget{}, nil); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if timeout, err := actionTimeout(bytesField(6, nil)); err != nil || timeout != 30*time.Minute {

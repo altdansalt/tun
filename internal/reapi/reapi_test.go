@@ -274,7 +274,7 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 		t.Helper()
 		args := []string{"--ignore_all_rc_files", "--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
 		args = append(args, extra...)
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second) // a cold --batch Bazel on a loaded host can take 90s
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "bazel", args...)
 		cmd.WaitDelay = 3 * time.Second

@@ -85,7 +85,7 @@ genrule(name="b", srcs=[":a"], outs=["b.txt"], cmd="cat $(location :a) > $@")
 genrule(name="bad", outs=["bad.txt"], cmd="echo runner-action-failure >&2; exit 1")`), 0600)
 	run := func(target string, success bool) string {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second) // a cold --batch Bazel on a loaded host can take 90s
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "bazel", "--ignore_all_rc_files", "--output_user_root="+t.TempDir(), "--host_jvm_args=-Xmx512m", "--batch", "build", target, "--jobs=2", "--remote_executor=grpc://"+ln.Addr().String(), "--remote_header=x-tun-token="+s.Token(), "--remote_timeout=20", "--noremote_upload_local_results", "--enable_bzlmod=false")
 		cmd.Dir = work

@@ -16,7 +16,7 @@
 # during the step and the hub's executor counts. All output roots stay under TMPDIR.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-mode=${1:?usage: bench-rbe.sh genrules|tree [targets...]}
+mode=${1:?usage: bench-rbe.sh genrules|tree|build [targets...]}
 shift
 data=$(ls -d "${TMPDIR:-/tmp}"/tun-ephemeral-* 2>/dev/null | head -1)
 [ -n "$data" ] || { echo "bench-rbe.sh: run inside scripts/dev-tun.sh" >&2; exit 2; }
@@ -91,6 +91,14 @@ tree)
   echo "var benchOneLineLocal = 1" >>internal/server/server.go
   step g test --remote_executor= --jobs=auto "$@"
   step h --cold test --remote_executor= --jobs=auto "$@"
+  ;;
+build)
+  # A build of //cmd/tun (default) only: where remote actions spend their time (healthz
+  # execution sums), (a) new session; (b) --cold, every action again, remote; (c) the same, local.
+  [ $# -gt 0 ] || set -- //cmd/tun
+  step a build "$@"
+  step b --cold build --noremote_accept_cached "$@"
+  step c --cold build --noremote_accept_cached --remote_executor= --jobs=auto "$@"
   ;;
 *)
   echo "bench-rbe.sh: unknown mode $mode" >&2
