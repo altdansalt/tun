@@ -22,7 +22,9 @@ trap 'exit 143' TERM
 # A FIFO makes readiness explicit and EOF shuts the server down if this wrapper dies.
 mkfifo "$tmp/env" "$tmp/stdin"
 exec 3<>"$tmp/stdin"
-"$tmp/tun" serve --ephemeral --exit-on-eof <"$tmp/stdin" >"$tmp/env" 3>&- &
+# DEV_TUN_SERVE_ARGS: extra tun serve flags (word-split), e.g. '--local-slots 0'.
+# shellcheck disable=SC2086
+"$tmp/tun" serve --ephemeral --exit-on-eof ${DEV_TUN_SERVE_ARGS:-} <"$tmp/stdin" >"$tmp/env" 3>&- &
 pid=$!
 {
   IFS= read -r url

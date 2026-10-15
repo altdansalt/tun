@@ -44,6 +44,7 @@ if [ "$run" = 0 ] || [ "$check" = 0 ]; then
   # End-to-end smoke suite of the real binary (scripts/e2e.sh) on full runs; -e E2E=0 skips it.
   if [ "$run" = 0 ] && [ "${E2E:-1}" = 1 ]; then
     time scripts/dev-tun.sh ./scripts/e2e.sh
+    time DEV_TUN_SERVE_ARGS='--local-slots 0 --runner-timeout 3s' scripts/dev-tun.sh ./scripts/e2e-runners.sh
   fi
   exit 0
 fi

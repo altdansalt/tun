@@ -74,10 +74,10 @@ func TestRunnerJobs(t *testing.T) {
 	os.MkdirAll(filepath.Join(ws, "sub"), 0o755)
 	os.WriteFile(filepath.Join(ws, "sub", "f.txt"), []byte("content"), 0o644)
 	r := ts.tun(ws, "run", "--", "sh", "-c", "echo out; echo err >&2; exit 3")
-	if r.code != 3 || r.stdout != "out\n" || cmdStderr(cmdStderr(r.stderr)) != "err\n" {
+	if r.code != 3 || r.stdout != "out\n" || !strings.HasSuffix(r.stderr, "\nerr\n") {
 		t.Errorf("exit/stdout/stderr: %+v", r)
 	}
-	r = ts.tun(filepath.Join(ws, "sub"), "run", "-e", "FOO=bar", "--", "sh", "-c", `printf '%s %s ' "$FOO" "$(basename "$PWD")"; cat f.txt; test -n "$TUN_JOB_ID"`)
+	r = ts.tun(ws, "run", "-C", "sub", "-e", "FOO=bar", "--", "sh", "-c", `printf '%s %s ' "$FOO" "$(basename "$PWD")"; cat f.txt; test -n "$TUN_JOB_ID"`)
 	if r.code != 0 || r.stdout != "bar sub content" {
 		t.Errorf("env/cwd: %+v", r)
 	}

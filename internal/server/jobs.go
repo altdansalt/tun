@@ -272,9 +272,7 @@ func (s *Server) schedule() {
 			s.mu.Unlock()
 		}()
 	}
-	if len(s.queue) > 0 {
-		s.wakeRunners()
-	}
+	s.dispatch()
 }
 
 func (s *Server) env(j *job) []string {

@@ -45,6 +45,8 @@ type runnerState struct {
 	jobs                            map[string]*job // assigned to it and not ended
 	seq                             int             // polls received; only the latest may assign
 	waiting                         int             // poll handlers waiting for work
+	held                            map[string]bool // job ids the latest poll listed
+	pending                         []*job          // assigned while a poll waited; it sends them
 	wake                            chan struct{}   // buffered(1): wakes a waiting poll
 }
 
@@ -65,13 +67,36 @@ func isRunnerJob(j *job) bool { return j.Runner != "" && j.Runner != api.LocalRu
 
 const outputsFile = "outputs.tar"
 
-// wakeRunners wakes waiting polls of runners with free slots. Caller holds s.mu.
-func (s *Server) wakeRunners() {
+// dispatch hands queued jobs to runners whose poll is waiting, so a job given to an idle
+// runner leaves the queue at once. Caller holds s.mu.
+func (s *Server) dispatch() {
 	for _, rn := range s.runners {
-		if len(rn.jobs) < rn.slots {
-			rn.poke()
+		if len(s.queue) == 0 {
+			return
+		}
+		if rn.waiting > 0 {
+			if js := s.assign(rn, rn.held); len(js) > 0 {
+				rn.pending = append(rn.pending, js...)
+				rn.poke()
+			}
 		}
 	}
+}
+
+// takeJobs returns the assignments for rn's current poll: those made while it waited (still
+// valid) and new ones. Caller holds s.mu.
+func (s *Server) takeJobs(rn *runnerState, held map[string]bool) []api.RunnerJob {
+	out := []api.RunnerJob{}
+	for _, j := range rn.pending {
+		if rn.jobs[j.ID] == j && j.State == api.Queued {
+			out = append(out, s.assignment(j))
+		}
+	}
+	rn.pending = nil
+	for _, j := range s.assign(rn, held) {
+		out = append(out, s.assignment(j))
+	}
+	return out
 }
 
 // runnerJobEnded is called by finish (s.mu held): the runner's slot is free again.
@@ -125,8 +150,9 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	rn.seq++
 	seq := rn.seq
 	rn.poke() // an older poll of this runner (its client gave up on it) should end
-	resp := api.RunnerPollResponse{Jobs: []api.RunnerJob{}, Cancel: s.reconcile(rn, held, arrival)}
-	resp.Jobs = s.assign(rn, held)
+	rn.held = held
+	resp := api.RunnerPollResponse{Cancel: s.reconcile(rn, held, arrival)}
+	resp.Jobs = s.takeJobs(rn, held)
 	deadline := time.NewTimer(s.cfg.RunnerPollWait)
 	defer deadline.Stop()
 	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !s.closed && rn.seq == seq {
@@ -147,7 +173,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 			break // dropped or superseded meanwhile
 		}
 		resp.Cancel = s.reconcile(rn, held, arrival)
-		resp.Jobs = s.assign(rn, held)
+		resp.Jobs = s.takeJobs(rn, held)
 		if timedOut {
 			break
 		}
@@ -235,26 +261,31 @@ func (s *Server) requeue(j *job) {
 }
 
 // assign hands queued jobs to rn up to its free slots. Caller holds s.mu.
-func (s *Server) assign(rn *runnerState, held map[string]bool) []api.RunnerJob {
+func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 	busy := len(rn.jobs)
 	for id := range held {
 		if rn.jobs[id] == nil {
 			busy++ // still being killed
 		}
 	}
-	out := []api.RunnerJob{}
+	var out []*job
 	for free := rn.slots - busy; free > 0 && len(s.queue) > 0 && !s.closed; free-- {
 		j := s.queue[0]
 		s.queue = s.queue[1:]
 		j.Runner, j.assignedAt = rn.name, time.Now()
 		rn.jobs[j.ID] = j
-		out = append(out, api.RunnerJob{
-			ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
-			Workspace: j.Workspace, Outputs: j.Outputs,
-			MaxLog: s.cfg.MaxLog, MaxWorkspace: s.cfg.MaxWorkspace, MaxDownload: s.maxDownload(),
-		})
+		out = append(out, j)
 	}
 	return out
+}
+
+// assignment is what a runner gets to run j.
+func (s *Server) assignment(j *job) api.RunnerJob {
+	return api.RunnerJob{
+		ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
+		Workspace: j.Workspace, Outputs: j.Outputs,
+		MaxLog: s.cfg.MaxLog, MaxWorkspace: s.cfg.MaxWorkspace, MaxDownload: s.maxDownload(),
+	}
 }
 
 func (s *Server) maxDownload() int64 {
