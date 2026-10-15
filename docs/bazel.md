@@ -504,3 +504,17 @@ no cached Bazel binary and can't download one (Bad Gateway through the session's
 `latest` needs DNS for the version lookup). That is M0's tests' environment (they pass under
 `go test` in tun run), not the session cache; fix in M0 by passing a Bazel binary as test data
 or tagging them `manual`.
+
+## External customer exercise (2026-10-15)
+
+[External Bazel report](external-bazel.md) measures deployed shared tun against
+`bb remote` on public Gazelle (Go), GoogleTest (C++), and rules_python checkouts.
+Warm one-line test edits took 1.79/6.10/6.20s versus 10.87/13.17/14.58s on
+BuildBuddy. Session eviction also turned unchanged requests into 42–99s waits/builds;
+runner placement and retention are the first practical priority. The report includes
+job IDs, exact BEP summaries, sync bytes, cold costs and an artifact-fetch failure.
+
+Exercise deviations: bounded test targets instead of full suites on the shared
+2-CPU/4GB host, and GoogleTest uses host GCC 13.3 rather than a hermetic C++ toolchain
+(the explicit customer-exercise exception). No change to the agreed hermetic-toolchain
+product direction or milestone order. No local heavy Bazel baseline was run.
