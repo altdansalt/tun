@@ -172,6 +172,9 @@ func egress(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		up, err := EgressDial(r.Context(), r.Host)
 		if err != nil {
+			// A failed CONNECT ends the connection: clients read the error until EOF (Go
+			// before 1.26 would otherwise keep it open and leave them hanging).
+			w.Header().Set("Connection", "close")
 			http.Error(w, "tun egress proxy: "+err.Error(), http.StatusBadGateway)
 			return
 		}
