@@ -484,20 +484,42 @@ func (s *Server) ensureSandbox(sess *session, spec sandbox.Spec) (bool, error) {
 			root.Close()
 		}
 	}
-	// A new log per sandbox (O_TRUNC), so it can't grow over the life of the session.
+	// A new log per sandbox (O_TRUNC), written by the server through a pipe and capped: the
+	// sandbox must never get a descriptor of a server-owned file (it could reach it through
+	// /proc/<pid>/fd and write without limit).
 	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
-	sb, err := sandbox.StartSession(spec, f)
+	r, w, err := os.Pipe()
 	if err != nil {
+		f.Close()
+		return false, err
+	}
+	sb, err := sandbox.StartSession(spec, w)
+	w.Close()
+	if err != nil {
+		r.Close()
+		f.Close()
 		return false, fmt.Errorf("starting the session sandbox: %v", err)
 	}
+	go func() {
+		copyCapped(f, r, s.agentLogMax(), "agent.log")
+		r.Close()
+		f.Close()
+	}()
 	s.mu.Lock()
 	sess.sb = sb
 	s.mu.Unlock()
 	return true, nil
+}
+
+// agentLogMax caps a session sandbox's agent.log: --max-log, at most 8MB.
+func (s *Server) agentLogMax() int64 {
+	if s.cfg.MaxLog > 0 {
+		return min(s.cfg.MaxLog, 8<<20)
+	}
+	return 8 << 20
 }
 
 // shutdownSandbox asks the session's Bazel server to shut down and ends the sandbox.
@@ -509,10 +531,10 @@ func (s *Server) shutdownSandbox(sess *session) {
 	select {
 	case <-sb.Done():
 	default:
-		if f, err := os.OpenFile(filepath.Join(s.sessionDir(sess.ID), "agent.log"), os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0); err == nil {
+		if f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
 			in, _, spec := s.sessionLayout(sess)
 			argv := append(append([]string{s.cfg.BazelCommand}, s.startupOptions(in)...), "shutdown")
-			if res, err := sb.Run(argv, spec.Dir, f, f); err == nil {
+			if res, err := sb.Run(argv, spec.Dir, f, f, sandbox.RunOpts{}); err == nil {
 				select {
 				case <-res:
 				case <-time.After(time.Minute):
@@ -535,7 +557,7 @@ type bazelRun struct {
 	endState string // set by the first kill
 	sb       *sandbox.Session
 	killed   chan struct{}
-	done     chan struct{} // closed once the command has ended
+	ended    chan struct{} // closed as soon as the command has ended (before its logs drain)
 }
 
 // kill asks the bazel job to end in state ("" = server shutdown: crash). Bazel's client
@@ -569,7 +591,7 @@ func (br *bazelRun) escalate(crash bool, grace time.Duration) {
 	later := func(f func()) func() {
 		return func() {
 			select {
-			case <-br.done:
+			case <-br.ended:
 			default:
 				f()
 			}
@@ -584,7 +606,7 @@ func (br *bazelRun) escalate(crash bool, grace time.Duration) {
 func (s *Server) runBazel(j *job) {
 	s.mu.Lock()
 	sess := s.sessions[j.SessionID]
-	br := &bazelRun{killed: make(chan struct{}), done: make(chan struct{})}
+	br := &bazelRun{killed: make(chan struct{}), ended: make(chan struct{})}
 	logs, err := openLogs(s.jobDir(j.ID), s.cfg.MaxLog)
 	if err == nil && s.closed {
 		logs.close()
@@ -617,7 +639,6 @@ func (s *Server) runBazel(j *job) {
 		}
 	})
 	res := s.bazelCommand(j, sess, br, logs)
-	close(br.done)
 	timer.Stop()
 
 	s.mu.Lock()
@@ -704,6 +725,9 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		return f, err
 	})
 	sess.state = state
+	s.mu.Lock()
+	b.Manifest = nil // the session's state has what is needed from now on
+	s.mu.Unlock()
 	if sb, merr := json.Marshal(state); merr == nil {
 		if werr := writeOwn(filepath.Join(s.sessionDir(sess.ID), "sync.json"), sb); werr != nil && err == nil {
 			err = werr
@@ -734,7 +758,8 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		return procResult{State: api.Canceled}
 	}
 	// Not under br.mu: Run may wait for the agent, and kill is called with s.mu held.
-	resc, err := sess.sb.Run(argv, dir, logs.Stdout, logs.Stderr)
+	opts := sandbox.RunOpts{Sweep: s.cfg.Sandbox == sandbox.Bwrap, Keep: p.out + "/base/server/server.pid.txt"}
+	resc, err := sess.sb.Run(argv, dir, logs.Stdout, logs.Stderr, opts)
 	if err != nil {
 		return fail("session %s: %v", sess.Name, err)
 	}
@@ -746,6 +771,7 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	br.mu.Unlock()
 	logs.started()
 	r := <-resc
+	close(br.ended) // a process still holding the logs open must not make it look running
 	logs.wait()
 	if r.Err != nil {
 		tail := ""

@@ -568,6 +568,9 @@ func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
 	}
 	now := time.Now().UTC()
 	j.State, j.ExitCode, j.Signal, j.EndedAt, j.kill = state, code, sig, &now, nil
+	if j.bz != nil {
+		j.bz.Manifest = nil // possibly large, and only needed until the sync
+	}
 	if msg != "" {
 		j.Error = msg
 	}

@@ -334,7 +334,9 @@ command other than tun's flags (a Bazel startup option) is a usage error.
 - **Session** = (client, workspace root path on the client, name; default `default`), id =
   first 20 hex of sha256(client NUL root NUL name). It lives in `$DATA/sessions/<id>/`:
   `session.json`, `sync.json` (the last applied manifest plus the stat of each file tun
-  wrote), `tun.bazelrc`, `agent.log`, and `sandbox/{work,home,tmp,out}`.
+  wrote), `tun.bazelrc`, `agent.log` (the sandbox's own output: the server copies it from a
+  pipe, capped at `--max-log` and at most 8MB, so the sandbox never holds a descriptor of a
+  server-owned file), and `sandbox/{work,home,tmp,out}`.
 - **Fixed paths.** Under bwrap the session sandbox has an empty root with the host's
   top-level directories bound read-only (so new top-level paths can exist), and binds
   `work` at `/work`, `home` at `/tun/home` (HOME), `tmp` at `/tmp` (TMPDIR), `out` at
@@ -358,11 +360,18 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   behind exe.dev's proxy it can't be forged; otherwise it is self-reported.
 - **Long-lived sandbox.** The session sandbox's first process is an agent
   (`tun __tun-session-agent`, under the network helper when isolated) that runs one command
-  at a time on request over a socketpair (fd 7): the server sends argv, dir and the job's
-  stdout/stderr pipes (SCM_RIGHTS); the agent starts the command in its own process group,
-  reports `started` and later the exit code or signal, delivers `signal` requests to the
-  group, and kills stragglers in the group when the command ends. Bazel's server daemonizes
-  into its own session inside the sandbox (its pid and network namespace), so it survives
+  at a time on request over a socketpair (fd 7): the server sends a `run` message with the
+  job's stdout/stderr pipes and the read end of a pipe (SCM_RIGHTS) that then carries argv and
+  dir (so argv may be larger than a socket buffer; up to 16MB); the agent starts the command
+  in its own process group, reports `started` and later the exit code or signal, delivers
+  `signal` requests to the group, and kills stragglers in the group when the command ends.
+  Under bwrap it then also kills every other process left in the sandbox (setsid'd or
+  daemonized leftovers) except itself, its ancestors and the Bazel server (the pid in
+  `out/base/server/server.pid.txt`) with its descendants, so nothing a command started can
+  read or forge a later command's output or modify `/work` during a sync. (A command can
+  still protect a process by writing its pid there; without bwrap there is no sweep.) Bazel's
+  server daemonizes into its own session inside the sandbox (its pid and network namespace),
+  so it survives
   between commands. The sandbox is started by the first command of a session (output: "tun:
   session N: started a new session sandbox ...") and lives until the session is stopped or
   the server exits (`--die-with-parent`). Before starting a bwrap sandbox for an existing
@@ -402,7 +411,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   links relative and lexically inside; total file size under `--max-workspace`, else 413),
   and when the job starts applies it in place through an `os.Root`: paths of the previous
   manifest that are gone are deleted (directories only if empty); a file whose sha256, mode,
-  size, mtime and inode match what tun last wrote is left alone (its mtime stays, so Bazel's
+  size, mtime, ctime and inode match what tun last wrote is left alone (its mtime stays, so Bazel's
   and other stat-based caches stay valid); other files are written to a temp file and renamed
   over; paths tun never wrote (e.g. `bazel-*` links) are left alone unless the manifest needs
   them; links are checked against the final tree (chains that leave it are removed and fail

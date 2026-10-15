@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,16 +21,17 @@ import (
 // (a sleep in its own session, like Bazel's daemon) whose pid is in the output base's server
 // dir, and prints what it was asked to do.
 const fakeBazel = `#!/bin/bash
+export AGENT_PID=$PPID
 for a; do
   case $a in --output_base=*) ob=${a#--output_base=} ;; --*) ;; *) break ;; esac
   shift
 done
 cmd=$1; shift
 mkdir -p "$ob/server"
-pid=$(cat "$ob/server/pid" 2>/dev/null)
+pid=$(cat "$ob/server/server.pid.txt" 2>/dev/null)
 if [ "$cmd" = shutdown ]; then
   [ -n "$pid" ] && kill "$pid"
-  rm -f "$ob/server/pid"
+  rm -f "$ob/server/server.pid.txt"
   exit 0
 fi
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -40,7 +42,7 @@ else
   pid=$!
   # Like Bazel's client, return only once the daemon is detached (its own session).
   while [ "$(ps -o sid= -p $pid | tr -d ' ')" != "$pid" ]; do sleep 0.01; done
-  echo $pid > "$ob/server/pid"
+  echo $pid > "$ob/server/server.pid.txt"
 fi
 echo "cmd=$cmd args=$*"
 echo "pwd=$PWD home=$HOME tmp=$TMPDIR"
@@ -309,6 +311,91 @@ func TestBazelSessionMounts(t *testing.T) {
 	}
 }
 
+// TestBazelSessionSweep: processes a command leaves behind are killed when it ends (all but
+// the Bazel server), so they can't tamper with later commands.
+func TestBazelSessionSweep(t *testing.T) {
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap unusable")
+	}
+	ts := bazelServer(t, server.Config{Sandbox: sandbox.Bwrap, DataDir: t.TempDir()}, false)
+	ws := bazelWS(t, map[string]string{})
+	if r := ts.tun(ws, "bazel", "sh", "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! >/tmp/left"); r.code != 0 {
+		t.Fatalf("first: %+v", r)
+	}
+	r := ts.tun(ws, "bazel", "sh", "if kill -0 $(cat /tmp/left); then echo alive; else echo gone; fi")
+	if r.code != 0 || !strings.Contains(r.stdout, "gone") || !strings.Contains(r.stderr, "warm server") {
+		t.Fatalf("leftover survived the command, or the Bazel server didn't: %+v", r)
+	}
+}
+
+// TestBazelSessionAgentLog: the session sandbox writes its own output (agent.log) only
+// through a pipe the server caps, even via /proc/<agent>/fd/1.
+func TestBazelSessionAgentLog(t *testing.T) {
+	ts := bazelServer(t, server.Config{MaxLog: 64 << 10}, false)
+	ws := bazelWS(t, map[string]string{})
+	if r := ts.tun(ws, "bazel", "sh", "head -c 1000000 /dev/zero >/proc/$AGENT_PID/fd/1"); r.code != 0 {
+		t.Fatalf("%+v", r)
+	}
+	p := filepath.Join(ts.data, "sessions", ts.sessions()[0].ID, "agent.log")
+	eventually(t, "agent.log capped", func() bool {
+		b, _ := os.ReadFile(p)
+		return strings.Contains(string(b), "agent.log truncated")
+	})
+	if fi, _ := os.Stat(p); fi.Size() > 65<<10 {
+		t.Fatalf("agent.log has %d bytes", fi.Size())
+	}
+}
+
+// TestBazelSessionLongArgs: a command line larger than a socket buffer reaches Bazel.
+func TestBazelSessionLongArgs(t *testing.T) {
+	ts := bazelServer(t, server.Config{}, false)
+	ws := bazelWS(t, map[string]string{})
+	args := []string{"bazel", "build"}
+	for i := range 12000 {
+		args = append(args, fmt.Sprintf("//some/package/path:target_%d", i))
+	}
+	r := ts.tun(ws, args...)
+	if r.code != 0 || !strings.Contains(r.stdout, "target_11999") {
+		t.Fatalf("code %d, stderr %s", r.code, r.stderr)
+	}
+}
+
+// TestBazelSessionCancelLeftover: a cancel the command obeys leaves the session's sandbox
+// alone even if a process it started keeps the job's output open for longer than the kill
+// escalation.
+func TestBazelSessionCancelLeftover(t *testing.T) {
+	ts := bazelServer(t, server.Config{}, false)
+	ws := bazelWS(t, map[string]string{})
+	ts.tun(ws, "bazel", "build")
+	c := newClient(ts.env(ws, nil, nil, nil, nil))
+	_, _, m, err := bazelManifest(ts.env(ws, nil, nil, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := filepath.EvalSymlinks(ws)
+	j, _, err := c.createBazel(context.Background(), api.CreateJob{Bazel: &api.BazelJob{Root: root, Manifest: m,
+		Args: []string{"sh", "setsid sleep 30 & echo $! >left; sleep 30"}}}, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(ts.data, "sessions", ts.sessions()[0].ID, "sandbox", "work")
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(filepath.Join(workDir, "left")); err == nil {
+			exec.Command("kill", strings.TrimSpace(string(b))).Run()
+		}
+	})
+	ts.waitFor(j.ID, func(j api.Job) bool { return j.State == api.Running })
+	eventually(t, "leftover started", func() bool { _, err := os.Stat(filepath.Join(workDir, "left")); return err == nil })
+	ts.tun("", "cancel", j.ID)
+	if j := ts.waitDone(j.ID); j.State != api.Canceled {
+		t.Fatalf("%+v", j)
+	}
+	time.Sleep(200 * time.Millisecond) // past the escalation (KillGrace is 50ms here)
+	if ss := ts.sessions(); len(ss) != 1 || !ss[0].Server {
+		t.Fatalf("the session's sandbox was killed: %+v", ss)
+	}
+}
+
 func TestBazelSessionQueueAndCancel(t *testing.T) {
 	ts := bazelServer(t, server.Config{MaxJobs: 4}, false)
 	ws := bazelWS(t, map[string]string{})
@@ -369,7 +456,7 @@ func TestBazelSessionLimits(t *testing.T) {
 	ws := bazelWS(t, map[string]string{})
 	ts.tun(ws, "bazel", "build")
 	first := ts.sessions()[0]
-	pid, _ := os.ReadFile(filepath.Join(ts.data, "sessions", first.ID, "sandbox/out/base/server/pid"))
+	pid, _ := os.ReadFile(filepath.Join(ts.data, "sessions", first.ID, "sandbox/out/base/server/server.pid.txt"))
 	if r := ts.tun(ws, "bazel", "--session", "b", "build"); r.code != 0 {
 		t.Fatal(r)
 	}

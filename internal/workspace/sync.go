@@ -177,13 +177,15 @@ func pathLess(a, b string) bool {
 
 // SyncState is what the server knows about a synced tree: the last applied manifest plus,
 // for regular files, the stat they had right after being written. A file whose stat differs
-// (something in the sandbox modified it) is rewritten on the next sync.
+// (something in the sandbox modified it) is rewritten on the next sync. The ctime counts:
+// unlike the mtime, the sandbox can't set it back after modifying a file.
 type SyncState map[string]SyncRecord
 
 // SyncRecord is one path of a SyncState.
 type SyncRecord struct {
 	api.ManifestEntry
 	Mtime int64  `json:"mt,omitempty"`
+	Ctime int64  `json:"ct,omitempty"`
 	Ino   uint64 `json:"ino,omitempty"`
 }
 
@@ -299,7 +301,7 @@ func Apply(dir string, old SyncState, m []api.ManifestEntry, blob func(sha strin
 			if fi, err := root.Lstat(e.Path); err == nil {
 				r.Mtime = fi.ModTime().UnixNano()
 				if s, ok := fi.Sys().(*syscall.Stat_t); ok {
-					r.Ino = s.Ino
+					r.Ino, r.Ctime = s.Ino, s.Ctim.Nano()
 				}
 			}
 		}
@@ -372,7 +374,7 @@ func applyEntry(root *os.Root, e api.ManifestEntry, old SyncRecord, blob func(st
 	}
 	if exists && fi.Mode().IsRegular() && old.Type == api.EntryFile && old.Sha == e.Sha && fi.Size() == e.Size &&
 		fi.ModTime().UnixNano() == old.Mtime {
-		if s, ok := fi.Sys().(*syscall.Stat_t); ok && s.Ino == old.Ino {
+		if s, ok := fi.Sys().(*syscall.Stat_t); ok && s.Ino == old.Ino && s.Ctim.Nano() == old.Ctime {
 			if fi.Mode().Perm() != fs.FileMode(e.Mode) {
 				return true, 0, root.Chmod(e.Path, fs.FileMode(e.Mode))
 			}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,7 +99,9 @@ func TestSyncApply(t *testing.T) {
 	os.Symlink("/tun/out/bin", filepath.Join(s.dst, "bazel-bin"))
 	old := time.Now().Add(-time.Hour)
 	os.Chtimes(filepath.Join(s.dst, "a.txt"), old, old) // as if a build had run long ago
-	s.state["a.txt"] = SyncRecord{ManifestEntry: s.state["a.txt"].ManifestEntry, Mtime: old.UnixNano(), Ino: s.state["a.txt"].Ino}
+	fi, _ := os.Lstat(filepath.Join(s.dst, "a.txt"))
+	s.state["a.txt"] = SyncRecord{ManifestEntry: s.state["a.txt"].ManifestEntry, Mtime: old.UnixNano(), Ino: s.state["a.txt"].Ino,
+		Ctime: fi.Sys().(*syscall.Stat_t).Ctim.Nano()}
 
 	if st := s.mustSync(); st.Unchanged != 9 || st.Added+st.Updated+st.Deleted != 0 || st.BytesWritten != 0 {
 		t.Fatalf("no-op sync: %v", st)
@@ -267,5 +270,26 @@ func TestBlobsRoundTrip(t *testing.T) {
 	WriteBlobs(&bad, root, map[string]string{m[0].Sha: "b"})
 	if _, err := ReadBlobs(&bad, false, 1<<20, t.TempDir()); err == nil || !strings.Contains(err.Error(), "hashes to") {
 		t.Fatalf("bad hash: %v", err)
+	}
+}
+
+// Content changed in the sandbox with the same size and the old mtime restored is still
+// noticed (by its ctime) and rewritten.
+func TestSyncNoticesRestoredMtime(t *testing.T) {
+	s := newSyncer(t)
+	write(t, filepath.Join(s.src, "f"), "good", 0o644)
+	s.mustSync()
+	p := filepath.Join(s.dst, "f")
+	old := mtime(t, p)
+	time.Sleep(10 * time.Millisecond)
+	if err := os.WriteFile(p, []byte("evil"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(p, old, old)
+	if st := s.mustSync(); st.Updated != 1 {
+		t.Fatalf("tampered file not rewritten: %v", st)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "good" {
+		t.Fatalf("f = %q", b)
 	}
 }

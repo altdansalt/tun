@@ -333,19 +333,29 @@ func escapes(root *os.Root, rel string) (bool, error) {
 	return false, nil
 }
 
+var beforeChmod = func(string) {} // tests: race RemoveAll
+
 // RemoveAll removes dir like os.RemoveAll, first restoring owner rwx on directories inside
-// it (never following symlinks) so read-only directories from a workspace or a job don't
-// make it undeletable.
+// it so read-only directories from a workspace or a job don't make it undeletable. The
+// chmods go through an os.Root: a process still running in the tree that swaps a directory
+// for a symlink can't make them change anything outside it.
 func RemoveAll(dir string) error {
 	if err := os.RemoveAll(dir); err == nil {
 		return nil
 	}
-	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			os.Chmod(p, 0o700)
-		}
-		return nil
-	})
+	if fi, err := os.Lstat(dir); err == nil && fi.IsDir() {
+		os.Chmod(dir, 0o700)
+	}
+	if root, err := os.OpenRoot(dir); err == nil {
+		fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() && p != "." {
+				beforeChmod(filepath.Join(dir, p))
+				root.Chmod(p, 0o700)
+			}
+			return nil
+		})
+		root.Close()
+	}
 	return os.RemoveAll(dir)
 }
 

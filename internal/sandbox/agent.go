@@ -6,27 +6,39 @@ package sandbox
 // alive between commands for as long as the sandbox does. The server asks the agent to run
 // each command over a SOCK_SEQPACKET socketpair (Spec.Pass, fd PassFD in the agent):
 //
-//	server -> agent  {"op":"run","argv":[...],"dir":"/work"} + the command's stdout and
-//	                 stderr as SCM_RIGHTS
+//	server -> agent  {"op":"run"} + the command's stdout and stderr and the read end of a
+//	                 pipe as SCM_RIGHTS; the pipe then carries the request
+//	                 {"argv":[...],"dir":"/work","sweep":true,"keep":"/path/server.pid.txt"}
+//	                 (a pipe, not the message: argv can be larger than a socket buffer)
 //	agent -> server  {"op":"started","pid":N}, later {"op":"exited","code":C|"signal":S}
 //	                 (or {"op":"exited","error":...} if it could not start)
 //	server -> agent  {"op":"signal","sig":N}: to the running command's process group
 //
-// One command at a time. When the server closes its end, the agent kills the running
-// command and exits, which ends the sandbox (bwrap kills everything in its pid namespace).
+// One command at a time. When the command ends, the agent kills what is left in its process
+// group and, with sweep (only in a pid namespace of its own), every other process in the
+// sandbox except itself, its ancestors, and the process whose pid is in the file keep (the
+// Bazel server) with its descendants, so nothing a command started outlives it to tamper
+// with the next one. When the server closes its end, the agent kills the running command and
+// exits, which ends the sandbox (bwrap kills everything in its pid namespace).
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// maxRequest bounds a run request (argv) read from its pipe.
+const maxRequest = 16 << 20
 
 const agentArg = "__tun-session-agent"
 
@@ -54,6 +66,8 @@ type agentMsg struct {
 	Code  *int     `json:"code,omitempty"`
 	Sgnl  *int     `json:"signal,omitempty"`
 	Error string   `json:"error,omitempty"`
+	Sweep bool     `json:"sweep,omitempty"`
+	Keep  string   `json:"keep,omitempty"`
 }
 
 func agentMain() int {
@@ -73,7 +87,7 @@ func agentMain() int {
 	}
 	var mu sync.Mutex
 	var cur *exec.Cmd
-	buf, oob := make([]byte, 1<<20), make([]byte, syscall.CmsgSpace(2*4))
+	buf, oob := make([]byte, 64<<10), make([]byte, syscall.CmsgSpace(3*4))
 	for {
 		k, oobn, _, _, err := ctl.ReadMsgUnix(buf, oob)
 		if err != nil || k == 0 {
@@ -97,6 +111,14 @@ func agentMain() int {
 		var m agentMsg
 		if err := json.Unmarshal(buf[:k], &m); err != nil {
 			m.Op = "bad"
+		}
+		if m.Op == "run" && len(files) == 3 {
+			b, err := io.ReadAll(io.LimitReader(files[2], maxRequest+1))
+			if err != nil || len(b) > maxRequest || json.Unmarshal(b, &m) != nil {
+				m.Argv = nil
+			}
+			files[2].Close()
+			files = files[:2]
 		}
 		mu.Lock()
 		busy := cur != nil
@@ -125,6 +147,9 @@ func agentMain() int {
 			go func() {
 				cmd.Wait()
 				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // stragglers in its group
+				if m.Sweep {
+					sweep(m.Keep)
+				}
 				mu.Lock()
 				cur = nil
 				mu.Unlock()
@@ -142,6 +167,64 @@ func agentMain() int {
 		for _, f := range files {
 			f.Close()
 		}
+	}
+}
+
+// sweep kills every process in the sandbox's pid namespace except this agent, its ancestors
+// (bwrap's init, the network helper) and the process whose pid is in the file keep with its
+// descendants. It repeats until a scan finds nothing to kill (a process may fork meanwhile).
+func sweep(keep string) {
+	for round := 0; round < 50; round++ {
+		ppid := map[int]int{}
+		ents, _ := os.ReadDir("/proc")
+		for _, e := range ents {
+			pid, err := strconv.Atoi(e.Name())
+			if err != nil {
+				continue
+			}
+			b, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+			i := strings.LastIndexByte(string(b), ')')
+			if err != nil || i < 0 {
+				continue
+			}
+			f := strings.Fields(string(b[i+1:])) // state ppid ...
+			if len(f) < 2 || f[0] == "Z" {
+				continue // gone, or a zombie its parent reaps
+			}
+			ppid[pid], _ = strconv.Atoi(f[1])
+		}
+		spare := map[int]bool{}
+		for p := os.Getpid(); p > 0 && !spare[p]; p = ppid[p] {
+			spare[p] = true
+		}
+		if b, err := os.ReadFile(keep); err == nil {
+			if srv, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && srv > 1 && !spare[srv] {
+				if _, ok := ppid[srv]; ok {
+					todo := []int{srv}
+					for len(todo) > 0 {
+						p := todo[0]
+						todo = todo[1:]
+						spare[p] = true
+						for c, pp := range ppid {
+							if pp == p && !spare[c] {
+								todo = append(todo, c)
+							}
+						}
+					}
+				}
+			}
+		}
+		killed := 0
+		for pid := range ppid {
+			if !spare[pid] {
+				syscall.Kill(pid, syscall.SIGKILL)
+				killed++
+			}
+		}
+		if killed == 0 {
+			return
+		}
+		time.Sleep(time.Duration(round+1) * time.Millisecond)
 	}
 }
 
@@ -215,18 +298,43 @@ type Result struct {
 // ErrSessionGone means the session sandbox exited (or stopped answering) under a command.
 var ErrSessionGone = errors.New("session sandbox exited")
 
+// RunOpts are the optional parts of a command: with Sweep (only for a sandbox with its own
+// pid namespace) every process the command leaves behind is killed when it ends, except the
+// one whose pid is in the file Keep (a path inside the sandbox) and its descendants.
+type RunOpts struct {
+	Sweep bool
+	Keep  string
+}
+
 // Run starts argv in dir (a path inside the sandbox) with the given stdout/stderr and
 // returns a channel that delivers its result once. The caller may close its copies of the
 // files once Run returns. Only one command runs at a time; Run fails if one is running.
-func (ss *Session) Run(argv []string, dir string, stdout, stderr *os.File) (<-chan Result, error) {
+func (ss *Session) Run(argv []string, dir string, stdout, stderr *os.File, o RunOpts) (<-chan Result, error) {
 	if !ss.mu.TryLock() {
 		return nil, errors.New("session is running another command")
 	}
-	b, _ := json.Marshal(agentMsg{Op: "run", Argv: argv, Dir: dir})
-	if _, _, err := ss.ctl.WriteMsgUnix(b, syscall.UnixRights(int(stdout.Fd()), int(stderr.Fd())), nil); err != nil {
+	req, _ := json.Marshal(agentMsg{Op: "run", Argv: argv, Dir: dir, Sweep: o.Sweep, Keep: o.Keep})
+	if len(req) > maxRequest {
+		ss.mu.Unlock()
+		return nil, fmt.Errorf("the command line is %d bytes, over the limit of %d", len(req), maxRequest)
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		ss.mu.Unlock()
+		return nil, err
+	}
+	b, _ := json.Marshal(agentMsg{Op: "run"})
+	_, _, err = ss.ctl.WriteMsgUnix(b, syscall.UnixRights(int(stdout.Fd()), int(stderr.Fd()), int(pr.Fd())), nil)
+	pr.Close()
+	if err != nil {
+		pw.Close()
 		ss.mu.Unlock()
 		return nil, fmt.Errorf("%w: %v", ErrSessionGone, err)
 	}
+	go func() { // the agent reads it all before it answers; EPIPE if it is gone
+		pw.Write(req)
+		pw.Close()
+	}()
 	next := func(timeout <-chan time.Time) (agentMsg, error) {
 		select {
 		case m, ok := <-ss.msgs:
