@@ -135,3 +135,27 @@ func TestTrimExtractedModule(t *testing.T) {
 		t.Fatal("module not evicted as a whole", err)
 	}
 }
+
+func TestPeriodicSharedCacheTrim(t *testing.T) {
+	data := t.TempDir()
+	p := filepath.Join(data, "cache/go-build/old")
+	os.MkdirAll(filepath.Dir(p), 0700)
+	os.WriteFile(p, make([]byte, 200), 0600)
+	tm := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(p, tm, tm)
+	s, err := New(Config{DataDir: data, Sandbox: sandbox.None, MaxJobs: 1, MaxSharedCache: 100, GCInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("periodic trim did not run without retention or min-free")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

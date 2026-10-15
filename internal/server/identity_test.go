@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,4 +178,32 @@ func TestClientTokenActionCache(t *testing.T) {
 		t.Fatalf("bob overwrote alice's action result: %x", got)
 	}
 	call("wrong", "GetActionResult", req, false, "16")
+}
+
+func TestTokenCommand(t *testing.T) {
+	data := t.TempDir()
+	var out, diagnostics bytes.Buffer
+	if code := TokenMain([]string{"--data", data, "new", "agent-vm"}, &out, &diagnostics); code != 0 {
+		t.Fatalf("token: %d %s", code, &diagnostics)
+	}
+	token := strings.TrimSpace(out.String())
+	raw, err := hex.DecodeString(token)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("token must have 256 bits: %v", err)
+	}
+	sum := sha256.Sum256([]byte(token))
+	path := filepath.Join(data, "clients", hex.EncodeToString(sum[:]))
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != "agent-vm" {
+		t.Fatalf("stored identity: %q %v", b, err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0600 {
+		t.Fatalf("credential file mode: %v %v", fi, err)
+	}
+	for _, name := range []string{"", "has space", strings.Repeat("a", 129)} {
+		if code := TokenMain([]string{"--data", data, "new", name}, io.Discard, io.Discard); code != 125 {
+			t.Fatalf("accepted invalid name %q", name)
+		}
+	}
 }
