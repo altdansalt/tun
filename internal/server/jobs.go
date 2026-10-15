@@ -198,7 +198,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		j.Session, j.SessionID = b.Session, sessionID(j.Client, b.Root, b.Session)
 	}
 	if j.Service {
-		j.Runner = api.LocalRunner // services always run on the hub
+		if !s.cfg.HubOnly {
+			j.Runner = api.LocalRunner
+		}
+		// Runner services use the same global admission bound.
 		// Cheap early check so a full server doesn't unpack a workspace it will reject.
 		s.mu.Lock()
 		err := s.serviceSlotFree()
@@ -208,7 +211,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if j.Workspace != "" && !(s.cfg.HubOnly && !j.Service) {
+	if j.Workspace != "" && !s.cfg.HubOnly {
 		s.reclaimDisk() // before unpacking
 	}
 	if code, err := s.prepare(j); err != nil {
@@ -240,7 +243,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.jobs[j.ID] = j
-	if j.Service {
+	if j.Service && !s.cfg.HubOnly {
 		s.startService(j)
 	} else {
 		s.queue = append(s.queue, j)
@@ -278,7 +281,7 @@ func (s *Server) prepare(j *job) (int, error) {
 	if j.Workspace == "" {
 		return 0, nil
 	}
-	if s.cfg.HubOnly && !j.Service {
+	if s.cfg.HubOnly {
 		if !s.useBlob(j.Workspace) {
 			return 400, fmt.Errorf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", j.Workspace, j.Workspace)
 		}
@@ -321,7 +324,7 @@ func openOwn(name string, flag int, perm os.FileMode) (*os.File, error) {
 func (s *Server) schedule() {
 	for i := 0; !s.closed && s.running < s.cfg.MaxJobs && i < len(s.queue); {
 		j := s.queue[i]
-		if j.bz != nil && !s.claimSession(j) {
+		if j.bz != nil && (s.sessionHost(j) != api.LocalRunner || !s.claimSession(j)) {
 			i++ // its session is busy (or full): later jobs may go first
 			continue
 		}

@@ -23,7 +23,12 @@ each job's workspace (cached by sha), runs it in a fresh per-job dir and sandbox
 tun serve would, streams stdout/stderr to the hub, and when the job ends uploads the paths the
 client declared with tun run --out, then reports the exit status. Clients see no difference
 except the job's "runner" field (and that only declared --out paths can be fetched with
-tun get). tun runners (or the hub's /v1/healthz) lists live runners.
+tun get). Bazel commands reuse the same session engine as the hub, retaining a warm
+sandbox and per-client caches on this runner. The hub controls per-host session capacity
+and affinity. Session outputs and test logs are retained on the hub for tun get ID
+//pkg:target (or //pkg:test.log). Cache requests forward through a per-session socket
+without exposing credentials to the sandbox. With a zero-slot hub, services also run on
+runners, holding slots until stopped; their authenticated port proxy uses reverse tunnels. tun runners (or the hub's /v1/healthz) lists live runners.
 
 If the hub hears nothing from a runner for its --runner-timeout (default 30s), the runner's
 running jobs fail and unstarted ones are requeued. On SIGINT/SIGTERM the runner stops taking
@@ -33,7 +38,7 @@ Names: the newest runner with a given --name wins. When another runner process s
 the same name, the hub stops giving this one work; it finishes the jobs it has and exits
 with status 1. A runner holds a lock on its --data dir, so two can't share one.
 
-The token is the hub's client token (for now; a separate runner credential is future work):
+The token must be the hub admin token (client tokens cannot authenticate runners):
 --token-file, else $TUN_TOKEN, else ~/.config/tun/token. With --sandbox none a job can read
 it, like on the hub. With --net private (auto picks it when it works) each job has its own
 network namespace and reaches out only over HTTP(S), through a proxy run by this runner (the
@@ -111,7 +116,8 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	data := fs.String("data", DefaultRunnerDataDir(), "data dir (blob cache, job dirs, build caches); not a tun serve data dir")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none, as for tun serve")
 	netMode := fs.String("net", "auto", "auto|private|host, as for tun serve: private gives each job its own network namespace, with outbound HTTP(S) through a proxy this runner serves")
-	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, cached workspaces are deleted, least recently used first")
+	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, cached workspace blobs and session file contents are deleted, least recently used first")
+	clientCache := fs.String("max-client-cache", "1GB", "each client's Bazel repository cache budget; idle entries trimmed whole (0: unlimited)")
 	fs.Usage = func() { fmt.Fprint(stderr, runnerUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -160,7 +166,20 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	if err != nil {
 		return fail("--min-free: %v", err)
 	}
-	r, err := NewRunner(RunnerConfig{Hub: *hub, Token: token, Name: *name, Slots: *slots, DataDir: *data, Sandbox: sb, PrivateNet: private, MinFree: mf, Logf: logf})
+	clientLimit, err := parseSize(*clientCache)
+	if *clientCache == "0" {
+		clientLimit, err = 0, nil
+	}
+	if err != nil {
+		return fail("--max-client-cache: %v", err)
+	}
+	seed := ""
+	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
+		if _, err := os.Stat(filepath.Join(x, "bazelisk", "downloads")); err == nil {
+			seed = filepath.Join(x, "bazelisk")
+		}
+	}
+	r, err := NewRunner(RunnerConfig{MaxClientCache: clientLimit, BazeliskSeed: seed, Hub: *hub, Token: token, Name: *name, Slots: *slots, DataDir: *data, Sandbox: sb, PrivateNet: private, MinFree: mf, Logf: logf})
 	if err != nil {
 		return fail("runner: %v", err)
 	}

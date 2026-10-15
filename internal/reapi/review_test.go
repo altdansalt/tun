@@ -82,21 +82,21 @@ func TestEvictionFailureContinues(t *testing.T) {
 func TestStreamDeadlinesAndBearer(t *testing.T) {
 	for _, tc := range []struct {
 		name, timeout, token string
-		pause, idle          time.Duration
+		pause                time.Duration
 		chunks               int
 		want                 string
 	}{
-		{"bearer", "", "secret", 0, 100 * time.Millisecond, 1, "0"},
-		{"wrong bearer", "", "wrong", 0, 100 * time.Millisecond, 1, "16"},
-		{"client expires", "20m", "secret", 60 * time.Millisecond, 100 * time.Millisecond, 2, "4"},
-		{"idle expires", "", "secret", 180 * time.Millisecond, 100 * time.Millisecond, 2, "4"},
-		// Pauses well under the idle limit (a loaded 2-CPU host stretched 30ms of a 100ms limit
-		// past it), total time well over it.
-		{"active beyond idle", "10S", "secret", 100 * time.Millisecond, 600 * time.Millisecond, 10, "0"},
+		{"bearer", "", "secret", 0, 1, "0"},
+		{"wrong bearer", "", "wrong", 0, 1, "16"},
+		{"client expires", "200m", "secret", 600 * time.Millisecond, 2, "4"},
+		{"idle expires", "", "secret", 1800 * time.Millisecond, 2, "4"},
+		{"active beyond idle", "10S", "secret", 300 * time.Millisecond, 8, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, addr, _ := testServer(t)
-			h.idleTimeout = tc.idle
+			// Keep the same expiration/refresh relationships with enough margin for
+			// race-enabled builds on a loaded shared host.
+			h.idleTimeout = time.Second
 			data := bytes.Repeat([]byte("x"), tc.chunks)
 			d := digest(data)
 			name := "uploads/deadline/blobs/" + string(get(d, 1).b) + fmt.Sprintf("/%d", len(data))
@@ -203,5 +203,20 @@ func TestUploadKeepsIncrementalHash(t *testing.T) {
 	}
 	if !s.has(d) {
 		t.Fatal("finished upload missing")
+	}
+}
+
+// An expired HTTP/2 read timer can expose a plain error rather than net.Error.
+// Its gRPC status must remain DEADLINE_EXCEEDED after a later timer refresh.
+func TestOpaqueHTTP2Timeout(t *testing.T) {
+	for _, err := range []error{os.ErrDeadlineExceeded, fmt.Errorf("i/o timeout"), fmt.Errorf("wrapped: %w", os.ErrDeadlineExceeded)} {
+		if !grpcTimeout(err) {
+			t.Errorf("deadline not recognized: %v", err)
+		}
+	}
+	for _, err := range []error{nil, fmt.Errorf("malformed frame")} {
+		if grpcTimeout(err) {
+			t.Errorf("non-timeout recognized as deadline: %v", err)
+		}
 	}
 }

@@ -14,8 +14,10 @@ import (
 
 // serviceUsage is appended to tun run -h.
 const serviceUsage = `
-services (--service): the job runs until canceled (no --timeout unless given), outside the
---max-jobs queue (the server's --max-services bounds them; creating one more fails). Each
+services (--service): the job runs until canceled (no --timeout unless given). With local
+hub slots, services run outside the --max-jobs queue. With --local-slots 0 they queue on
+service-capable runners and hold runner slots until stopped (raise --ready-timeout if
+builds fill those slots). --max-services bounds all admitted services; one more fails. Each
 --port N gets a free port number, passed to the job as $TUN_PORT_N (and $PORT if only one);
 the service must listen there on 127.0.0.1. tun run waits until every port accepts
 connections, prints to stdout the job id, then one line "N URL" per port, and exits 0. URL

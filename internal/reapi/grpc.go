@@ -79,6 +79,13 @@ func frameWrite(w http.ResponseWriter, b []byte) error {
 	}
 	return e
 }
+
+// HTTP/2 request bodies can return an opaque "i/o timeout" after their
+// read timer fires, even when it was refreshed before the read observed it.
+func grpcTimeout(err error) bool {
+	return os.IsTimeout(err) || errors.Is(err, os.ErrDeadlineExceeded) || (err != nil && err.Error() == "i/o timeout")
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/grpc")
 	w.Header().Set("Trailer", "grpc-status, grpc-message")
@@ -91,7 +98,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	fail := func(c int, e error) {
 		code = c
-		if os.IsTimeout(e) {
+		if grpcTimeout(e) {
 			code = 4
 		}
 		message = e.Error()

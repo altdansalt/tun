@@ -180,6 +180,7 @@ type StoppedSessions struct {
 
 // Session is a warm Bazel session (GET /v1/sessions, tun sessions).
 type Session struct {
+	Host      string    `json:"host"` // local (hub), or runner name
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Client    string    `json:"client"`

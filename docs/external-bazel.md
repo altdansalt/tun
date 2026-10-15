@@ -265,3 +265,14 @@ BuildBuddy edits reported 6 linux-sandbox actions (Go), 3 (C++), and 3
 (Python, including Pyrefly and two shards). Unchanged repeats reported 19 / 31 / 3
 remote cache hits respectively. The inner logs showed new Bazel servers on those
 repeats; edit invocations reused analysis (0 packages loaded).
+
+## Follow-up: runner placement
+
+`feat/session-placement` addresses the first-ranked global two-session bottleneck:
+sessions now use runners with host affinity, per-host capacity and a scoped proxy to the
+hub cache. A private dev-server exercise retained **three** sessions across two runner
+processes and returned to the first in **2.320s**; killing its host recreated it elsewhere
+with **200 remote cache hits** (42.777s under observed shared-host load). Outer job:
+`20261015T113853982116-eb0454df`. See [placement measurements](bazel.md#placement-measurements-2026-10-15)
+for every private job ID, limitations and expected effects. These are a synthetic 200-action
+exercise, not a rerun of the external repositories or a shared-deployment measurement.

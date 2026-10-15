@@ -50,10 +50,12 @@ timeouts still fail unfinished local jobs; this design protects orderly deploys.
 Long-lived services can hold the drain open until its timeout; cancel or migrate
 them explicitly before deploying if that is undesirable.
 
-An active Bazel command finishes before shutdown. Session metadata, workspace and
-on-disk output base survive, but the sandbox and JVM stop; the next command
-recreates them (a cold JVM with retained disk state). Live session re-adoption is
-not implemented. No change to the Bazel-native execution direction is required.
+An active Bazel command finishes before shutdown. For hub-local sessions, metadata,
+workspace and output base survive, but the sandbox and JVM stop; the next command
+recreates them (a cold JVM with retained disk state). Runner leases belong to process
+instances: replacing a runner or restarting the hub creates fresh leases/output bases,
+reusing per-client repository downloads and the hub remote cache. Command archives on
+the hub survive independently. Live session re-adoption is not implemented. No change to the Bazel-native execution direction is required.
 
 The real-process regression in scripts/e2e-drain.py (part of scripts/e2e.sh)
 signals a hub mid-job, checks queued work and a new submission during draining,
@@ -132,3 +134,39 @@ That is ~23-25GB before workspaces, blobs and retained jobs with two Bazel clien
 the backstop: under pressure tool caches are trimmed first (with shorter graces), then
 finished workspaces, then idle sessions. Budgets are soft (recently used entries, running
 jobs' and live sessions' caches are protected); inspect `tun: trimmed ...` logs.
+
+## Coordination-only hub
+
+Deploy this branch to the hub and all runners before setting zero local slots: old runners
+do not advertise session/service support. Keep the hub REAPI cache enabled. Expected flags
+for the 2-CPU/25GB hub and six 2-CPU/4GB runners:
+
+```sh
+# Hub: append the existing --addr and --data paths from its service unit.
+tun serve --local-slots 0 --max-services 4 --max-sessions 1 \
+  --cache-dir reapi --cache-max-size 6GB --max-shared-cache 1GB \
+  --max-client-cache 1GB --keep-work 15m --keep-blobs 1h \
+  --min-free 15% --runner-timeout 30s --drain-timeout 15m
+# Each runner: preserve its unique name and persistent data dir.
+tun runner --hub https://HUB --name RUNNER --data RUNNER_DATA \
+  --token-file ADMIN_TOKEN_FILE --slots 1 --sandbox bwrap --net private \
+  --max-client-cache 1GB --min-free 15% --drain-timeout 15m
+```
+
+`--max-sessions` is per host; one JVM per 4GB runner leaves room for its build. A service
+holds a runner slot until canceled; reserve enough runner capacity for builds and hub
+draining. Services still share the hub's global `--max-services` admission limit. With
+zero local slots the hub never unpacks workspaces or starts session JVMs/services. It
+retains uploaded inputs, logs, BEP and snapshotted outputs; those still require disk
+space. Shorter work/blob retention bounds that cost, while REAPI has its own 6GB LRU.
+Existing shared caches and old session/work directories are not immediately reclaimed
+just by changing flags: normal retention/pressure GC must run.
+
+Deploy runners one at a time, leaving capacity available, then drain/restart the hub.
+Keep the KillMode/TimeoutStopSec overrides above. Orderly restarts finish admitted
+commands; runner restarts recreate their session leases/JVMs on the next command.
+Retained command artifacts and logs remain downloadable from the hub after either
+process restarts. Cancel/migrate long-lived services before draining for a bounded
+restart: a runner's drain timeout kills its remaining services. A hub timeout can leave
+remote jobs/services running; the restarted hub re-adopts them, including their proxy
+and service admission count. Cancellation remains available while draining.

@@ -21,8 +21,11 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     `tun bazel --session race test --config=race //...` (its own session, so the default one
     keeps its analysis cache) or the fallback `tun run -- ./scripts/ci.sh` (always `-race`).
   - The first command of a session (or `tun bazel --cold ...`) starts a Bazel server and
-    re-analyzes: ~1-4 min; later commands reuse it. Sessions expire after 30 min idle and the
-    server holds only a few (`tun sessions`); an evicted one just starts cold again.
+    re-analyzes: ~1-4 min; later commands reuse it. Sessions run on the hub or a runner (host
+    affinity: later commands go to the same host), expire after 30 min idle, and each host
+    holds only a few (`--max-sessions` is per host; `tun sessions` shows them and their host);
+    an evicted one just starts cold again, and the summary line says why (`; cold start: ...`).
+    Free yours when done: `tun sessions stop [NAME]`.
   - After adding/removing Go files or imports: update the BUILD files with gazelle and commit
     them (`tun run --out internal --out cmd -c 'bazel --output_user_root=$TMPDIR/b run //:gazelle'`).
     A Go file missing from BUILD.bazel is silently not built/tested; `tun run -- ./scripts/bazel-ci.sh`
@@ -64,7 +67,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
   object with `--json`. Bazel caches are per client on the server; sessions use the server's
   REAPI remote cache automatically (`tun serve --cache-dir`, on by default) through a
   per-session socket; action results are per client.
-- The hosts have 2 CPUs; the hub runs 2 jobs (and sessions) at once; others queue. That's expected.
+- Hosts have 2 CPUs; the shared hub has six runners (currently one slot each). Jobs may
+  queue; use the reported runner and job ID when comparing timings.
 - Fallback if tun is down or you suspect tun itself: `scripts/bb-ci.sh` (same CI on a BuildBuddy runner).
 - If tun gets in your way (missing feature, confusing error, slow), note it in your final report under
   "tun friction" — that's the most valuable feedback for what to build next.

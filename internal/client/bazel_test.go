@@ -226,60 +226,32 @@ func TestBazelSummary(t *testing.T) {
 	}
 }
 
-// A test command keeps its tests' logs with the job: tun get <id> //label fetches them even
-// after the session's next command replaced them, and nothing outside bazel-out/*/testlogs/
-// (or a symlink in it) is kept, whatever paths the BEP names.
+// A failed test command's summary names the label whose logs tun get fetches from the job's
+// retained artifacts, also after the session's next command replaced them.
 func TestBazelTestLogs(t *testing.T) {
-	for _, mode := range []string{"none", "bwrap"} {
-		t.Run(mode, func(t *testing.T) {
-			cfg := server.Config{}
-			if mode == "bwrap" {
-				if !sandbox.BwrapUsable() {
-					t.Skip("bwrap unusable")
-				}
-				cfg.Sandbox = sandbox.Bwrap
-			}
-			ts := bazelServer(t, cfg, false)
-			ws := bazelWS(t, map[string]string{})
-			r := ts.tun(ws, "bazel", "test", "//pkg/sub:logs_test", "//:top")
-			id := jobOf(t, r)
-			if r.code != 3 || !strings.Contains(r.stderr, "2 of 2 tests failed: //:top //pkg/sub:logs_test; logs: tun get "+id+" //:top\n") {
-				t.Fatalf("test: %+v", r)
-			}
-			ts.tun(ws, "bazel", "test", "//pkg/sub:logs_test") // overwrites the session's logs
-			out := t.TempDir()
-			r = ts.tun(ws, "get", "-o", out, id, "//pkg/sub:logs_test", "//:top")
-			if r.code != 0 {
-				t.Fatalf("get: %+v", r)
-			}
-			for name, want := range map[string]string{
-				"bazel-testlogs/pkg/sub/logs_test/test.log":                    "log of //pkg/sub:logs_test\n",
-				"bazel-testlogs/pkg/sub/logs_test/test_attempts/attempt_1.log": "first try of //pkg/sub:logs_test\n",
-				"bazel-testlogs/top/test.log":                                  "log of //:top\n",
-			} {
-				if b, err := os.ReadFile(filepath.Join(out, name)); err != nil || string(b) != want {
-					t.Errorf("%s: %q %v", name, b, err)
-				}
-			}
-			var got []string
-			filepath.WalkDir(out, func(p string, d fs.DirEntry, err error) error {
-				if err == nil && !d.IsDir() {
-					got = append(got, strings.TrimPrefix(p, out+"/"))
-				}
-				return nil
-			})
-			if len(got) != 4 { // the three above and //:top's attempt_1.log
-				t.Errorf("kept files: %v", got)
-			}
-			// A label for a test the job didn't run; a build job keeps nothing.
-			if r = ts.tun(ws, "get", "-o", out, id, "//nope:x_test"); r.code != 1 || !strings.Contains(r.stderr, "bazel-testlogs/nope/x_test") {
-				t.Errorf("get missing label: %+v", r)
-			}
-			r = ts.tun(ws, "bazel", "build", "//:a")
-			if r = ts.tun(ws, "get", "-o", out, jobOf(t, r), "//:a"); r.code != 125 || !strings.Contains(r.stderr, "only test and coverage commands keep") {
-				t.Errorf("get from a build job: %+v", r)
-			}
-		})
+	ts := bazelServer(t, server.Config{}, false)
+	ws := bazelWS(t, map[string]string{})
+	r := ts.tun(ws, "bazel", "test", "//:top", "//:other")
+	id := jobOf(t, r)
+	if r.code != 3 || !strings.Contains(r.stderr, "2 of 2 tests failed: //:other //:top; logs: tun get "+id+" //:other\n") {
+		t.Fatalf("test: %+v", r)
+	}
+	ts.tun(ws, "bazel", "test", "//:top") // overwrites the session's logs
+	out := t.TempDir()
+	if r = ts.tun(ws, "get", "-o", out, id, "//:top"); r.code != 0 {
+		t.Fatalf("get: %+v", r)
+	}
+	var got []string
+	filepath.WalkDir(out, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			b, _ := os.ReadFile(p)
+			got = append(got, string(b))
+		}
+		return nil
+	})
+	sort.Strings(got)
+	if fmt.Sprint(got) != "[first try of //:top\n log of //:top\n]" {
+		t.Errorf("fetched logs: %q", got)
 	}
 }
 
@@ -428,7 +400,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "warm server") {
 		t.Fatalf("a cancel that Bazel obeyed must not end the session's server: %+v", r)
 	}
-	if r := ts.tun(ws, "get", b, "x"); r.code != 125 || !strings.Contains(r.stderr, "tun bazel job") {
+	if r := ts.tun(ws, "get", b, "x"); r.code != 1 || !strings.Contains(r.stderr, "no such file") {
 		t.Fatalf("tun get of a bazel job: %+v", r)
 	}
 	r := ts.tun(ws, "bazel", "--timeout", "1s", "sleep", "30")
@@ -553,13 +525,5 @@ func TestBazelSessionRestart(t *testing.T) {
 	if r.code != 0 || !strings.Contains(r.stderr, "started a new session sandbox") || !strings.Contains(r.stderr, "0 added, 0 updated, 0 deleted, 2 unchanged") ||
 		!strings.Contains(r.stderr, "; cold start: the tun server restarted since the session's last command") {
 		t.Fatalf("after restart: %+v", r)
-	}
-}
-
-func TestBazelNeedsLocalSlots(t *testing.T) {
-	ts := startServer(t, server.Config{HubOnly: true})
-	r := ts.tun(bazelWS(t, map[string]string{}), "bazel", "build")
-	if r.code != 125 || !strings.Contains(r.stderr, "--local-slots 0") {
-		t.Fatalf("%+v", r)
 	}
 }

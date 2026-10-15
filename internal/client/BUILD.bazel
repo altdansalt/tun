@@ -114,6 +114,7 @@ go_library(
         "runner_test",
         [
             "review_runner_test.go",
+            "runner_session_test.go",
             "runner_test.go",
         ],
         "medium",
