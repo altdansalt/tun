@@ -1,0 +1,134 @@
+tun: job 20261015T143927562900-c38d30da (session ab-066e3a2a1cdd-1-0)
+tun: sync: 156 manifest entries (13868B sent), uploaded 1 of 139 files (3031B sent) in 0.314s
+tun: queued (3 ahead, 6 running)
+tun: started after 161.8s in queue
+tun: running on runner tun-r5
+tun: session ab-066e3a2a1cdd-1-0 (e83de254ffbee85907d1): synced workspace in 0.092s: 156 added, 0 updated, 0 deleted, 0 unchanged (1321253B written)
+tun: session ab-066e3a2a1cdd-1-0: started a new session sandbox (Bazel server starts with this command); remote cache: tun's, through /tun/sock/cache.sock
+2026/10/15 14:42:09 Downloading https://releases.bazel.build/9.3.0/release/bazel-9.3.0-linux-x86_64...
+Extracting Bazel installation...
+Starting local Bazel server (9.3.0) and connecting to it...
+INFO: Invocation ID: a09dedf8-7c2f-4091-93bf-41457fad2787
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Loading: 0 packages loaded
+    currently loading: internal/server
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (4 packages loaded)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+
+Analyzing: 4 targets (9 packages loaded, 7 targets configured)
+
+Analyzing: 4 targets (9 packages loaded, 7 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (12 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (13 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (22 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (25 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (32 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (45 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (63 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (64 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (66 packages loaded, 41 targets configured)
+
+Analyzing: 4 targets (66 packages loaded, 43 targets configured)
+
+Analyzing: 4 targets (68 packages loaded, 61 targets configured)
+
+Analyzing: 4 targets (72 packages loaded, 164 targets configured)
+
+Analyzing: 4 targets (83 packages loaded, 333 targets configured)
+
+Analyzing: 4 targets (83 packages loaded, 1107 targets configured)
+
+Analyzing: 4 targets (92 packages loaded, 1257 targets configured)
+
+Analyzing: 4 targets (92 packages loaded, 1260 targets configured)
+
+Analyzing: 4 targets (92 packages loaded, 1260 targets configured)
+
+Analyzing: 4 targets (92 packages loaded, 1260 targets configured)
+
+Analyzing: 4 targets (103 packages loaded, 1318 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 1790 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 2147 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 2489 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2495 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2495 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2495 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2495 targets configured)
+
+Analyzing: 4 targets (107 packages loaded, 2515 targets configured)
+
+Analyzing: 4 targets (109 packages loaded, 5677 targets configured)
+
+Analyzing: 4 targets (109 packages loaded, 8042 targets configured)
+[1 / 1] no actions running
+Analyzing: 4 targets (109 packages loaded, 8042 targets configured)
+[2 / 23] [Prepa] Writing repo mapping manifest for //internal/server:server_test
+INFO: Analyzed 4 targets (109 packages loaded, 8042 targets configured).
+[5 / 24] checking cached actions
+tun: received interrupt; canceled job 20261015T143927562900-c38d30da

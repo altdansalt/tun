@@ -1,0 +1,80 @@
+[
+  {
+    "id": "20261015T143927562900-c38d30da",
+    "state": "canceled",
+    "exit_code": 8,
+    "signal": null,
+    "created_at": "2026-10-15T14:39:27.562906924Z",
+    "started_at": "2026-10-15T14:42:09.35759162Z",
+    "ended_at": "2026-10-15T14:44:29.053351424Z",
+    "argv": [
+      "bazel",
+      "test",
+      "//internal/workspace/...",
+      "//internal/server/...",
+      "--jobs=2"
+    ],
+    "cwd": ".",
+    "timeout_sec": 300,
+    "sandbox": "bwrap",
+    "error": "canceled",
+    "client": "tun-a3",
+    "runner": "tun-r5",
+    "session": "ab-066e3a2a1cdd-1-0",
+    "session_id": "e83de254ffbee85907d1",
+    "summary": "tun: bazel test exit=8 after 139.3s: build incomplete or failed (INTERRUPTED)",
+    "queue_sec": 161.794,
+    "run_sec": 139.695
+  },
+  {
+    "id": "20261015T144428658180-a82403bb",
+    "state": "exited",
+    "exit_code": 34,
+    "signal": null,
+    "created_at": "2026-10-15T14:44:28.658195064Z",
+    "started_at": "2026-10-15T14:44:29.066764082Z",
+    "ended_at": "2026-10-15T14:44:36.759576941Z",
+    "argv": [
+      "bazel",
+      "test",
+      "//internal/workspace/...",
+      "//internal/server/...",
+      "--jobs=2"
+    ],
+    "cwd": ".",
+    "timeout_sec": 300,
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r5",
+    "session": "ab-066e3a2a1cdd-1-0",
+    "session_id": "e83de254ffbee85907d1",
+    "summary": "tun: bazel test exit=34 after 7.4s: 1 of 1 targets failed: //internal/workspace:workspace",
+    "queue_sec": 0.408,
+    "run_sec": 7.692
+  },
+  {
+    "id": "20261015T144437849944-26b5707a",
+    "state": "canceled",
+    "exit_code": null,
+    "signal": null,
+    "created_at": "2026-10-15T14:44:37.849955824Z",
+    "started_at": null,
+    "ended_at": "2026-10-15T14:49:37.355225252Z",
+    "argv": [
+      "bazel",
+      "test",
+      "//internal/workspace/...",
+      "//internal/server/...",
+      "--jobs=2"
+    ],
+    "cwd": ".",
+    "timeout_sec": 300,
+    "sandbox": "bwrap",
+    "error": "canceled while queued",
+    "client": "tun-a3",
+    "session": "ab-066e3a2a1cdd-1-0",
+    "session_id": "e83de254ffbee85907d1",
+    "queue_sec": 299.505,
+    "run_sec": 0
+  }
+]

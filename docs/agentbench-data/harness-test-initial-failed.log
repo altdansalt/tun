@@ -1,0 +1,107 @@
+
+Waiting for available remote runner...
+Streaming remote runner logs to: https://app.buildbuddy.dev/invocation/d729401e-1d34-4832-93e6-5ba3f00f66a6
+[90m2026-10-15 14:26:31.590 UTC [mSyncing existing repo...
+[90m2026-10-15 14:26:31.590 UTC [mConfiguring repository...
+[90m2026-10-15 14:26:31.686 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 14:26:31.697 UTC [32m$ [mgit fetch --force --progress --depth=1 origin aacd144af4faadbd54f01cad001b211be3b20a51
+remote: Enumerating objects: 113, done.
+remote: Counting objects: 100% (113/113), done.
+remote: Compressing objects: 100% (45/45), done.
+remote: Total 64 (delta 41), reused 35 (delta 18), pack-reused 0 (from 0)
+Unpacking objects: 100% (64/64), 72.33 KiB | 1.05 MiB/s, done.
+From https://github.com/altdansalt/tun
+ * branch            aacd144af4faadbd54f01cad001b211be3b20a51 -> FETCH_HEAD
+warning: fetch normally indicates which branches had a forced update,
+but that check has been disabled; to re-enable, use '--show-forced-updates'
+flag or run 'git config fetch.showForcedUpdates true'
+[90m2026-10-15 14:26:32.527 UTC [32m$ [mgit clean -x -d --force
+Removing 9067dd71237a5256cc8c28614e8601f593f6333af2666772c4b319629ee9034b
+Removing internal/client/runner_session_test.go
+Removing internal/server/runner_session.go
+Removing internal/server/session_placement.go
+Removing internal/server/session_placement_test.go
+Removing scripts/bench-placement.sh
+[90m2026-10-15 14:26:32.537 UTC [32m$ [mgit checkout --force -B main aacd144af4faadbd54f01cad001b211be3b20a51
+Reset branch 'main'
+[90m2026-10-15 14:26:32.610 UTC [32m$ [mgit apply --verbose 904419a1c9a8fa267d4cfa8ccc89f10998dbbd707a74dd13f88c137bd4e9e55f
+Checking patch AGENTS.md...
+Checking patch SPEC.md...
+Checking patch docs/bazel.md...
+Checking patch scripts/agentbench.py...
+Checking patch scripts/agentbench.sh...
+Applied patch AGENTS.md cleanly.
+Applied patch SPEC.md cleanly.
+Applied patch docs/bazel.md cleanly.
+Applied patch scripts/agentbench.py cleanly.
+Applied patch scripts/agentbench.sh cleanly.
+[90m2026-10-15 14:26:32.634 UTC [32m$ [mgit apply --verbose 7cace20c6fe9bdc73ff1802953e90e6f1c13e86b91081332036c4ce752d5ec6e
+Checking patch scripts/__pycache__/agentbench.cpython-312.pyc...
+Applied patch scripts/__pycache__/agentbench.cpython-312.pyc cleanly.
+[90m2026-10-15 14:26:32.650 UTC [32m$ [mgit apply --verbose 8ef1d180d4e5080f47dd73c3e4484d1cf50ab1a43e8f68b423cecb62c6ec93bc
+Checking patch scripts/agentbench_test.py...
+Applied patch scripts/agentbench_test.py cleanly.
+[90m2026-10-15 14:26:32.653 UTC [32m$ [mif [ -x /usr/local/bin/bazelisk ]; then
+  tun_ci_bin=$(mktemp -d)
+  ln -s /usr/local/bin/bazelisk "$tun_ci_bin/bazel"
+  export PATH="$tun_ci_bin:$PATH"
+  export USE_BAZEL_VERSION=9.3.0
+fi
+python3 scripts/agentbench_test.py
+HEAD is now at 76135fc fixture
+HEAD is now at 76135fc fixture
+HEAD is now at 76135fc fixture
+Traceback (most recent call last):
+  File "/home/buildbuddy/workspace/repo-root/scripts/agentbench.py", line 192, in <module>
+    raise SystemExit(main())
+  File "/home/buildbuddy/workspace/repo-root/scripts/agentbench.py", line 182, in main
+    list(pool.map(lambda i: agent(system, n, i), range(n)))
+  File "/usr/lib/python3.8/concurrent/futures/_base.py", line 619, in result_iterator
+    yield fs.pop().result()
+  File "/usr/lib/python3.8/concurrent/futures/_base.py", line 444, in result
+    return self.__get_result()
+  File "/usr/lib/python3.8/concurrent/futures/_base.py", line 389, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/buildbuddy/workspace/repo-root/scripts/agentbench.py", line 182, in <lambda>
+    list(pool.map(lambda i: agent(system, n, i), range(n)))
+  File "/home/buildbuddy/workspace/repo-root/scripts/agentbench.py", line 154, in agent
+    path = edit(repo, a.profile, iteration, nonce)
+  File "/home/buildbuddy/workspace/repo-root/scripts/agentbench.py", line 44, in edit
+    subprocess.run(['gofmt', '-w', str(repo / path)], check=True)
+  File "/usr/lib/python3.8/subprocess.py", line 493, in run
+    with Popen(*popenargs, **kwargs) as process:
+  File "/usr/lib/python3.8/subprocess.py", line 858, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/usr/lib/python3.8/subprocess.py", line 1704, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+FileNotFoundError: [Errno 2] No such file or directory: 'gofmt'
+E..
+======================================================================
+ERROR: test_concurrent_loop_http_and_restoration (__main__.BenchmarkTest)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "scripts/agentbench_test.py", line 67, in test_concurrent_loop_http_and_restoration
+    subprocess.run(['python3', str(Path(b.__file__)), '--repo', str(repo), '--systems', 'tun', '--agents', '3', '--iterations', '3', '--out', str(root / 'out')], check=True)
+  File "/usr/lib/python3.8/subprocess.py", line 516, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['python3', '/home/buildbuddy/workspace/repo-root/scripts/agentbench.py', '--repo', '/tmp/tmpb4tgl5r4/repo', '--systems', 'tun', '--agents', '3', '--iterations', '3', '--out', '/tmp/tmpb4tgl5r4/out']' returned non-zero exit status 1.
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.981s
+
+FAILED (errors=1)
+[31mCommand failed: exit status 1
+[90m2026-10-15 14:26:33.909 UTC (command exited with code 1)
+
+2026-10-15 14:26:33.909 UTC [mUploading artifacts from /home/buildbuddy/workspace/artifacts/command-0
+[90m2026-10-15 14:26:33.913 UTC [mUploaded 0 artifacts
+
+[31mAction failed: exit status 1
+[90m2026-10-15 14:26:33.913 UTC [mStarting cleanup
+[90m2026-10-15 14:26:33.914 UTC [mChecking Bazel workspace lock
+[90m2026-10-15 14:26:34.702 UTC [32m$ [mgit gc --auto
+[90mGit maintenance cleaned 0MB
+
+Remote run completed at 2026-10-15 14:26:34.706 UTC

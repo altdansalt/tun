@@ -1,0 +1,47 @@
+
+Waiting for available remote runner...
+Streaming remote runner logs to: https://app.buildbuddy.dev/invocation/a0c15ba5-dc9e-4eb7-9a18-4ab1392c0d67
+[90m2026-10-15 17:33:24.708 UTC [mSyncing existing repo...
+[90m2026-10-15 17:33:24.708 UTC [mConfiguring repository...
+[90m2026-10-15 17:33:24.766 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 17:33:24.772 UTC [32m$ [mgit fetch --force --progress --depth=1 origin dc480b92d97d447b80e2b287f74fb04807b87d46
+remote: Total 0 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
+From https://github.com/altdansalt/tun
+ * branch            dc480b92d97d447b80e2b287f74fb04807b87d46 -> FETCH_HEAD
+warning: fetch normally indicates which branches had a forced update,
+but that check has been disabled; to re-enable, use '--show-forced-updates'
+flag or run 'git config fetch.showForcedUpdates true'
+[90m2026-10-15 17:33:26.505 UTC [32m$ [mgit clean -x -d --force
+Removing bazel-bin
+Removing bazel-out
+Removing bazel-repo-root
+Removing bazel-testlogs
+[90m2026-10-15 17:33:26.510 UTC [32m$ [mgit checkout --force -B feat/agentbench dc480b92d97d447b80e2b287f74fb04807b87d46
+Reset branch 'feat/agentbench'
+[90m2026-10-15 17:33:26.559 UTC [32m$ [mgit apply --verbose 29c3316637eec4d132667fb259ea7ce1886e403b49699ec8df8ee7e368bedc4e
+Checking patch internal/workspace/workspace_test.go...
+Applied patch internal/workspace/workspace_test.go cleanly.
+[90m2026-10-15 17:33:26.563 UTC [32m$ [mbazel test --config=buildbuddy_remote_cache --config=buildbuddy_bes_results_url --config=buildbuddy_bes_backend --jobs=2 --remote_header=<REDACTED> //internal/workspace/... //internal/server/...
+[32mINFO: [mInvocation ID: 5b4dff4e-1cdd-49ff-892d-39dd5502a254
+[32mINFO: [mStreaming build results to: [36mhttps://app.buildbuddy.dev/invocation/5b4dff4e-1cdd-49ff-892d-39dd5502a254
+[32mINFO: [mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+[32mINFO: [mFound 2 targets and 2 test targets...
+[32mINFO: [mElapsed time: 2.445s, Critical Path: 1.48s
+[32mINFO: [m8 processes: 1 action cache hit, 1 remote cache hit, 2 internal, 5 linux-sandbox.
+[32mINFO: [mBuild completed successfully, 8 total actions
+//internal/server:server_test                                   [32m(cached) PASSED [min 1.5s
+//internal/workspace:workspace_test                                      [32mPASSED [min 0.2s
+
+Executed 1 out of 2 tests: 2 tests pass.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[32mINFO: [mStreaming build results to: [36mhttps://app.buildbuddy.dev/invocation/5b4dff4e-1cdd-49ff-892d-39dd5502a254
+[90m2026-10-15 17:33:30.251 UTC (command exited with code 0)
+
+2026-10-15 17:33:30.251 UTC [mUploading artifacts from /home/buildbuddy/workspace/artifacts/command-0
+[90m2026-10-15 17:33:30.255 UTC [mUploaded 0 artifacts
+[90m2026-10-15 17:33:30.255 UTC [mStarting cleanup
+[90m2026-10-15 17:33:30.256 UTC [mChecking Bazel workspace lock
+[90m2026-10-15 17:33:30.601 UTC [32m$ [mgit gc --auto
+[90mGit maintenance cleaned 0MB
+
+Remote run completed at 2026-10-15 17:33:30.603 UTC

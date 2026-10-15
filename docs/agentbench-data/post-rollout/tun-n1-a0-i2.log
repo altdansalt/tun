@@ -1,0 +1,4 @@
+tun: job 20261015T144437849944-26b5707a (session ab-066e3a2a1cdd-1-0)
+tun: sync: 156 manifest entries (13868B sent), uploaded 1 of 139 files (2696B sent) in 0.496s
+tun: queued (2 ahead, 5 running; session ab-066e3a2a1cdd-1-0 is being stopped)
+tun: received interrupt; canceled job 20261015T144437849944-26b5707a

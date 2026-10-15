@@ -1,0 +1,27 @@
+{
+  "id": "20261015T143811878781-26f01569",
+  "state": "canceled",
+  "exit_code": 8,
+  "signal": null,
+  "created_at": "2026-10-15T14:38:11.878790197Z",
+  "started_at": "2026-10-15T14:38:12.055812798Z",
+  "ended_at": "2026-10-15T14:39:27.65176706Z",
+  "argv": [
+    "bazel",
+    "test",
+    "//internal/workspace/...",
+    "//internal/server/...",
+    "--jobs=2"
+  ],
+  "cwd": ".",
+  "timeout_sec": 480,
+  "sandbox": "bwrap",
+  "error": "canceled",
+  "client": "tun-a3",
+  "runner": "tun-r3",
+  "session": "ab-5cdb329b6dc0-1-0",
+  "session_id": "120af9ab721906c9f279",
+  "summary": "tun: bazel test exit=8 after 75.0s: build incomplete or failed (INTERRUPTED)",
+  "queue_sec": 0.177,
+  "run_sec": 75.595
+}

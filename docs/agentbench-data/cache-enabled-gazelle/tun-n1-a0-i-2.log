@@ -1,0 +1,72 @@
+tun: job 20261015T173016585453-d71d06d3 (session ab-af417b7486fd-1-0)
+tun: sync: 2779 manifest entries (192266B sent), uploaded 1837 of 1838 files (3297739B sent) in 0.829s
+tun: running on runner tun-r1
+tun: session ab-af417b7486fd-1-0 (e03104e2f4454f18405d): synced workspace in 0.180s: 2779 added, 0 updated, 0 deleted, 0 unchanged (14713344B written)
+tun: session ab-af417b7486fd-1-0: started a new session sandbox (Bazel server starts with this command); remote cache: tun's, through /tun/sock/cache.sock
+2026/10/15 17:30:17 Downloading https://releases.bazel.build/8.2.1/release/bazel-8.2.1-linux-x86_64...
+Extracting Bazel installation...
+Starting local Bazel server (8.2.1) and connecting to it...
+INFO: Invocation ID: 720231a9-c6f2-4b32-9394-9fa80df9d650
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Loading: 0 packages loaded
+Loading: 0 packages loaded
+Analyzing: target //v2/label:label_test (1 packages loaded)
+Analyzing: target //v2/label:label_test (1 packages loaded, 0 targets configured)
+Analyzing: target //v2/label:label_test (1 packages loaded, 0 targets configured)
+
+Analyzing: target //v2/label:label_test (19 packages loaded, 8 targets configured)
+
+Analyzing: target //v2/label:label_test (63 packages loaded, 1207 targets configured)
+
+Analyzing: target //v2/label:label_test (79 packages loaded, 1258 targets configured)
+
+Analyzing: target //v2/label:label_test (82 packages loaded, 2162 targets configured)
+
+Analyzing: target //v2/label:label_test (83 packages loaded, 2487 targets configured)
+
+Analyzing: target //v2/label:label_test (83 packages loaded, 2487 targets configured)
+
+Analyzing: target //v2/label:label_test (84 packages loaded, 7852 targets configured)
+
+Analyzing: target //v2/label:label_test (87 packages loaded, 9066 targets configured)
+
+Analyzing: target //v2/label:label_test (87 packages loaded, 9066 targets configured)
+
+Analyzing: target //v2/label:label_test (87 packages loaded, 9066 targets configured)
+
+Analyzing: target //v2/label:label_test (87 packages loaded, 9066 targets configured)
+
+Analyzing: target //v2/label:label_test (91 packages loaded, 9082 targets configured)
+
+Analyzing: target //v2/label:label_test (91 packages loaded, 9082 targets configured)
+
+Analyzing: target //v2/label:label_test (91 packages loaded, 9082 targets configured)
+
+Analyzing: target //v2/label:label_test (94 packages loaded, 9654 targets configured)
+
+Analyzing: target //v2/label:label_test (94 packages loaded, 10335 targets configured)
+
+INFO: Analyzed target //v2/label:label_test (95 packages loaded, 10349 targets configured).
+[4 / 27] [Prepa] Creating source manifest for //v2/label:label_test
+[8 / 28] checking cached actions
+[8 / 28] [Prepa] GoToolchainBinaryBuild external/rules_go++go_sdk+main___download_0/builder [for tool]
+[8 / 28] GoToolchainBinaryBuild external/rules_go++go_sdk+main___download_0/builder [for tool]; 0s remote-cache
+ERROR: /tun/out/base/external/rules_go++go_sdk+main___download_0/BUILD.bazel:79:15: GoToolchainBinaryBuild external/rules_go++go_sdk+main___download_0/builder [for tool] failed: Failed to query remote execution capabilities: UNAVAILABLE: HTTP status code 502
+invalid content-type: null
+trailers: Metadata(:status=502,date=Thu, 15 Oct 2026 17:30:25 GMT,content-length=0)
+[9 / 28] 1 / 1 tests, 1 failed; checking cached actions
+Target //v2/label:label_test failed to build
+Use --verbose_failures to see the command lines of failed build steps.
+//v2/label:label_test                                           FAILED TO BUILD
+
+Executed 0 out of 1 test: 1 fails to build.
+INFO: Elapsed time: 127.055s, Critical Path: 4.21s
+INFO: 9 processes: 9 internal.
+ERROR: Build did NOT complete successfully
+FAILED: 
+INFO: Build Event Protocol files produced successfully.
+tun: bazel test exit=34 after 128.7s: 1 of 1 targets failed: //v2/label:label_test
+tun: job 20261015T173016585453-d71d06d3 exited exit=34 after 129.334s (0.145s queued)

@@ -1,0 +1,46 @@
+
+Waiting for available remote runner...
+Streaming remote runner logs to: https://app.buildbuddy.dev/invocation/39bc7b91-cabe-4bac-979b-4f7f7b8ff6a6
+[90m2026-10-15 17:33:40.735 UTC [mSyncing existing repo...
+[90m2026-10-15 17:33:40.736 UTC [mConfiguring repository...
+[90m2026-10-15 17:33:40.844 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 17:33:40.856 UTC [32m$ [mgit fetch --force --progress --depth=1 origin 97454a6a7c6088327f0d68938d90ce49facf2132
+remote: Total 0 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
+From https://github.com/bazelbuild/bazel-gazelle
+ * branch            97454a6a7c6088327f0d68938d90ce49facf2132 -> FETCH_HEAD
+warning: fetch normally indicates which branches had a forced update,
+but that check has been disabled; to re-enable, use '--show-forced-updates'
+flag or run 'git config fetch.showForcedUpdates true'
+[90m2026-10-15 17:33:41.509 UTC [32m$ [mgit clean -x -d --force
+Removing bazel-bin
+Removing bazel-out
+Removing bazel-repo-root
+Removing bazel-testlogs
+Removing dc51aa20df33f556c77b0eecb1dfbb6056d36c270a509ba271e9bcd50f4773d9
+[90m2026-10-15 17:33:41.567 UTC [32m$ [mgit checkout --force -B master 97454a6a7c6088327f0d68938d90ce49facf2132
+Reset branch 'master'
+[90m2026-10-15 17:33:41.603 UTC [32m$ [mbazel test --config=buildbuddy_remote_cache --config=buildbuddy_bes_results_url --config=buildbuddy_bes_backend --jobs=2 --remote_header=<REDACTED> //v2/label:label_test
+[32mINFO: [mInvocation ID: f6ccc949-504f-4ff0-a6ca-c3fe96bbe5af
+[32mINFO: [mStreaming build results to: [36mhttps://app.buildbuddy.dev/invocation/f6ccc949-504f-4ff0-a6ca-c3fe96bbe5af
+[32mINFO: [mAnalyzed target //v2/label:label_test (0 packages loaded, 0 targets configured).
+[32mINFO: [mFound 1 test target...
+Target //v2/label:label_test up-to-date:
+  bazel-bin/v2/label/label_test_/label_test
+[32mINFO: [mElapsed time: 1.669s, Critical Path: 0.31s
+[32mINFO: [m7 processes: 6 remote cache hit, 1 internal.
+[32mINFO: [mBuild completed successfully, 7 total actions
+//v2/label:label_test                                           [32m(cached) PASSED [min 0.1s
+
+Executed 0 out of 1 test: 1 test passes.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[32mINFO: [mStreaming build results to: [36mhttps://app.buildbuddy.dev/invocation/f6ccc949-504f-4ff0-a6ca-c3fe96bbe5af
+[90m2026-10-15 17:33:45.079 UTC (command exited with code 0)
+
+2026-10-15 17:33:45.079 UTC [mUploading artifacts from /home/buildbuddy/workspace/artifacts/command-0
+[90m2026-10-15 17:33:45.088 UTC [mUploaded 0 artifacts
+[90m2026-10-15 17:33:45.089 UTC [mStarting cleanup
+[90m2026-10-15 17:33:45.089 UTC [mChecking Bazel workspace lock
+[90m2026-10-15 17:33:45.526 UTC [32m$ [mgit gc --auto
+[90mGit maintenance cleaned 0MB
+
+Remote run completed at 2026-10-15 17:33:45.528 UTC

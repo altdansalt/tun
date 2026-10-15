@@ -1,0 +1,83 @@
+tun: server unavailable, retrying
+tun: job 20261015T143811878781-26f01569 (session ab-5cdb329b6dc0-1-0)
+tun: sync: 156 manifest entries (13870B sent), uploaded 2 of 139 files (5587B sent) in 3.047s
+tun: running on runner tun-r3
+tun: session ab-5cdb329b6dc0-1-0 (120af9ab721906c9f279): synced workspace in 0.091s: 156 added, 0 updated, 0 deleted, 0 unchanged (1321046B written)
+tun: session ab-5cdb329b6dc0-1-0: started a new session sandbox (Bazel server starts with this command); remote cache: tun's, through /tun/sock/cache.sock
+2026/10/15 14:38:12 Downloading https://releases.bazel.build/9.3.0/release/bazel-9.3.0-linux-x86_64...
+Extracting Bazel installation...
+Starting local Bazel server (9.3.0) and connecting to it...
+INFO: Invocation ID: aba417e8-61ad-4991-83d0-5eb8626405f1
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/workspace ... (2 packages)
+Loading: 2 packages loaded
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (3 packages loaded)
+Analyzing: 4 targets (6 packages loaded)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+
+Analyzing: 4 targets (9 packages loaded, 7 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (12 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (15 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (23 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (24 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (25 packages loaded, 9 targets configured)
+
+tun: received interrupt; canceled job 20261015T143811878781-26f01569

@@ -722,5 +722,7 @@ client's namespace, never a caller-supplied identity header.
 `scripts/agentbench.sh` simulates concurrent agents in isolated git clones, adds compiled
 regression-test cases, and records edit-to-result wall time for `tun bazel test` and
 `bb remote test`. JSONL includes exit codes, summary lines, job queue/run durations and
-healthz snapshots; raw command logs and a percentile table accompany it. See
+healthz snapshots; raw command logs and percentile tables accompany it. Optional
+`--baselines` separates cold-session/unchanged warm commands from edits; `--one-line`
+adds one executable manifest traversal test-table row per edit. See
 [docs/agentbench.md](docs/agentbench.md). This adds no service API or CLI behavior.

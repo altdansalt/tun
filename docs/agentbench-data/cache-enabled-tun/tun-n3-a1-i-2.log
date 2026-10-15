@@ -1,0 +1,129 @@
+tun: job 20261015T173104460256-046f2211 (session ab-1d58f9b48ddd-3-1)
+tun: sync: 175 manifest entries (7756B sent), uploaded 0 of 155 files (0B sent) in 0.299s
+tun: running on runner tun-r2
+tun: session ab-1d58f9b48ddd-3-1 (db902ab5fdf52750ff41): synced workspace in 0.106s: 175 added, 0 updated, 0 deleted, 0 unchanged (1393814B written)
+tun: session ab-1d58f9b48ddd-3-1: started a new session sandbox (Bazel server starts with this command); remote cache: tun's, through /tun/sock/cache.sock
+2026/10/15 17:31:04 Downloading https://releases.bazel.build/9.3.0/release/bazel-9.3.0-linux-x86_64...
+Extracting Bazel installation...
+Starting local Bazel server (9.3.0) and connecting to it...
+INFO: Invocation ID: 956ac363-fbae-4507-92ee-68bbafc5598f
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Loading: 0 packages loaded
+    currently loading: internal/server
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+
+Analyzing: 4 targets (9 packages loaded, 7 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (12 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (22 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (23 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (29 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (47 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (61 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (63 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (63 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (66 packages loaded, 15 targets configured)
+
+Analyzing: 4 targets (67 packages loaded, 41 targets configured)
+
+Analyzing: 4 targets (67 packages loaded, 48 targets configured)
+
+Analyzing: 4 targets (72 packages loaded, 164 targets configured)
+
+Analyzing: 4 targets (83 packages loaded, 575 targets configured)
+
+Analyzing: 4 targets (83 packages loaded, 1193 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (90 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (104 packages loaded, 1308 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 1400 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 2490 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2496 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2496 targets configured)
+
+Analyzing: 4 targets (107 packages loaded, 2496 targets configured)
+
+Analyzing: 4 targets (109 packages loaded, 8041 targets configured)
+
+Analyzing: 4 targets (109 packages loaded, 8043 targets configured)
+[2 / 23] [Prepa] Writing repo mapping manifest for //internal/workspace:workspace_test
+INFO: Analyzed 4 targets (109 packages loaded, 8043 targets configured).
+[8 / 33] checking cached actions
+[8 / 33] [Prepa] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]
+[8 / 33] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]; 0s remote-cache
+ERROR: /tun/out/base/external/rules_go++go_sdk+go_sdk/BUILD.bazel:51:30: GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool] failed: Failed to query remote execution capabilities: UNAVAILABLE: HTTP status code 502
+invalid content-type: null
+trailers: Metadata(:status=502,date=Thu, 15 Oct 2026 17:31:27 GMT,content-length=0)
+Use --verbose_failures to see the command lines of failed build steps.
+[9 / 33] checking cached actions
+INFO: Elapsed time: 108.108s, Critical Path: 3.83s
+INFO: 9 processes: 9 internal.
+ERROR: Build did NOT complete successfully
+//internal/server:server_test                                         NO STATUS
+//internal/workspace:workspace_test                                   NO STATUS
+
+Executed 0 out of 2 tests: 2 were skipped.
+FAILED: 
+INFO: Build Event Protocol files produced successfully.
+tun: bazel test exit=34 after 111.8s: 1 of 1 targets failed: //internal/workspace:workspace
+tun: job 20261015T173104460256-046f2211 exited exit=34 after 112.117s (0.090s queued)

@@ -1,0 +1,128 @@
+[
+  {
+    "id": "20261015T172933359889-b76deba8",
+    "state": "exited",
+    "exit_code": 0,
+    "signal": null,
+    "created_at": "2026-10-15T17:29:33.359900773Z",
+    "started_at": "2026-10-15T17:29:33.515932501Z",
+    "ended_at": "2026-10-15T17:29:34.494056794Z",
+    "argv": [
+      "python3",
+      "scripts/agentbench_test.py"
+    ],
+    "cwd": ".",
+    "timeout_sec": 1800,
+    "workspace": "9a1f5e93f703e4f0b5726f10b63919e5952e458a300126f1734ce8fe02c8bd6c",
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r3",
+    "queue_sec": 0.156,
+    "run_sec": 0.978
+  },
+  {
+    "id": "20261015T172945463459-a23698d1",
+    "state": "exited",
+    "exit_code": 1,
+    "signal": null,
+    "created_at": "2026-10-15T17:29:45.463474217Z",
+    "started_at": "2026-10-15T17:29:45.583597396Z",
+    "ended_at": "2026-10-15T17:29:46.925611834Z",
+    "argv": [
+      "python3",
+      "scripts/agentbench_test.py"
+    ],
+    "cwd": ".",
+    "timeout_sec": 1800,
+    "workspace": "65f58909bb7a622afef2d379656526ab048fafdf0572ae7cd033544496356230",
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r5",
+    "queue_sec": 0.12,
+    "run_sec": 1.342
+  },
+  {
+    "id": "20261015T173003174837-e6f1268f",
+    "state": "exited",
+    "exit_code": 0,
+    "signal": null,
+    "created_at": "2026-10-15T17:30:03.174849639Z",
+    "started_at": "2026-10-15T17:30:03.278295727Z",
+    "ended_at": "2026-10-15T17:30:04.470829956Z",
+    "argv": [
+      "python3",
+      "scripts/agentbench_test.py"
+    ],
+    "cwd": ".",
+    "timeout_sec": 1800,
+    "workspace": "3e8e0c765dd9a80a1328c904df5d342fed728a757a563377bf8cb0e388ed152f",
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r4",
+    "queue_sec": 0.103,
+    "run_sec": 1.192
+  },
+  {
+    "id": "20261015T173103049662-2b81d46e",
+    "state": "exited",
+    "exit_code": 0,
+    "signal": null,
+    "created_at": "2026-10-15T17:31:03.049674541Z",
+    "started_at": "2026-10-15T17:31:03.271297941Z",
+    "ended_at": "2026-10-15T17:31:05.365174786Z",
+    "argv": [
+      "python3",
+      "scripts/agentbench_test.py"
+    ],
+    "cwd": ".",
+    "timeout_sec": 1800,
+    "workspace": "c820595d876e8056fa9b413765d283f8cf4eaff30127088b5ace723323418cb1",
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r4",
+    "queue_sec": 0.221,
+    "run_sec": 2.093
+  },
+  {
+    "id": "20261015T173234650059-0beda783",
+    "state": "exited",
+    "exit_code": 0,
+    "signal": null,
+    "created_at": "2026-10-15T17:32:34.650075062Z",
+    "started_at": "2026-10-15T17:32:34.964335586Z",
+    "ended_at": "2026-10-15T17:32:41.449176198Z",
+    "argv": [
+      "python3",
+      "scripts/agentbench_test.py"
+    ],
+    "cwd": ".",
+    "timeout_sec": 1800,
+    "workspace": "1eb1d2b2a9a37fc5a3c9528d07542a5ecd366f93c861c15bb6763e4043406513",
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r4",
+    "queue_sec": 0.314,
+    "run_sec": 6.484
+  },
+  {
+    "id": "20261015T173349258976-f2941c40",
+    "state": "exited",
+    "exit_code": 0,
+    "signal": null,
+    "created_at": "2026-10-15T17:33:49.258988663Z",
+    "started_at": "2026-10-15T17:33:49.565417966Z",
+    "ended_at": "2026-10-15T17:33:52.469510439Z",
+    "argv": [
+      "python3",
+      "scripts/agentbench_test.py"
+    ],
+    "cwd": ".",
+    "timeout_sec": 1800,
+    "workspace": "e4da90c4dc082eb0592f8bbdef513c9b42bcb849359f40e5f7bba560d094b997",
+    "sandbox": "bwrap",
+    "client": "tun-a3",
+    "runner": "tun-r1",
+    "queue_sec": 0.306,
+    "run_sec": 2.904
+  }
+]

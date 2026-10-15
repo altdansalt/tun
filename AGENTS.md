@@ -85,5 +85,7 @@ SIGTERM draining, and required systemd KillMode/TimeoutStopSec overrides.
 `scripts/agentbench.sh --out /tmp/agentbench --systems tun --agents 1 3 --iterations 5`
 measures concurrent edit-to-test latency on the shared deployment (no local builds).
 See [docs/agentbench.md](docs/agentbench.md) for BuildBuddy, external-repo profiles,
-limits, interpretation and the measured ledger. Test the harness remotely with
+limits, interpretation and the measured ledger. Add `--baselines` for cold-session
+and unchanged warm samples, or `--one-line` for a literal manifest-test table edit.
+Test the harness remotely with
 `tun run -- python3 scripts/agentbench_test.py`.

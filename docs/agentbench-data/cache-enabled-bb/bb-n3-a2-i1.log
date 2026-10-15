@@ -1,0 +1,27 @@
+
+Waiting for available remote runner...
+Streaming remote runner logs to: https://app.buildbuddy.dev/invocation/c7cc50e0-93e5-4e7c-9084-6b1a6c5969a7
+[90m2026-10-15 17:31:51.864 UTC [mSyncing existing repo...
+[90m2026-10-15 17:31:51.865 UTC [mConfiguring repository...
+[90m2026-10-15 17:31:51.913 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 17:31:51.927 UTC [32m$ [mgit fetch --force --progress --depth=1 origin f2d3bdb562adb9014f8e834a1d56cd768e376352
+fatal: remote error: upload-pack: not our ref f2d3bdb562adb9014f8e834a1d56cd768e376352
+[31mCommand failed: exit status 128
+[mFailed to sync existing repo (maybe due to destructive '.git' dir edit or incompatible remote update). Deleting and initializing from scratch. Error: rpc error: code = Unknown desc = fetch pushed ref: fatal: remote error: upload-pack: not our ref f2d3bdb562adb9014f8e834a1d56cd768e376352
+[31mCommand failed: exit status 128
+[m: exit status 128
+[90m2026-10-15 17:31:52.383 UTC [32m$ [mgit init --quiet
+[90m2026-10-15 17:31:52.395 UTC [mConfiguring repository...
+[90m2026-10-15 17:31:52.418 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 17:31:52.421 UTC [32m$ [mgit fetch --force --progress --depth=1 origin f2d3bdb562adb9014f8e834a1d56cd768e376352
+fatal: remote error: upload-pack: not our ref f2d3bdb562adb9014f8e834a1d56cd768e376352
+[31mCommand failed: exit status 128
+
+Action failed: failed to set up git repo: fetch pushed ref: fatal: remote error: upload-pack: not our ref f2d3bdb562adb9014f8e834a1d56cd768e376352
+Command failed: exit status 128
+[m: exit status 128
+[90m2026-10-15 17:31:53.023 UTC [mStarting cleanup
+[90m2026-10-15 17:31:53.023 UTC [32m$ [mgit gc --auto
+[90mGit maintenance cleaned 0MB
+
+Remote run completed at 2026-10-15 17:31:53.025 UTC

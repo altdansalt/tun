@@ -1,0 +1,30 @@
+tun: job 20261015T173425664957-a1c9db12 (session ab-69a8cfe761c4-1-0)
+tun: sync: 175 manifest entries (15474B sent), uploaded 1 of 155 files (3298B sent) in 0.182s
+tun: running on runner tun-r4
+tun: session ab-69a8cfe761c4-1-0 (f4fdaa02b86e39fb7a23): synced workspace in 0.003s: 0 added, 1 updated, 0 deleted, 174 unchanged (10401B written)
+INFO: Invocation ID: 355aeb02-b335-4f52-80dd-eaded32febd0
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 4 targets (0 packages loaded, 0 targets configured)
+Analyzing: 4 targets (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed 4 targets (0 packages loaded, 0 targets configured).
+[5 / 24] [Prepa] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]
+[8 / 33] [Prepa] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]
+[8 / 33] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]; 1s remote-cache
+ERROR: /tun/out/base/external/rules_go++go_sdk+go_sdk/BUILD.bazel:51:30: GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool] failed: Failed to query remote execution capabilities: UNAVAILABLE: HTTP status code 502
+invalid content-type: null
+trailers: Metadata(:status=502,date=Thu, 15 Oct 2026 17:34:29 GMT,content-length=0)
+Use --verbose_failures to see the command lines of failed build steps.
+//internal/server:server_test                                         NO STATUS
+//internal/workspace:workspace_test                                   NO STATUS
+
+Executed 0 out of 2 tests: 2 were skipped.
+INFO: Elapsed time: 7.317s, Critical Path: 4.34s
+INFO: 2 processes: 2 internal.
+ERROR: Build did NOT complete successfully
+FAILED: 
+INFO: Build Event Protocol files produced successfully.
+tun: bazel test exit=34 after 7.4s: 1 of 1 targets failed: //internal/server:server
+tun: job 20261015T173425664957-a1c9db12 exited exit=34 after 7.579s (0.009s queued)

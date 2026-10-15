@@ -1,0 +1,63 @@
+
+Waiting for available remote runner...
+Streaming remote runner logs to: https://app.buildbuddy.dev/invocation/e9ea8e8a-6a5c-4262-a7ed-db2b9aeec53a
+[90m2026-10-15 17:31:57.267 UTC [mSyncing existing repo...
+[90m2026-10-15 17:31:57.267 UTC [mConfiguring repository...
+[90m2026-10-15 17:31:57.321 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 17:31:57.335 UTC [32m$ [mgit fetch --force --progress --depth=1 origin f2d3bdb562adb9014f8e834a1d56cd768e376352
+fatal: remote error: upload-pack: not our ref f2d3bdb562adb9014f8e834a1d56cd768e376352
+[31mCommand failed: exit status 128
+[mFailed to sync existing repo (maybe due to destructive '.git' dir edit or incompatible remote update). Deleting and initializing from scratch. Error: rpc error: code = Unknown desc = fetch pushed ref: fatal: remote error: upload-pack: not our ref f2d3bdb562adb9014f8e834a1d56cd768e376352
+[31mCommand failed: exit status 128
+[m: exit status 128
+[90m2026-10-15 17:31:57.765 UTC [32m$ [mgit init --quiet
+[90m2026-10-15 17:31:57.780 UTC [mConfiguring repository...
+[90m2026-10-15 17:31:57.805 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 17:31:57.808 UTC [32m$ [mgit fetch --force --progress --depth=1 origin f2d3bdb562adb9014f8e834a1d56cd768e376352
+remote: Enumerating objects: 174, done.
+remote: Counting objects: 100% (174/174), done.
+remote: Compressing objects: 100% (146/146), done.
+remote: Total 174 (delta 25), reused 79 (delta 21), pack-reused 0 (from 0)
+Receiving objects: 100% (174/174), 405.00 KiB | 8.10 MiB/s, done.
+Resolving deltas: 100% (25/25), done.
+From https://github.com/altdansalt/tun
+ * branch            f2d3bdb562adb9014f8e834a1d56cd768e376352 -> FETCH_HEAD
+warning: fetch normally indicates which branches had a forced update,
+but that check has been disabled; to re-enable, use '--show-forced-updates'
+flag or run 'git config fetch.showForcedUpdates true'
+[90m2026-10-15 17:31:58.725 UTC [32m$ [mgit clean -x -d --force
+[90m2026-10-15 17:31:58.726 UTC [32m$ [mgit checkout --force -B feat/agentbench f2d3bdb562adb9014f8e834a1d56cd768e376352
+Switched to a new branch 'feat/agentbench'
+[90m2026-10-15 17:31:58.774 UTC [32m$ [mgit apply --verbose 842926b4bcc91e70dc05a62564927fb21c623edba03b7ee573657b10d216c1b1
+Checking patch internal/workspace/sync_test.go...
+Checking patch scripts/agentbench.py...
+Checking patch scripts/agentbench_test.py...
+Applied patch internal/workspace/sync_test.go cleanly.
+Applied patch scripts/agentbench.py cleanly.
+Applied patch scripts/agentbench_test.py cleanly.
+Setup completed in 1.551043374s
+[90m2026-10-15 17:31:58.777 UTC [32m$ [mbazel test --config=buildbuddy_remote_cache --config=buildbuddy_bes_results_url --config=buildbuddy_bes_backend --jobs=2 --remote_header=<REDACTED> //internal/workspace/... //internal/server/...
+Starting local Bazel server (9.3.0) and connecting to it...
+[32mINFO: [mInvocation ID: 83bb95ab-c649-4a11-9165-761e04fa3710
+[32mINFO: [mStreaming build results to: [36mhttps://app.buildbuddy.dev/invocation/83bb95ab-c649-4a11-9165-761e04fa3710
+[32mINFO: [mAnalyzed 4 targets (109 packages loaded, 8048 targets configured).
+[32mINFO: [mFound 2 targets and 2 test targets...
+[32mINFO: [mElapsed time: 12.716s, Critical Path: 1.65s
+[32mINFO: [m8 processes: 27 action cache hit, 1 remote cache hit, 2 internal, 5 linux-sandbox.
+[32mINFO: [mBuild completed successfully, 8 total actions
+//internal/server:server_test                                   [32m(cached) PASSED [min 1.5s
+//internal/workspace:workspace_test                                      [32mPASSED [min 0.1s
+
+Executed 1 out of 2 tests: 2 tests pass.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[32mINFO: [mStreaming build results to: [36mhttps://app.buildbuddy.dev/invocation/83bb95ab-c649-4a11-9165-761e04fa3710
+[90m2026-10-15 17:32:12.874 UTC (command exited with code 0)
+
+2026-10-15 17:32:12.874 UTC [mUploading artifacts from /home/buildbuddy/workspace/artifacts/command-0
+[90m2026-10-15 17:32:12.878 UTC [mUploaded 0 artifacts
+[90m2026-10-15 17:32:12.878 UTC [mStarting cleanup
+[90m2026-10-15 17:32:12.878 UTC [mChecking Bazel workspace lock
+[90m2026-10-15 17:32:13.240 UTC [32m$ [mgit gc --auto
+[90mGit maintenance cleaned 0MB
+
+Remote run completed at 2026-10-15 17:32:13.243 UTC

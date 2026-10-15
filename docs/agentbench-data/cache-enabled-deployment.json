@@ -1,0 +1,135 @@
+{
+  "at": "2026-10-15T17:34:49.191334+00:00",
+  "health": {
+    "ok": true,
+    "sandbox": "bwrap",
+    "network_isolation": true,
+    "max_jobs": 6,
+    "max_services": 4,
+    "running": 2,
+    "queued": 0,
+    "services": 0,
+    "local_slots": 0,
+    "runners": [
+      {
+        "name": "tun-r1",
+        "memory_available": 3457089536,
+        "load": 0.31,
+        "sessions": 1,
+        "slots": 1,
+        "running": 0,
+        "last_seen": "2026-10-15T17:34:42.656396321Z",
+        "sandbox": "bwrap",
+        "network_isolation": true,
+        "source": "tun-r1",
+        "disk": {
+          "free_bytes": 14892556288,
+          "total_bytes": 26309095424,
+          "min_free_bytes": 2630909542,
+          "low": false
+        }
+      },
+      {
+        "name": "tun-r2",
+        "memory_available": 3397746688,
+        "load": 0.52,
+        "sessions": 1,
+        "slots": 1,
+        "running": 0,
+        "last_seen": "2026-10-15T17:34:34.560135613Z",
+        "sandbox": "bwrap",
+        "network_isolation": true,
+        "source": "tun-r2",
+        "disk": {
+          "free_bytes": 14819336192,
+          "total_bytes": 26309095424,
+          "min_free_bytes": 2630909542,
+          "low": false
+        }
+      },
+      {
+        "name": "tun-r3",
+        "memory_available": 3452395520,
+        "load": 0.41,
+        "sessions": 1,
+        "slots": 1,
+        "running": 0,
+        "last_seen": "2026-10-15T17:34:28.168078187Z",
+        "sandbox": "bwrap",
+        "network_isolation": true,
+        "source": "tun-r3",
+        "disk": {
+          "free_bytes": 15760424960,
+          "total_bytes": 26309095424,
+          "min_free_bytes": 2630909542,
+          "low": false
+        }
+      },
+      {
+        "name": "tun-r4",
+        "memory_available": 3392700416,
+        "load": 0.645,
+        "sessions": 1,
+        "slots": 1,
+        "running": 1,
+        "last_seen": "2026-10-15T17:34:49.261902036Z",
+        "sandbox": "bwrap",
+        "network_isolation": true,
+        "source": "tun-r4",
+        "disk": {
+          "free_bytes": 16027779072,
+          "total_bytes": 26309095424,
+          "min_free_bytes": 2630909542,
+          "low": false
+        }
+      },
+      {
+        "name": "tun-r5",
+        "memory_available": 3326566400,
+        "load": 1.145,
+        "sessions": 1,
+        "slots": 1,
+        "running": 1,
+        "last_seen": "2026-10-15T17:34:24.649622983Z",
+        "sandbox": "bwrap",
+        "network_isolation": true,
+        "source": "tun-r5",
+        "disk": {
+          "free_bytes": 16154329088,
+          "total_bytes": 26309095424,
+          "min_free_bytes": 2630909542,
+          "low": false
+        }
+      },
+      {
+        "name": "tun-r6",
+        "memory_available": 3444400128,
+        "load": 0.435,
+        "sessions": 1,
+        "slots": 1,
+        "running": 0,
+        "last_seen": "2026-10-15T17:34:39.661596191Z",
+        "sandbox": "bwrap",
+        "network_isolation": true,
+        "source": "tun-r6",
+        "disk": {
+          "free_bytes": 17219850240,
+          "total_bytes": 26309095424,
+          "min_free_bytes": 2630909542,
+          "low": false
+        }
+      }
+    ],
+    "sessions": 6,
+    "max_sessions": 1,
+    "remote_cache": true,
+    "disk": {
+      "free_bytes": 9304072192,
+      "total_bytes": 26309095424,
+      "min_free_bytes": 3946364313,
+      "low": false
+    }
+  },
+  "tun_sha256": "521574afc1ea7f2cf9d3f320034979b787ec5ee0244ef353f8942c380fb3fd0c",
+  "bb_sha256": "e9e996a1a01555e45433acf9432f9d40d5bda437812a830d6701fe9b09853df9"
+}

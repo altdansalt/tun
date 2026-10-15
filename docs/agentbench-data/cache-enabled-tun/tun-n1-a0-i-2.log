@@ -1,0 +1,46 @@
+tun: job 20261015T172955579690-947fc614 (session ab-1d58f9b48ddd-1-0)
+tun: sync: 175 manifest entries (15510B sent), uploaded 61 of 155 files (238094B sent) in 0.293s
+tun: running on runner tun-r5
+tun: session ab-1d58f9b48ddd-1-0 (aa119b2efcc95343cebe): synced workspace in 0.012s: 175 added, 0 updated, 0 deleted, 0 unchanged (1393814B written)
+tun: session ab-1d58f9b48ddd-1-0: started a new session sandbox (Bazel server starts with this command); remote cache: tun's, through /tun/sock/cache.sock
+Extracting Bazel installation...
+Starting local Bazel server (9.3.0) and connecting to it...
+INFO: Invocation ID: 471c4c5c-1eb9-4360-9292-374265671abf
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+
+Analyzing: 4 targets (25 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (66 packages loaded, 49 targets configured)
+
+Analyzing: 4 targets (84 packages loaded, 849 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (101 packages loaded, 6800 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 7980 targets configured)
+
+INFO: Analyzed 4 targets (109 packages loaded, 8043 targets configured).
+[8 / 33] checking cached actions
+[8 / 33] [Prepa] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]
+[8 / 33] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]; 1s remote-cache
+ERROR: /tun/out/base/external/rules_go++go_sdk+go_sdk/BUILD.bazel:51:30: GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool] failed: Failed to query remote execution capabilities: UNAVAILABLE: HTTP status code 502
+invalid content-type: null
+trailers: Metadata(:status=502,date=Thu, 15 Oct 2026 17:30:06 GMT,content-length=0)
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 24.154s, Critical Path: 3.40s
+INFO: 9 processes: 9 internal.
+ERROR: Build did NOT complete successfully
+FAILED: 
+//internal/server:server_test                                         NO STATUS
+//internal/workspace:workspace_test                                   NO STATUS
+
+Executed 0 out of 2 tests: 2 were skipped.
+INFO: Build Event Protocol files produced successfully.
+tun: bazel test exit=34 after 24.7s: 1 of 1 targets failed: //internal/workspace:workspace
+tun: job 20261015T172955579690-947fc614 exited exit=34 after 24.788s (0.009s queued)

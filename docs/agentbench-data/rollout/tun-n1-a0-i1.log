@@ -1,0 +1,77 @@
+tun: server unavailable, retrying
+tun: job 20261015T143620484825-1cebd1ed (session ab-5cdb329b6dc0-1-0)
+tun: sync: 156 manifest entries (13868B sent), uploaded 139 of 139 files (387716B sent) in 225.729s
+tun: running on hub
+tun: session ab-5cdb329b6dc0-1-0 (120af9ab721906c9f279): synced workspace in 0.068s: 156 added, 0 updated, 0 deleted, 0 unchanged (1321202B written)
+tun: session ab-5cdb329b6dc0-1-0: started a new session sandbox (Bazel server starts with this command); remote cache: tun's, through /tun/sock/cache.sock
+Extracting Bazel installation...
+Starting local Bazel server (9.3.0) and connecting to it...
+INFO: Invocation ID: ed613603-8cde-4f04-bc5a-b05fc13052d9
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Loading: 0 packages loaded
+    currently loading: internal/server ... (2 packages)
+Analyzing: 4 targets (2 packages loaded)
+Analyzing: 4 targets (4 packages loaded)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+Analyzing: 4 targets (6 packages loaded, 6 targets configured)
+
+Analyzing: 4 targets (10 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (11 packages loaded, 8 targets configured)
+
+Analyzing: 4 targets (23 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (47 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (64 packages loaded, 9 targets configured)
+
+Analyzing: 4 targets (77 packages loaded, 157 targets configured)
+
+Analyzing: 4 targets (82 packages loaded, 1060 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (88 packages loaded, 1251 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 1337 targets configured)
+
+Analyzing: 4 targets (105 packages loaded, 2489 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2495 targets configured)
+
+Analyzing: 4 targets (106 packages loaded, 2495 targets configured)
+
+Analyzing: 4 targets (109 packages loaded, 8042 targets configured)
+[1 / 1] no actions running
+INFO: Analyzed 4 targets (109 packages loaded, 8042 targets configured).
+[8 / 33] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]; 0s remote-cache
+[8 / 33] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]; 1s remote-cache, linux-sandbox
+[8 / 33] GoToolchainBinaryBuild external/rules_go++go_sdk+go_sdk/builder [for tool]; 10s remote-cache, linux-sandbox
+[9 / 33] [Prepa] Creating symlink external/rules_go++go_sdk+go_sdk/builder_reset/builder [for tool]
+[13 / 33] GoStdlib external/rules_go+/stdlib_/pkg; 0s remote-cache, linux-sandbox
+[13 / 33] GoStdlib external/rules_go+/stdlib_/pkg; 10s remote-cache, linux-sandbox
+[14 / 33] checking cached actions
+[26 / 34] GoCompilePkg internal/workspace/workspace.a; 0s remote-cache, linux-sandbox ... (2 actions, 1 running)
+[30 / 34] 1 / 2 tests; [Prepa] GoCompilePkgExternal internal/server/server_test_test.external.a
+[34 / 35] 1 / 2 tests; Testing //internal/server:server_test; 0s remote-cache, linux-sandbox
+[34 / 35] 2 / 2 tests; Testing //internal/server:server_test; 1s remote-cache, linux-sandbox
+INFO: Found 2 targets and 2 test targets...
+INFO: Elapsed time: 107.918s, Critical Path: 70.47s
+INFO: 35 processes: 12 internal, 23 linux-sandbox.
+INFO: Build completed successfully, 35 total actions
+INFO: 
+//internal/server:server_test                                            PASSED in 1.6s
+//internal/workspace:workspace_test                                      PASSED in 0.1s
+
+Executed 2 out of 2 tests: 2 tests pass.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+INFO: Build Event Protocol files produced successfully.
+tun: bazel test exit=0 after 108.1s: 2 tests passed
+tun: job 20261015T143620484825-1cebd1ed exited exit=0 after 108.219s (0.000s queued)
