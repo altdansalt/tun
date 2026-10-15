@@ -368,7 +368,7 @@ Errors: JSON `{"error": "..."}` with proper status codes; malformed query parame
 
 `--cache-dir DIR` enables stdlib-only REAPI gRPC over h2c on the existing HTTP listener
 and `DATA/cache.sock` (override with `--cache-socket`). Relative DIR is under DATA.
-Both endpoints require `x-tun-token` gRPC metadata. Supports Capabilities, CAS
+Both endpoints accept `x-tun-token` or `authorization: Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS
 (FindMissingBlobs, BatchUpdateBlobs, BatchReadBlobs, GetTree), ActionCache and ByteStream
 (Read, Write, QueryWriteStatus), SHA256 and identity compression. No execution service.
 `--cache-max-size` bounds disk storage with LRU eviction, including partial uploads;

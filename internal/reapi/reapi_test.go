@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func testServer(t *testing.T) (*Handler, string, string) {
@@ -153,11 +154,24 @@ func TestBazelCache(t *testing.T) {
 	os.WriteFile(filepath.Join(work, "BUILD.bazel"), []byte(`genrule(name="leaf", outs=["leaf.txt"], cmd="head -c 3145728 /dev/zero > $@")
 genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf) > $@")`), 0600)
 	root := filepath.Join(t.TempDir(), "root")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bazel", "--output_user_root="+root, "shutdown")
+		cmd.Dir = work
+		cmd.WaitDelay = time.Second
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Logf("bazel shutdown: %v: %s", err, out)
+		}
+	})
 	run := func(extra ...string) string {
 		t.Helper()
 		args := []string{"--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
 		args = append(args, extra...)
-		cmd := exec.CommandContext(context.Background(), "bazel", args...)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bazel", args...)
+		cmd.WaitDelay = 3 * time.Second
 		cmd.Dir = work
 		out, e := cmd.CombinedOutput()
 		if e != nil {

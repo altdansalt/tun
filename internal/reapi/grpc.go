@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type Handler struct {
 	Store             *Store
 	Token             string
 	AllowActionWrites bool
+	idleTimeout       time.Duration // zero uses two minutes
 }
 
 func Protocols() *http.Protocols {
@@ -64,6 +66,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code := 0
 	message := ""
 	defer func() {
+		_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 		w.Header().Set("grpc-status", strconv.Itoa(code))
 		w.Header().Set("grpc-message", url.PathEscape(message))
 	}()
@@ -74,7 +77,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		message = e.Error()
 	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Tun-Token")), []byte(h.Token)) != 1 {
+	token := r.Header.Get("X-Tun-Token")
+	if token == "" {
+		token, _ = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(h.Token)) != 1 {
 		fail(16, fmt.Errorf("missing or wrong x-tun-token"))
 		return
 	}
@@ -82,7 +89,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(3, fmt.Errorf("gRPC requires HTTP/2 POST"))
 		return
 	}
-	timeout := 2 * time.Minute
+	idle := h.idleTimeout
+	if idle == 0 {
+		idle = 2 * time.Minute
+	}
+	var deadline time.Time
 	if t := r.Header.Get("grpc-timeout"); t != "" {
 		if len(t) < 2 || len(t) > 9 {
 			fail(3, fmt.Errorf("invalid grpc-timeout"))
@@ -95,22 +106,55 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(3, fmt.Errorf("invalid grpc-timeout"))
 			return
 		}
-		if n <= int64(timeout/u) {
-			timeout = time.Duration(n) * u
+		if n <= int64((1<<63-1)/u) {
+			deadline = time.Now().Add(time.Duration(n) * u)
 		}
 	}
 	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(timeout))
-	_ = rc.SetWriteDeadline(time.Now().Add(timeout))
-	b, e := frameRead(r.Body)
+	var readDeadline time.Time
+	refresh := func() error {
+		now := time.Now()
+		if !deadline.IsZero() && !now.Before(deadline) {
+			return os.ErrDeadlineExceeded
+		}
+		next := now.Add(idle)
+		if !deadline.IsZero() && deadline.Before(next) {
+			next = deadline
+		}
+		readDeadline = next
+		return rc.SetReadDeadline(next)
+	}
+	read := func() ([]byte, error) {
+		if e := refresh(); e != nil {
+			return nil, e
+		}
+		b, err := frameRead(r.Body)
+		// HTTP/2 may return an opaque timeout error without net.Error.
+		if err != nil && !time.Now().Before(readDeadline) {
+			return nil, os.ErrDeadlineExceeded
+		}
+		return b, err
+	}
+	write := func(b []byte) error {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return os.ErrDeadlineExceeded
+		}
+		// Bound stalled consumers, refreshing the idle limit for each message.
+		_ = rc.SetWriteDeadline(time.Now().Add(idle))
+		return frameWrite(w, b)
+	}
+	b, e := read()
 	if e != nil {
 		fail(3, e)
 		return
 	}
 	method := r.URL.Path
 	if method != "/google.bytestream.ByteStream/Write" {
-		if _, err := frameRead(r.Body); err != io.EOF {
-			fail(3, fmt.Errorf("unary request must contain exactly one message"))
+		if _, err := read(); err != io.EOF {
+			if err == nil {
+				err = fmt.Errorf("unary request must contain exactly one message")
+			}
+			fail(3, err)
 			return
 		}
 	}
@@ -144,6 +188,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c := int64(0)
 			if e != nil {
 				c = 3
+				if errors.Is(e, errCapacity) {
+					c = 8
+				}
 			}
 			out = append(out, bytesField(1, msg(bytesField(1, d), bytesField(2, intField(1, c))))...)
 		}
@@ -221,7 +268,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				fail(5, e)
 				return
 			}
-			if e = frameWrite(w, bytesField(1, data)); e != nil {
+			if e = write(bytesField(1, data)); e != nil {
+				fail(13, e)
 				return
 			}
 			for _, node := range all(data, 2) {
@@ -267,7 +315,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, e := reader.Read(buf)
 			if n > 0 {
-				if frameWrite(w, bytesField(10, buf[:n])) != nil {
+				if err := write(bytesField(10, buf[:n])); err != nil {
+					fail(13, err)
 					return
 				}
 			}
@@ -296,6 +345,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			count, err := h.Store.appendUpload(name, d, get(b, 2).v, get(b, 10).b, get(b, 3).v != 0)
 			if err != nil {
 				c := 3
+				if errors.Is(err, errCapacity) {
+					c = 8
+				}
 				if errors.Is(err, errOffset) {
 					c = 11
 				}
@@ -306,7 +358,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				out = intField(1, count)
 				break
 			}
-			b, e = frameRead(r.Body)
+			b, e = read()
 			if e != nil {
 				fail(3, e)
 				return
@@ -324,9 +376,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out = msg(intField(1, int64(get(d, 2).v)), intField(2, 1))
 		} else {
 
-			h.Store.mu.Lock()
-			info, err := os.Stat(h.Store.uploadPath(name))
-			h.Store.mu.Unlock()
+			p := h.Store.uploadPath(name)
+			lock := h.Store.fileLock(filepath.Base(p))
+			lock.Lock()
+			info, err := os.Stat(p)
+			lock.Unlock()
 			if err != nil {
 				fail(5, os.ErrNotExist)
 				return
@@ -337,7 +391,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(12, fmt.Errorf("unknown method"))
 		return
 	}
-	if e = frameWrite(w, out); e != nil {
+	if e = write(out); e != nil {
+		fail(13, e)
 		return
 	}
 }

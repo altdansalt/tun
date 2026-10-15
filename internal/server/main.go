@@ -201,7 +201,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		cache := &reapi.Handler{Store: store, Token: s.Token(), AllowActionWrites: *cacheWrites}
 		apiHandler := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") &&
+				(strings.HasPrefix(r.URL.Path, "/build.bazel.remote.execution.v2.") || strings.HasPrefix(r.URL.Path, "/google.bytestream.ByteStream/")) {
 				cache.ServeHTTP(w, r)
 			} else {
 				apiHandler.ServeHTTP(w, r)

@@ -193,6 +193,19 @@ func TestServeCache(t *testing.T) {
 		}
 		tr.CloseIdleConnections()
 	}
+	// gRPC content types on service routes must remain in the HTTP router.
+	req, _ := http.NewRequest("POST", base+"/v1/jobs/missing/ports/8080/service.Method", bytes.NewReader(make([]byte, 5)))
+	req.Header.Set("Content-Type", "application/grpc")
+	req.Header.Set("X-Tun-Token", auth)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusNotFound || strings.HasPrefix(resp.Header.Get("Content-Type"), "application/grpc") {
+		t.Fatalf("service routing: status=%d headers=%v body=%s err=%v", resp.StatusCode, resp.Header, body, err)
+	}
 	input.Close()
 	select {
 	case code := <-done:

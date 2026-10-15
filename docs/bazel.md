@@ -174,8 +174,8 @@ The advertised API version is 2.0, SHA256, with no execution capability.
 `--cache-action-writes=false` rejects action updates with PERMISSION_DENIED and advertises
 updates disabled. Default is allow while builds execute locally. The handler's write
 policy is the future executor-only authorization seam; executor credentials and sandbox
-socket binding are not part of this change. Both TCP and Unix endpoints currently require
-`x-tun-token` metadata. Thus the future token-free sandbox socket described above remains
+socket binding are not part of this change. Both TCP and Unix endpoints accept
+`x-tun-token` or `authorization: Bearer TOKEN` metadata. Thus the future token-free sandbox socket described above remains
 integration work. Use `--remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN`;
 add `--remote_proxy=unix:PATH` to use the Unix endpoint. `--cache-socket` overrides its
 path. Startup prints a short `/proc/PID/fd/FD/name` alias usable when DATA paths exceed
@@ -184,8 +184,10 @@ connection refusal; a live listener is never replaced.
 
 ByteStream uploads persist partial files under the cache directory, can resume at the
 reported offset, and are evictable (NOT_FOUND means restart). Reads pin open files through
-concurrent eviction and stream 64KiB messages. Requests honor `grpc-timeout` with a two
-minute server cap. ActionResult lookups check referenced CAS data so eviction produces cache misses.
+concurrent eviction and stream 64KiB messages. Requests honor uncapped `grpc-timeout` deadlines. A two-minute idle
+timeout refreshes on each stream message; an expired request read returns
+DEADLINE_EXCEEDED trailers. Stalled response consumers are bounded by the same
+per-message idle write limit. ActionResult lookups check referenced CAS data so eviction produces cache misses.
 Opaque ActionResult protobuf is retained, preserving fields unknown
 to this cache. This is a cache milestone, not the complete remote execution protocol.
 
@@ -216,3 +218,10 @@ artifacts exercising multi-message ByteStream uploads/downloads, Unix proxy, and
 assertion that minimal downloads leave intermediate output bytes absent. Final storage
 restart/budget, concurrency, protocol, and serve-flag checks passed with vet/build in
 `20261015T080907179208-0fe8e4b8` (7.837s).
+
+Review hardening: storage builds its size/LRU index once at Open; writes and chunks
+update it in constant time and only evict above budget. Disk I/O runs outside the
+index mutex. Partial uploads keep incremental SHA-256 state in memory and rehash
+only on first resume after restart. Failed eviction removals are logged and skipped,
+without failing committed writes. Bazel test invocations have bounded contexts,
+WaitDelay and shutdown cleanup; CI has an explicit ten-minute Go test timeout.

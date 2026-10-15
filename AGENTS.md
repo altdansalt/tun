@@ -5,7 +5,7 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 ## Building and testing
 - **Build and test with tun itself** (a shared tun server is at $TUN_URL, or the default local address; the
   `tun` binary is on PATH, built from main):
-  - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race`, in a sandboxed copy of your working tree.
+  - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race -timeout=10m`, in a sandboxed copy of your working tree.
   - Subsets: `tun run -e TEST_FLAGS='-run TestX -v' -- ./scripts/ci.sh` (env is NOT forwarded unless `-e`).
     ci.sh splits TEST_FLAGS like xargs (quotes group, nothing is evaluated), so alternations work as
     `tun run -e TEST_FLAGS='-run "TestA|TestB" -v' -- ./scripts/ci.sh` (or `-e TEST_FLAGS="-run 'A|B'"`).
