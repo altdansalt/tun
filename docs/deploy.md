@@ -72,3 +72,18 @@ Full vet/build/race tests and both CLI smoke suites passed in remote tun job
 `20261015T103157856778-48c41529` (177.261s, 0.021s queued). That run measured
 hub drain 2.863s and runner drain 2.723s, and also checked runner loss, replacement,
 network isolation and graceful SIGTERM completion in the existing runner suite.
+
+After merging main's Bazel M0 and automatic cache changes, full vet/build/race CI
+and both CLI smoke suites passed in `20261015T104057798547-68955cf4`
+(301.511s, 0.116s queued). Hub and runner drain times were 2.863s and 2.691s.
+The ambiguous-proxy retry/restart and short-interval heartbeat regressions also
+passed in targeted job `20261015T103850336094-4482b18b` (11.230s).
+
+Extra full Bazel validation, `20261015T104058978970-a6b0a516` (353.514s), passed
+the BUILD source coverage check and built all targets. Five of eight test targets
+passed. The three real-Bazel targets failed on the nested-sandbox download/DNS
+limitation already recorded in docs/bazel.md (client TestBazelReal, reapi
+TestBazelCache, scripts/e2e_test); the standard CI above passes these real-Bazel
+checks. That environment limitation remains unresolved. Bazel setup on this runner
+spent about 52s building its Go toolchain helper and 86s building its standard
+library before project tests. No Bazel architecture deviation was needed.
