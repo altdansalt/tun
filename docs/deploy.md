@@ -8,6 +8,9 @@ finish. Both commands accept --drain-timeout (default 15m). Restart latency is t
 remaining admitted work, capped by that timeout. Do not drain every runner before
 a hub with queued jobs: it needs executor capacity to empty its queue.
 
+For the first rollout, wait for existing old-version processes to become idle before
+restarting: replacing their binary cannot retrofit draining into a running old process.
+
 Install the new clients first: they retry connection failures and HTTP 502/503
 for up to 16m per request, with backoff and
 `tun: server unavailable, retrying`. Log streams resume at their byte offset on

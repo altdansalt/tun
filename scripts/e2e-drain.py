@@ -81,9 +81,11 @@ with tempfile.TemporaryDirectory() as tmp:
                 worker = launch(rargs, name+"-worker2", env)
                 until(lambda: json.loads(urllib.request.urlopen(url+"/v1/healthz").read())["runners"])
             else:
-                assert queued.wait(timeout=10) == 0
-                assert contents(name+"-queued", "out") == "queued\n"
+                # The queued command can finish before its client next polls. Restart
+                # before waiting for that client to fetch persisted logs and status.
                 hub = launch(args, name+"-server2")
+                assert queued.wait(timeout=25) == 0
+                assert contents(name+"-queued", "out") == "queued\n"
                 assert retry.wait(timeout=25) == 0
                 assert contents(name+"-retry", "out") == "resumed\n"
                 assert "tun: server unavailable, retrying" in contents(name+"-retry", "err")
