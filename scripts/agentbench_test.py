@@ -61,7 +61,7 @@ class BenchmarkTest(unittest.TestCase):
             formatter.write_text('#!/bin/sh\nexit 0\n')
             formatter.chmod(0o755)
             tun = bin_dir / 'tun'
-            tun.write_text('#!/bin/sh\ngit diff --exit-code >/dev/null && exit 99\necho "tun: job test-job done"\necho "tun: bazel test exit=0 after 2s: 1 tests passed"\n')
+            tun.write_text('#!/bin/sh\ngit diff --stat\ngit diff | sha256sum\necho "tun: job test-job done"\necho "tun: bazel test exit=0 after 2s: 1 tests passed"\n')
             tun.chmod(0o755)
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             server.tokens = []
@@ -69,14 +69,17 @@ class BenchmarkTest(unittest.TestCase):
             thread.start()
             try:
                 with patch.dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'], TUN_TOKEN='test-token', TUN_URL='http://127.0.0.1:%d' % server.server_port):
-                    subprocess.run(['python3', str(Path(b.__file__)), '--repo', str(repo), '--systems', 'tun', '--agents', '3', '--iterations', '3', '--out', str(root / 'out')], check=True)
+                    subprocess.run(['python3', str(Path(b.__file__)), '--repo', str(repo), '--systems', 'tun', '--agents', '3', '--iterations', '3', '--baselines', '--out', str(root / 'out')], check=True)
                 rows = [json.loads(line) for line in (root / 'out/results.jsonl').read_text().splitlines()][1:]
-                self.assertEqual(len(rows), 9)
+                self.assertEqual(len(rows), 15)
+                self.assertEqual(sum(r["phase"] == "cold_session" and "--cold" in r["command"] for r in rows), 3)
+                self.assertEqual(sum(r["phase"] == "warm_unchanged" and r["edit"] is None for r in rows), 3)
                 self.assertEqual(len({r['command'][3] for r in rows}), 3)
                 self.assertTrue(all(r['job']['queue_sec'] == 1.25 and r['summary'] and r['exit_code'] == 0 for r in rows))
                 self.assertEqual(set(server.tokens), {'test-token'})
                 self.assertEqual(b.git(repo, 'status', '--porcelain'), '')
-                self.assertEqual(len({r['edit'] for r in rows}), 3)
+                self.assertEqual(len({r['edit'] for r in rows if r['edit']}), 3)
+                self.assertEqual(len({(root / 'out' / r['log']).read_text().splitlines()[0] for r in rows if r['edit']}), 9)
                 self.assertTrue(all(r['started_at'] for r in rows))
                 self.assertEqual(len({r['job']['id'] for r in rows}), 1)
                 b.git(repo, 'checkout', '--detach', 'HEAD')

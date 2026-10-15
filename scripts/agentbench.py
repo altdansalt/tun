@@ -106,6 +106,7 @@ def main():
     p.add_argument('--systems', nargs='+', choices=['tun', 'bb'], default=['tun', 'bb'])
     p.add_argument('--agents', nargs='+', type=int, default=[1, 3])
     p.add_argument('--iterations', type=int, default=5)
+    p.add_argument('--baselines', action='store_true', help='prepend cold-session and unchanged warm commands before edits')
     p.add_argument('--timeout', type=int, default=480, help='seconds per command')
     p.add_argument('--budget', type=int, default=1800, help='total elapsed admission budget, seconds')
     p.add_argument('--out', type=Path, required=True, help='new directory for JSONL, summary and raw logs')
@@ -147,7 +148,7 @@ def main():
             git(repo, 'config', 'buildbuddy.remote-bazel-remote-name', 'origin')
             session = 'ab-%s-%d-%d' % (nonce, n, index)
             try:
-                for iteration in range(a.iterations):
+                for iteration in range(-2 if a.baselines else 0, a.iterations):
                     if time.monotonic() >= deadline:
                         exhausted.set()
                         emit(dict(type='budget_exhausted', system=system, n=n, agent=index, iteration=iteration))
@@ -156,9 +157,11 @@ def main():
                     before = api.get('/v1/healthz') if api else None
                     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
                     start = time.monotonic()
-                    path = edit(repo, a.profile, iteration, '%s-n%d-a%d' % (nonce, n, index))
+                    path = edit(repo, a.profile, iteration, '%s-n%d-a%d' % (nonce, n, index)) if iteration >= 0 else None
                     command = (['tun', 'bazel', '--session', session, '--timeout', str(a.timeout) + 's']
                                if system == 'tun' else ['bb', 'remote', '--remote_runner=grpcs://remote.buildbuddy.dev', '--timeout=' + str(a.timeout) + 's'])
+                    if system == 'tun' and iteration == -2:
+                        command += ['--cold']
                     command += ['test', *targets, '--jobs=2']
                     log = a.out / ('%s-n%d-a%d-i%d.log' % (system, n, index, iteration))
                     code, command_wall, expired = invoke(command, repo, min(a.timeout, max(1, deadline - time.monotonic())), log)
@@ -167,7 +170,7 @@ def main():
                     ids = re.findall(r'tun: job ([0-9A-Za-z-]+)', output)
                     job = api.get('/v1/jobs/' + ids[-1]) if api and ids else None
                     row = dict(type='iteration', system=system, n=n, agent=index, started_at=started_at,
-                               iteration=iteration, phase='first' if iteration == 0 else 'repeat',
+                               iteration=iteration, phase={-2: 'cold_session', -1: 'warm_unchanged'}.get(iteration, 'edit'),
                                edit=path, wall_sec=wall, command_wall_sec=command_wall,
                                exit_code=code, timed_out=expired, command=command,
                                summary=[s for s in output.splitlines() if s.startswith('tun: bazel ')],
