@@ -373,7 +373,7 @@ Errors: JSON `{"error": "..."}` with proper status codes; malformed query parame
 and `DATA/cache.sock` (override with `--cache-socket`). Relative DIR is under DATA.
 Both endpoints accept `x-tun-token` or `authorization: Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS
 (FindMissingBlobs, BatchUpdateBlobs, BatchReadBlobs, GetTree), ActionCache and ByteStream
-(Read, Write, QueryWriteStatus), SHA256 and identity compression. Execution.Execute and WaitExecution run actions through the shared job FIFO on local slots and action-capable runners; operations remain reconnectable until hub shutdown.
+(Read, Write, QueryWriteStatus), SHA256 and identity compression. Execution.Execute and WaitExecution run actions through the shared job FIFO on local slots and action-capable runners; completed operations remain reconnectable for one hour, until hub shutdown.
 `--cache-max-size` bounds disk storage with LRU eviction, including partial uploads;
 `--cache-action-writes=true` opts into client action updates (default deny; executor results are written internally). Socket permissions
 are 0600. See docs/bazel.md for protocol limits and Bazel flags.

@@ -35,7 +35,8 @@ type operation struct {
 	completed time.Time
 }
 
-// Execution retains operations until shutdown. Work is independent of RPC lifetimes.
+// Execution retains completed operations for one hour, pruning on new requests.
+// Work is independent of RPC lifetimes.
 // Run must return an ActionResult or an infrastructure error; nonzero command exit
 // codes belong in ActionResult, not in the ExecuteResponse status.
 type Execution struct {
@@ -49,7 +50,6 @@ type Execution struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
-	next              uint64
 }
 
 // NewExecution uses slots workers, or delegates all queueing to Run when slots < 0.
@@ -212,11 +212,11 @@ func (e *Execution) execute(o *operation) {
 	if !e.externalScheduler {
 		MarkExecuting(ctx)
 	}
-	action, err := e.Store.read("cas-", o.digest)
+	action, err := inputRead(e.Store, o.digest)
 	var result []byte
 	if err == nil {
 		var command []byte
-		command, err = e.Store.read("cas-", get(action, 1).b)
+		command, err = inputRead(e.Store, get(action, 1).b)
 		if err == nil {
 			result, err = e.Run(ctx, action, command)
 		}

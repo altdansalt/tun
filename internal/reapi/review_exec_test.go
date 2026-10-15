@@ -190,3 +190,57 @@ func TestSweepReadOnlyExecRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCacheWriteDiagnosticField(t *testing.T) {
+	s, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(b []byte) []byte {
+		d := digest(b)
+		if err := s.PutBlob(d, b); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	command := put(bytesField(1, []byte("true")))
+	action := put(msg(bytesField(1, command), bytesField(2, put(nil))))
+	e := NewExecution(s, 1, func(context.Context, []byte, []byte) ([]byte, error) {
+		// Force the AC rename to fail by occupying its filename with a directory.
+		k, _ := key(action)
+		if err := os.Mkdir(filepath.Join(s.dir, "ac-"+k), 0700); err != nil {
+			return nil, err
+		}
+		return intField(4, 0), nil
+	})
+	defer e.Close()
+	var response []byte
+	_, err = e.stream(context.Background(), "/Execute", bytesField(6, action), func(b []byte) error {
+		if get(b, 3).v != 0 {
+			response = get(get(b, 5).b, 2).b
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(get(response, 5).b) == 0 || get(response, 4).b != nil {
+		t.Fatalf("wrong diagnostic field: %x", response)
+	}
+}
+
+func TestExecutorCanonicalOutputs(t *testing.T) {
+	s, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := digest(nil)
+	if err = s.PutBlob(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	command := msg(bytesField(1, []byte("/bin/sh")), bytesField(1, []byte("-c")), bytesField(1, []byte("echo hi > out")), bytesField(7, []byte("out")), bytesField(7, []byte("./out")))
+	result, err := LocalExecutor(s, t.TempDir(), "none")(context.Background(), bytesField(2, root), command)
+	if err != nil || len(all(result, 2)) != 1 {
+		t.Fatalf("%x %v", result, err)
+	}
+}
