@@ -395,3 +395,9 @@ An earlier superseded full CI job (`20261015T082110926143-4d167784`) stopped
 producing package results after REAPI/sandbox; it was canceled after the final full
 run passed. Its stall cause was not established. Separate server/workspace race
 tests passed in `20261015T082410099198-c3a8b234` (4.655s job time).
+
+## Orderly deployment
+Hub/runner deploys now drain admitted work (default 15m); see [deploy.md](deploy.md).
+Queued Bazel commands finish before shutdown. Session disk state survives, but the
+sandbox/JVM is recreated on the next command. Live sandbox re-adoption remains future
+work; this does not change the milestone direction.

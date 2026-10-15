@@ -17,7 +17,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 ```
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
           [--net auto|private|host] [--local-slots N] [--runner-timeout 30s]
-          [--ephemeral] [--exit-on-eof]
+          [--ephemeral] [--exit-on-eof] [--drain-timeout 15m]
           [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
           [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
@@ -43,7 +43,7 @@ tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>      
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
-           [--net auto|private|host] [--min-free 10%]
+           [--net auto|private|host] [--min-free 10%] [--drain-timeout 15m]
 tun runners                       (JSON lines: the server's live runners)
 tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
 tun sessions [--client NAME | --mine]   (JSON lines: the server's Bazel sessions)
@@ -69,7 +69,9 @@ For testing, `tun serve --ephemeral` uses a random loopback port and a fresh tem
 data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
 it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
 stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
-diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
+diagnostics go to stderr. SIGINT/SIGTERM drain admitted jobs (including queued commands) for up to --drain-timeout
+(default 15m), rejecting new submissions with retryable 503s; then stop the server.
+See docs/deploy.md for required systemd settings and session restart behavior.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
 `scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server
 (with extra `tun serve` flags from `$DEV_TUN_SERVE_ARGS`, word-split),
@@ -258,7 +260,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
   `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
   (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
-  work, kills its jobs, reports them `failed` ("runner N shut down") and tells the hub it is
+  work, finishes its jobs up to --drain-timeout (default 15m) and tells the hub it is
   leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
   signal quits at once. A runner flocks its data dir: a second runner on the same dir refuses
   to start. All its hub requests have timeouts (2 minutes; polls 90s).
@@ -411,7 +413,8 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   written)"); then the command runs in the session sandbox. Timeout and cancel send SIGINT to
   the bazel client (Bazel cancels the command), SIGKILL after the kill grace, and if the
   command still hasn't ended after twice the grace, kill the session sandbox. A server
-  shutdown kills the sandboxes; the next server marks running bazel jobs failed. `tun get` of
+  orderly shutdown finishes admitted commands before killing the sandboxes; after a crash
+  the next server marks running bazel jobs failed. `tun get` of
   a bazel job is a 409 (outputs stay in the session's output base).
 - **Sync.** The client lists the same files as for `tun run` (minus top-level `bazel-*`
   symlinks: Bazel's convenience links) and builds a manifest: entries `{p, t: f|d|l, m (perm
@@ -533,3 +536,8 @@ Service-to-service networking (with isolation, jobs can't reach each other at al
 raw TCP/UDP egress and DNS from isolated jobs, unauthenticated/public URLs, TLS
 termination, multi-host scheduling beyond runners (labels, affinity, services on runners), persistent
 workspaces and incremental upload for `tun run` (tun bazel has both), snapshots.
+
+## Orderly deploys
+See docs/deploy.md. CLI requests retry connection failures and HTTP 502/503 for up to
+16m with backoff. Runners finish jobs while heartbeating with zero advertised slots.
+Crashes and expired drain timeouts retain the failure behavior described above.

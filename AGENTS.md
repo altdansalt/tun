@@ -55,3 +55,7 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 - Keep it small and readable. Stdlib only. `gofmt` everything.
 - Tests are required for behavior you add. Prefer integration tests through the real HTTP server.
 - Commit with clear messages. Don't rewrite others' history.
+
+## Deploy
+See [docs/deploy.md](docs/deploy.md): atomic binary replacement, client retries,
+SIGTERM draining, and required systemd KillMode/TimeoutStopSec overrides.
