@@ -328,3 +328,26 @@ load). Subsequent vet/build/race tests covering the hardened paths and both loca
 and separate-runner Bazel builds passed in `20261015T084836390529-304e8ec6`
 (111.518s). Exact-environment/network namespace tests and both Bazel execution
 integrations passed in `20261015T085232460964-85588474`.
+
+The M0 self-build benchmark uses `scripts/bench-exec-self.sh`. While M0 is a
+separate branch, prepare its overlay on the VM before submitting the tun job:
+
+```sh
+git archive origin/feat/bazel-m0 $(git ls-tree -r --name-only origin/feat/bazel-m0 | rg '(^|/)(BUILD\.bazel|MODULE\.bazel(\.lock)?|\.bazelrc|\.bazelversion|bazel-e2e\.sh)$') > m0-build.tar
+tun run --tail 100 --timeout 12m -e DEV_TUN_SERVE_ARGS='--cache-dir=reapi --local-slots=2' -c 'scripts/dev-tun.sh ./scripts/bench-exec-self.sh'
+rm m0-build.tar
+```
+
+The script copies the workspace to TMPDIR, overlays the M0 files and refreshes
+internal package libraries to include packages added since the M0 snapshot. It
+runs `bazel build //...` with M0's downloaded Go 1.25.14 SDK. It does not modify
+this branch's BUILD files or run heavy Bazel commands on the VM.
+
+Self-build debugging exposed a required wire detail: output Directory blobs must
+use canonical proto3 serialization, including field order and omission of default
+scalar values. Bazel parses and reserializes Tree children to index them by digest;
+equivalent but noncanonical protobuf made Bazel 9.3.0 crash in parseDirectory
+(job `20261015T084928396704-ca5de92d`, 260.326s). The encoder now groups Directory
+fields by number and omits false executable bits and zero digest sizes. Regressions
+cover exact canonical bytes, mixed nested file/directory trees and empty files and
+directories, plus a real Bazel tree-producing action and a dependent action.

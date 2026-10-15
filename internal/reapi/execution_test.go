@@ -1,6 +1,7 @@
 package reapi
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/altdansalt/tun/internal/sandbox"
@@ -89,11 +90,11 @@ func TestBazelExecution(t *testing.T) {
 	os.WriteFile(filepath.Join(work, "BUILD.bazel"), []byte(`load(":tree.bzl", "tree_rule")
 tree_rule(name="tree")
 genrule(name="leaf", outs=["leaf.txt"], cmd="echo remote-output > $@")
-genrule(name="top", srcs=[":leaf", ":tree"], outs=["top.txt"], cmd="cat $(location :leaf) $(location :tree)/sub/file > $@")
+genrule(name="top", srcs=[":leaf", ":tree"], outs=["top.txt"], cmd="cat $(location :leaf) $(location :tree)/mixed/a/leaf > $@")
 genrule(name="bad", outs=["bad.txt"], cmd="echo deliberate-action-failure >&2; exit 1")`), 0600)
 	os.WriteFile(filepath.Join(work, "tree.bzl"), []byte(`def _tree(ctx):
     out = ctx.actions.declare_directory(ctx.label.name + ".dir")
-    ctx.actions.run_shell(outputs=[out], command="mkdir -p %s/sub; echo tree-output > %s/sub/file" % (out.path, out.path))
+    ctx.actions.run_shell(outputs=[out], command="mkdir -p %s/mixed/a; echo marker > %s/mixed/z; echo tree-output > %s/mixed/a/leaf" % (out.path, out.path, out.path))
     return [DefaultInfo(files=depset([out]))]
 tree_rule = rule(implementation=_tree)
 `), 0600)
@@ -287,5 +288,36 @@ func TestExecutorIsolation(t *testing.T) {
 	host, _ := os.Readlink("/proc/self/ns/net")
 	if err != nil || strings.TrimSpace(string(out)) == host {
 		t.Fatalf("network not isolated: %q host=%s error=%v", out, host, err)
+	}
+}
+
+func TestOutputDirectoryCanonical(t *testing.T) {
+	store, err := Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	os.Mkdir(filepath.Join(work, "a"), 0755)
+	os.Mkdir(filepath.Join(work, "empty"), 0755)
+	os.WriteFile(filepath.Join(work, "a", "leaf"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(work, "z"), nil, 0644)
+	root, err := os.OpenRoot(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	actual, children, err := collectDirectory(store, root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Proto3 default scalars must be absent, and fields must be serialized in
+	// field-number order. Bazel reserializes child Directories to compute their
+	// lookup digests when parsing a Tree; merely equivalent protobuf is insufficient.
+	empty := bytesField(1, get(digest(nil), 1).b)
+	file := msg(bytesField(1, []byte("leaf")), bytesField(2, digest([]byte("x"))))
+	child := bytesField(1, file)
+	expected := msg(bytesField(1, msg(bytesField(1, []byte("z")), bytesField(2, empty))), bytesField(2, msg(bytesField(1, []byte("a")), bytesField(2, digest(child)))), bytesField(2, msg(bytesField(1, []byte("empty")), bytesField(2, empty))))
+	if !bytes.Equal(actual, expected) || len(children) != 2 || !bytes.Equal(children[0], child) || len(children[1]) != 0 {
+		t.Fatalf("noncanonical Directory\n got %x children %x\nwant %x child %x", actual, children, expected, child)
 	}
 }

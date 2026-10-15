@@ -269,7 +269,11 @@ func uploadFile(s BlobStore, r *os.Root, name, label string, info os.FileInfo) (
 	if info.Mode()&0111 != 0 {
 		ex = 1
 	}
-	return msg(bytesField(1, []byte(label)), bytesField(2, d), intField(4, ex)), nil
+	node := msg(bytesField(1, []byte(label)), bytesField(2, d))
+	if ex != 0 {
+		node = append(node, intField(4, ex)...)
+	}
+	return node, nil
 }
 func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, error) {
 	f, err := r.Open(p)
