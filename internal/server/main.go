@@ -65,6 +65,13 @@ memory): a new one evicts the least recently used idle one. tun bazel commands t
 slots like other jobs. Each client has its own Bazel caches (bazelisk downloads, repository
 cache, disk cache) in $DATA/bazel.
 
+Remote cache (--cache-dir, default "reapi" in the data dir; --cache-dir= disables it): Bazel's
+remote cache protocol (REAPI gRPC over h2c) on this listener and on $DATA/cache.sock, both
+with the token (Bazel: --remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN).
+Every tun bazel session uses it without asking: tun's bazelrc points Bazel at the session's
+own socket, which needs no token. File contents are shared (they are verified); action
+results are per client: what a client uploads answers only its own lookups.
+
 flags:
 `
 
@@ -95,7 +102,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
-	cacheDir := fs.String("cache-dir", "", "enable REAPI gRPC cache in this directory (relative to data dir); disabled if empty")
+	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache in this directory (relative to the data dir); empty disables it")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
 	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
@@ -194,9 +201,23 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *runnerTimeout < time.Second {
 		return fail("--runner-timeout must be at least 1s")
 	}
+	var store *reapi.Store
+	if *cacheDir != "" {
+		dir := *cacheDir
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(*data, dir)
+		}
+		limit, err := parseSize(*cacheMax)
+		if err != nil {
+			return fail("--cache-max-size: %v", err)
+		}
+		if store, err = reapi.Open(dir, limit); err != nil {
+			return fail("cache: %v", err)
+		}
+	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf,
-		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed})
+		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed, Cache: store, CacheReadOnly: !*cacheWrites})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
@@ -206,31 +227,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail("listen: %v", err)
 	}
 	handler := s.Handler()
-	if *cacheDir != "" {
-		dir := *cacheDir
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(s.cfg.DataDir, dir)
-		}
-		limit, err := parseSize(*cacheMax)
-		if err != nil {
-			ln.Close()
-			return fail("--cache-max-size: %v", err)
-		}
-		store, err := reapi.Open(dir, limit)
-		if err != nil {
-			ln.Close()
-			return fail("cache: %v", err)
-		}
-		cache := &reapi.Handler{Store: store, Token: s.Token(), AllowActionWrites: *cacheWrites}
-		apiHandler := handler
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") &&
-				(strings.HasPrefix(r.URL.Path, "/build.bazel.remote.execution.v2.") || strings.HasPrefix(r.URL.Path, "/google.bytestream.ByteStream/")) {
-				cache.ServeHTTP(w, r)
-			} else {
-				apiHandler.ServeHTTP(w, r)
-			}
-		})
+	if store != nil {
+		cache := s.CacheHandler()
 		socket := *cacheSocket
 		if socket == "" {
 			socket = filepath.Join(s.cfg.DataDir, "cache.sock")

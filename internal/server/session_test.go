@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,5 +69,31 @@ func TestBazelJobDropsManifest(t *testing.T) {
 		if m != nil {
 			t.Errorf("job %s (%s) still holds its manifest", id, j.State)
 		}
+	}
+}
+
+// TestBazelrc: what tun.bazelrc says with no remote cache, with one, read-only, and with
+// executors (remote execution through the same socket, --jobs from their slots).
+func TestBazelrc(t *testing.T) {
+	s := &Server{cfg: Config{DiskCacheMax: "5G"}}
+	in := sessionPaths{repo: "/tun/cache/repo", disk: "/tun/cache/disk"}
+	local := s.bazelrc("default", in, remoteSetup{})
+	if !strings.Contains(local, "common --repository_cache=/tun/cache/repo\ncommon --disk_cache=/tun/cache/disk\n") || strings.Contains(local, "--remote") {
+		t.Fatalf("no remote cache:\n%s", local)
+	}
+	cache := s.bazelrc("default", in, remoteSetup{socket: "/tun/sock/cache.sock"})
+	if !strings.Contains(cache, "common --remote_cache=grpc://tun\ncommon --remote_proxy=unix:/tun/sock/cache.sock\n") ||
+		strings.Contains(cache, "--disk_cache") || strings.Contains(cache, "--remote_executor") || strings.Contains(cache, "--jobs") || strings.Contains(cache, "--noremote_upload_local_results") {
+		t.Fatalf("remote cache:\n%s", cache)
+	}
+	if ro := s.bazelrc("default", in, remoteSetup{socket: "/s", readOnly: true}); !strings.Contains(ro, "common --noremote_upload_local_results\n") {
+		t.Fatalf("read-only:\n%s", ro)
+	}
+	exec := s.bazelrc("default", in, remoteSetup{socket: "/s", executors: 12})
+	if !strings.Contains(exec, "common --remote_executor=grpc://tun\ncommon --jobs=12\ncommon --remote_local_fallback\n") {
+		t.Fatalf("executors:\n%s", exec)
+	}
+	if note := s.bazelrc("default", in, remoteSetup{note: "no remote cache: why"}); !strings.Contains(note, "# no remote cache: why\n") || strings.Contains(note, "--remote") {
+		t.Fatalf("note:\n%s", note)
 	}
 }

@@ -23,7 +23,12 @@ func testServer(t *testing.T) (*Handler, string, string) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	h := &Handler{Store: s, Token: "secret", AllowActionWrites: true}
+	h := &Handler{Store: s, Token: "secret", AllowActionWrites: true, Client: func(r *http.Request) string {
+		if c := r.Header.Get("X-Test-Client"); c != "" {
+			return c
+		}
+		return "test"
+	}}
 	ln, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		t.Fatal(e)
@@ -49,15 +54,37 @@ func testServer(t *testing.T) (*Handler, string, string) {
 }
 func rpc(t *testing.T, addr, method, token string, b []byte) ([]byte, string) {
 	t.Helper()
+	return rpcAs(t, addr, method, token, "", b)
+}
+
+// rpcAs calls method as client (X-Test-Client; "" for the default). An addr starting with
+// "/" is a unix socket.
+func rpcAs(t *testing.T, addr, method, token, client string, b []byte) ([]byte, string) {
+	t.Helper()
 	frame := make([]byte, 5)
 	binary.BigEndian.PutUint32(frame[1:], uint32(len(b)))
 	frame = append(frame, b...)
-	r, _ := http.NewRequest("POST", "http://"+addr+method, bytes.NewReader(frame))
+	host := addr
+	if strings.HasPrefix(addr, "/") {
+		host = "tun"
+	}
+	r, _ := http.NewRequest("POST", "http://"+host+method, bytes.NewReader(frame))
 	r.Header.Set("Content-Type", "application/grpc")
-	r.Header.Set("X-Tun-Token", token)
+	if token != "" {
+		r.Header.Set("X-Tun-Token", token)
+	}
+	if client != "" {
+		r.Header.Set("X-Test-Client", client)
+	}
 	p := new(http.Protocols)
 	p.SetUnencryptedHTTP2(true)
 	tr := &http.Transport{Protocols: p}
+	if strings.HasPrefix(addr, "/") {
+		socket := addr
+		tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}
+	}
 	defer tr.CloseIdleConnections()
 	resp, e := tr.RoundTrip(r)
 	if e != nil {
@@ -126,6 +153,86 @@ func TestCacheServices(t *testing.T) {
 		t.Fatal(c)
 	}
 }
+
+// TestActionNamespaces: a client's action results answer only its own lookups; shared
+// (executor-written) results answer everyone's, after their own; the shared namespace can't
+// be written over gRPC; a ForClient listener needs no token and ignores the request's
+// identity.
+func TestActionNamespaces(t *testing.T) {
+	h, addr, _ := testServer(t)
+	lookup := "/build.bazel.remote.execution.v2.ActionCache/GetActionResult"
+	update := "/build.bazel.remote.execution.v2.ActionCache/UpdateActionResult"
+	caps := "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
+	action := digest([]byte("action"))
+	req := bytesField(2, action)
+	mine, shared := intField(4, 1), intField(4, 2)
+	if _, c := rpcAs(t, addr, update, "secret", "a", msg(req, bytesField(3, mine))); c != "0" {
+		t.Fatal(c)
+	}
+	if b, c := rpcAs(t, addr, lookup, "secret", "a", req); c != "0" || !bytes.Equal(b, mine) {
+		t.Fatalf("own result: %x %s", b, c)
+	}
+	if _, c := rpcAs(t, addr, lookup, "secret", "b", req); c != "5" {
+		t.Fatalf("another client's result answered b: %s", c)
+	}
+	if e := h.Store.putName(actionName("", get2hash(t, action)), shared); e != nil {
+		t.Fatal(e)
+	}
+	if b, c := rpcAs(t, addr, lookup, "secret", "b", req); c != "0" || !bytes.Equal(b, shared) {
+		t.Fatalf("shared result for b: %x %s", b, c)
+	}
+	if b, c := rpcAs(t, addr, lookup, "secret", "a", req); c != "0" || !bytes.Equal(b, mine) {
+		t.Fatalf("a's own result must come first: %x %s", b, c)
+	}
+
+	// A session socket: the listener is the authentication; the namespace is fixed.
+	dir, e := os.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { dir.Close() })
+	socket := fmt.Sprintf("/proc/self/fd/%d/s", dir.Fd()) // TMPDIR may be too long for sun_path
+	ul, e := net.Listen("unix", socket)
+	if e != nil {
+		t.Fatal(e)
+	}
+	us := &http.Server{Handler: h.ForClient("a"), Protocols: Protocols()}
+	go us.Serve(ul)
+	t.Cleanup(func() { us.Close() })
+	if b, c := rpcAs(t, socket, lookup, "", "b", req); c != "0" || !bytes.Equal(b, mine) {
+		t.Fatalf("session socket of a: %x %s", b, c)
+	}
+	other := bytesField(2, digest([]byte("other")))
+	if _, c := rpcAs(t, socket, update, "", "b", msg(other, bytesField(3, mine))); c != "0" {
+		t.Fatal(c)
+	}
+	if _, c := rpcAs(t, addr, lookup, "secret", "a", other); c != "0" {
+		t.Fatalf("socket writes go to a's namespace: %s", c)
+	}
+	if _, c := rpcAs(t, addr, lookup, "secret", "b", other); c != "5" {
+		t.Fatalf("socket writes must not reach b: %s", c)
+	}
+
+	// Without a client namespace (Client nil) action writes are refused and not advertised.
+	h.Client = nil
+	if _, c := rpcAs(t, addr, update, "secret", "a", msg(req, bytesField(3, mine))); c != "7" {
+		t.Fatalf("shared namespace written over gRPC: %s", c)
+	}
+	if b, c := rpcAs(t, addr, caps, "secret", "", nil); c != "0" || getField(get2(get2(b, 1), 2), 1) != 0 {
+		t.Fatalf("capabilities advertise updates: %x %s", b, c)
+	}
+}
+
+func get2hash(t *testing.T, d []byte) string {
+	k, e := key(d)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return k
+}
+func get2(b []byte, n int) []byte     { return get(b, n).b }
+func getField(b []byte, n int) uint64 { return get(b, n).v }
+
 func TestLRU(t *testing.T) {
 	s, e := Open(t.TempDir(), 6)
 	if e != nil {

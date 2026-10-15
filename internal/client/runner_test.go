@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -89,6 +90,9 @@ func TestRunnerJobs(t *testing.T) {
 	r := ts.tun(ws, "run", "--", "sh", "-c", "echo out; echo err >&2; exit 3")
 	if r.code != 3 || r.stdout != "out\n" || !strings.Contains(r.stderr, "\nerr\n") {
 		t.Errorf("exit/stdout/stderr: %+v", r)
+	}
+	if !regexp.MustCompile(`\ntun: running on runner r[12]\n`).MatchString(r.stderr) {
+		t.Errorf("no running-on line: %+v", r)
 	}
 	r = ts.tun(ws, "run", "-C", "sub", "-e", "FOO=bar", "--", "sh", "-c", `printf '%s %s ' "$FOO" "$(basename "$PWD")"; cat f.txt; test -n "$TUN_JOB_ID"`)
 	if r.code != 0 || r.stdout != "bar sub content" {

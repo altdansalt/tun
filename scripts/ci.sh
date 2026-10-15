@@ -7,6 +7,9 @@
 #   both work. Nothing is evaluated: no globbing, variables, command substitution or pipes.
 #   With -run, the separate vet and build steps are skipped (go test compiles everything it
 #   tests) unless CI_FULL=1, and the run fails if the pattern matched no test in any package.
+# PKGS: the packages to vet, build and test (default ./...), split on whitespace, e.g.
+#   PKGS=./internal/reapi or PKGS='./internal/server ./internal/client'. With PKGS the
+#   end-to-end suites are skipped unless E2E=1.
 # E2E=0: skip the end-to-end smoke suite (scripts/e2e.sh) that full runs do at the end;
 #   E2E=1: run it even with -run.
 set -euo pipefail
@@ -31,7 +34,13 @@ if [ -n "${TEST_FLAGS:-}" ]; then
   fi
   mapfile -d '' flags < <(xargs printf '%s\0' <<<"$TEST_FLAGS")
 fi
+read -r -a pkgs <<<"${PKGS:-./...}"
+if [ "${#pkgs[@]}" = 0 ]; then
+  echo "ci.sh: PKGS is empty" >&2
+  exit 2
+fi
 run=0 check=1
+[ -n "${PKGS:-}" ] && run_e2e=0 || run_e2e=1
 for f in "${flags[@]}"; do
   case $f in
     -run|-run=*|--run|--run=*|-test.run|-test.run=*) run=1 ;;
@@ -41,19 +50,19 @@ done
 
 go version
 if [ "$run" = 0 ] || [ "${CI_FULL:-}" = 1 ]; then
-  go vet ./...
-  go build ./...
+  go vet "${pkgs[@]}"
+  go build "${pkgs[@]}"
 fi
 # End-to-end smoke suite of the real binary (scripts/e2e.sh): on full runs unless E2E=0, and
-# with -run only if E2E=1.
+# with -run or PKGS only if E2E=1.
 e2e() {
-  if [ "${E2E:-$((1 - run))}" = 1 ]; then
+  if [ "${E2E:-$((run_e2e && !run))}" = 1 ]; then
     time scripts/dev-tun.sh ./scripts/e2e.sh
     time DEV_TUN_SERVE_ARGS='--local-slots 0 --runner-timeout 3s' scripts/dev-tun.sh ./scripts/e2e-runners.sh
   fi
 }
 if [ "$run" = 0 ] || [ "$check" = 0 ]; then
-  go test -timeout=10m -race -count=1 "${flags[@]}" ./...
+  go test -timeout=10m -race -count=1 "${flags[@]}" "${pkgs[@]}"
   e2e
   exit 0
 fi
@@ -61,7 +70,7 @@ fi
 out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 status=0
-go test -timeout=10m -race -count=1 "${flags[@]}" ./... 2>&1 | tee "$out" || status=$?
+go test -timeout=10m -race -count=1 "${flags[@]}" "${pkgs[@]}" 2>&1 | tee "$out" || status=$?
 # A package whose tests ran prints "ok  pkg  1.2s" without "[no tests to run]" (or FAIL lines).
 if [ "$status" = 0 ] && ! awk '/^(ok[[:space:]]|--- |FAIL)/ && !/\[no tests to run\]/ {f=1} END {exit !f}' "$out"; then
   echo "ci.sh: FAIL: TEST_FLAGS=${TEST_FLAGS} matched no tests in any package" >&2

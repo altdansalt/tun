@@ -103,6 +103,7 @@ type Health struct {
 	Runners          []RunnerInfo `json:"runners"`
 	Sessions         int          `json:"sessions"` // tun bazel sessions (see GET /v1/sessions)
 	MaxSessions      int          `json:"max_sessions"`
+	RemoteCache      bool         `json:"remote_cache"` // the REAPI cache is on (sessions use it)
 	Disk             *Disk        `json:"disk,omitempty"`
 }
 

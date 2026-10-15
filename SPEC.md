@@ -18,7 +18,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
           [--net auto|private|host] [--local-slots N] [--runner-timeout 30s]
           [--ephemeral] [--exit-on-eof]
-          [--cache-dir DIR] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
+          [--cache-dir reapi] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
           [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
 tun run [flags] -- <argv...>        run argv (no shell)
@@ -78,7 +78,9 @@ For example: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
 CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable explicitly
 (also with `-run` in `TEST_FLAGS`, where it is otherwise skipped). `scripts/ci.sh` splits
 `TEST_FLAGS` like xargs: whitespace separates words, `'...'`/`"..."` group and are removed
-(`-run TestA|TestB` and `-run "A|B"` both work); nothing is globbed or evaluated.
+(`-run TestA|TestB` and `-run "A|B"` both work); nothing is globbed or evaluated. `PKGS`
+(whitespace-separated, default `./...`) selects the packages to vet, build and test; with it
+the smoke suites run only with `E2E=1`.
 
 Exit status of `tun run`: the command's exit code; 128+signal if killed by a signal; 124 on timeout;
 125 for tun's own errors (can't reach server, upload failed, bad flags) with a one-line message on
@@ -87,7 +89,9 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
 Queueing is visible: if the created job is waiting in the FIFO (`queue_position` set), `tun run`
 (not `--json`) prints once to stderr `tun: queued (N ahead, M running)` (N = position - 1, M =
 `running` from healthz), polls the job every 500ms, and when it starts prints
-`tun: started after Xs in queue` before streaming output. SIGINT/SIGTERM while queued cancel it.
+`tun: started after Xs in queue` before streaming output. Non-JSON attached runs then print
+where the job runs, once the server decided: `tun: running on hub` (the server itself) or
+`tun: running on runner NAME` (also `tun bazel`, whose jobs run on the hub). SIGINT/SIGTERM while queued cancel it.
 `tun run --json` adds `queue_sec` and `run_sec` to its object.
 On completion, non-JSON attached runs (including `--tail`) print a final stderr line:
 `tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)` with seconds to three
@@ -363,8 +367,9 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   (`--repository_cache`; Bazel 8+ keep the repository contents cache, fetched repository
   trees, in its `contents/` by default), `disk` at `/tun/cache/disk` (`--disk_cache`),
   `bazelisk` at `/tun/cache/bazelisk` (BAZELISK_HOME; a new one is seeded with a copy of
-  `--bazelisk-seed DIR`'s `downloads/` if given), `tun.bazelrc` read-only at `/tun/tun.bazelrc`, and
-  the tun executable at `/tun/bin/tun`. The server user's home and the data dir are hidden as
+  `--bazelisk-seed DIR`'s `downloads/` if given), `tun.bazelrc` read-only at `/tun/tun.bazelrc`,
+  the tun executable at `/tun/bin/tun`, and with a remote cache the session's `sock/` dir
+  read-only at `/tun/sock` (see Bazel remote cache). The server user's home and the data dir are hidden as
   for jobs; with network isolation the session has its own network namespace and egress
   proxy. With sandbox `none` the same dirs are used at their host paths. The root is
   remounted read-only once everything is mounted. Every bind source of a job or session
@@ -397,10 +402,15 @@ command other than tun's flags (a Bazel startup option) is a usage error.
 - **Command:** `bazel --output_user_root=<out> --output_base=<out>/base --bazelrc=<rc>
   --max_idle_secs=<session-idle + 5m> <args...>` in `<work>/<cwd>`, with env PATH, LANG,
   TERM=dumb, USER, HOME, TMPDIR, BAZELISK_HOME, TUN_SESSION (constant per session, so Bazel's
-  client env doesn't change between commands). `tun.bazelrc` has `common
-  --repository_cache=...`, `common --disk_cache=...`, `common
-  --experimental_disk_cache_gc_max_size=5G`; it is the "user" rc, so the workspace's own
-  `.bazelrc` still applies.
+  client env doesn't change between commands). `tun.bazelrc` (rewritten before each command)
+  has `common --repository_cache=...` and either (no remote cache) `common --disk_cache=...`,
+  `common --experimental_disk_cache_gc_max_size=5G`, or (remote cache, no disk cache: it would
+  be a second copy on the same host) `common --remote_cache=grpc://tun`, `common --remote_proxy=unix:/tun/sock/cache.sock`, `common
+  --experimental_build_event_upload_strategy=local` (BEP keeps local file URIs) and, if the
+  server denies action writes, `common --noremote_upload_local_results`; it is the "user" rc,
+  so the workspace's own `.bazelrc` still applies, and an agent's flags (e.g.
+  `--remote_cache=`) override it. The first command of a sandbox says "started a new session
+  sandbox ...; remote cache: tun's, through /tun/sock/cache.sock" (or why there is none).
 - **Jobs.** Each command is a job (`POST /v1/jobs` with `bazel`, see the API) in the normal
   FIFO; it needs a hub-local slot (a hub with `--local-slots 0` answers 409) and is never
   given to a runner. It also needs its session: a session runs one command at a time, so the
@@ -502,22 +512,38 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, disk}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, remote_cache, disk}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 - `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
 `offset`, `tail` must be plain decimal integers, `follow` a boolean; `offset` with `tail`) are a 400.
 
-## Bazel remote cache (opt-in)
+## Bazel remote cache
 
-`--cache-dir DIR` enables stdlib-only REAPI gRPC over h2c on the existing HTTP listener
-and `DATA/cache.sock` (override with `--cache-socket`). Relative DIR is under DATA.
-Both endpoints accept `x-tun-token` or `authorization: Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS
-(FindMissingBlobs, BatchUpdateBlobs, BatchReadBlobs, GetTree), ActionCache and ByteStream
-(Read, Write, QueryWriteStatus), SHA256 and identity compression. No execution service.
-`--cache-max-size` bounds disk storage with LRU eviction, including partial uploads;
-`--cache-action-writes=false` denies action updates (default allow). Socket permissions
-are 0600. See docs/bazel.md for protocol limits and Bazel flags.
+`--cache-dir DIR` (default `reapi`; relative DIR is under DATA; empty disables it) serves
+stdlib-only REAPI gRPC over h2c on the existing HTTP listener and `DATA/cache.sock`
+(override with `--cache-socket`). Both endpoints accept `x-tun-token` or `authorization:
+Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS (FindMissingBlobs, BatchUpdateBlobs,
+BatchReadBlobs, GetTree), ActionCache and ByteStream (Read, Write, QueryWriteStatus), SHA256
+and identity compression. No execution service. `--cache-max-size` bounds disk storage with
+LRU eviction, including partial uploads; `--cache-action-writes=false` denies action updates
+(default allow). Socket permissions are 0600. See docs/bazel.md for protocol limits and
+Bazel flags.
+- **Namespaces.** The CAS is shared (every write is verified against its digest). Action
+  results are not: an UpdateActionResult is stored in the namespace of the request's client
+  and answers only that client's GetActionResult; a lookup tries the client's own namespace,
+  then the shared one, which only tun's executors write (none yet: no gRPC request can).
+  The client is the server's identity of the request (as `client` for jobs: the exe.dev
+  source VM header, else `X-Tun-Client`, else the remote address); REAPI `instance_name` is
+  ignored. Capabilities advertise action updates only to requests with a namespace.
+- **Sessions.** Every `tun bazel` session gets the cache without asking: while its sandbox
+  lives, the server listens on the session's own socket `sessions/<id>/sock/cache.sock`
+  (opened through the dir's descriptor, so long data dir paths work), whose dir is bound
+  read-only at `/tun/sock` in the session sandbox. Only that sandbox can reach it, so the
+  socket needs no token (the sandbox never sees one) and uses the session's client's
+  namespace whatever the request claims. The listener stops with the sandbox (`--cold`,
+  expiry, eviction, server exit). With sandbox `none` the bazelrc uses the host path,
+  and if that is longer than a unix socket address allows the session has no remote cache.
 
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).
