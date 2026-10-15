@@ -21,7 +21,7 @@ for p in Path('internal').iterdir():
  (p/'BUILD.bazel').write_text('load("@rules_go//go:def.bzl", "go_library")\ngo_library(name='+repr(p.name)+', srcs='+repr(sources)+', importpath='+repr('github.com/altdansalt/tun/'+str(p))+', visibility=["//:__subpackages__"], deps='+repr(sorted(deps))+')\n')
 PY
 start=$(date +%s%N)
-timeout -k 10s 600 bazel --output_user_root="$bench_dir/root" --host_jvm_args=-Xmx512m --batch build //... \
+timeout -k 10s 600 bazel --ignore_all_rc_files --output_user_root="$bench_dir/root" --host_jvm_args=-Xmx512m --batch build //... \
  --jobs=4 --remote_executor="${TUN_URL/http:/grpc:}" --remote_header="x-tun-token=$TUN_TOKEN" \
  --noremote_upload_local_results --remote_timeout=600 --verbose_failures >"$bench_dir/log" 2>&1 || { cat "$bench_dir/log"; exit 1; }
 end=$(date +%s%N)

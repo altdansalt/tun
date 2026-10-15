@@ -67,7 +67,7 @@ func TestRunnerCredentialBoundary(t *testing.T) {
 }
 
 func TestLargeRunnerDoneAndCASLimit(t *testing.T) {
-	body, _ := json.Marshal(api.RunnerDone{ActionResult: make([]byte, 5<<20)})
+	body, _ := json.Marshal(api.RunnerDone{State: api.Exited, ActionResult: make([]byte, 5<<20)})
 	w := httptest.NewRecorder()
 	d, ok := decodeDone(w, httptest.NewRequest("POST", "/", bytes.NewReader(body)))
 	if !ok || len(d.ActionResult) != 5<<20 {

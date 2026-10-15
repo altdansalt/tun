@@ -68,8 +68,9 @@ func rpc(t *testing.T, addr, method, token string, b []byte) ([]byte, string) {
 	if e != nil && resp.Trailer.Get("grpc-status") == "0" {
 		t.Fatal(e)
 	} // Read EOF to populate trailers.
-	var buf [1]byte
-	resp.Body.Read(buf[:])
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
 	return out, resp.Trailer.Get("grpc-status")
 }
 func TestWire(t *testing.T) {
@@ -157,7 +158,7 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bazel", "--output_user_root="+root, "shutdown")
+		cmd := exec.CommandContext(ctx, "bazel", "--ignore_all_rc_files", "--output_user_root="+root, "shutdown")
 		cmd.Dir = work
 		cmd.WaitDelay = time.Second
 		if out, err := cmd.CombinedOutput(); err != nil {

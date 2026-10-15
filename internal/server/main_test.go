@@ -40,6 +40,10 @@ func TestEphemeral(t *testing.T) {
 	if !strings.HasPrefix(url, "TUN_URL=http://127.0.0.1:") || !strings.HasPrefix(token, "TUN_TOKEN=") {
 		t.Fatalf("environment: %q %q", url, token)
 	}
+	runnerToken, err := lines.ReadString('\n')
+	if err != nil || !strings.HasPrefix(runnerToken, "TUN_RUNNER_TOKEN=") {
+		t.Fatal(runnerToken, err)
+	}
 	base := strings.TrimSpace(strings.TrimPrefix(url, "TUN_URL="))
 	req, _ := http.NewRequest("GET", base+"/v1/jobs", nil)
 	req.Header.Set("X-Tun-Token", strings.TrimSpace(strings.TrimPrefix(token, "TUN_TOKEN=")))

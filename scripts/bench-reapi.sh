@@ -20,7 +20,7 @@ cd "$bench_dir/work"
 for phase in seed rebuild1 rebuild2; do
   rm -rf "$bench_dir/root"
   start=$(date +%s%N)
-  bazel --output_user_root="$bench_dir/root" --host_jvm_args=-Xmx512m --batch build //... \
+  bazel --ignore_all_rc_files --output_user_root="$bench_dir/root" --host_jvm_args=-Xmx512m --batch build //... \
     --jobs=2 --remote_cache="$cache_url" --remote_header="$header" --remote_timeout=30 \
     --repository_cache="$bench_dir/repos" >"$bench_dir/log" 2>&1 || { cat "$bench_dir/log"; exit 1; }
   end=$(date +%s%N)

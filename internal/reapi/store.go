@@ -417,7 +417,7 @@ func (s *Store) putOutput(f *os.File) ([]byte, error) {
 	if n > MaxExecutorBlob || n > s.max {
 		return nil, capacityError()
 	}
-	d := msg(bytesField(1, []byte(hex.EncodeToString(h.Sum(nil)))), intField(2, n))
+	d := (Digest{Hash: hex.EncodeToString(h.Sum(nil)), Size: n}).marshal()
 	k, _ := key(d)
 	lock := s.fileLock("cas-" + k)
 	lock.Lock()

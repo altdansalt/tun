@@ -203,14 +203,15 @@ const MaxExecutorBlob = 96 << 20
 const maxLogBytes = 4 << 20
 
 type limitedBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	exceeded bool
 	overflow func()
 }
 
+func (b *limitedBuffer) Bytes() []byte { return b.buffer.Bytes() }
 func (b *limitedBuffer) Write(p []byte) (int, error) {
 	n := len(p)
-	left := maxLogBytes - b.Len()
+	left := maxLogBytes - b.buffer.Len()
 	if n > left {
 		b.exceeded = true
 		if b.overflow != nil {
@@ -218,7 +219,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 		}
 		p = p[:left]
 	}
-	b.Buffer.Write(p)
+	b.buffer.Write(p)
 	return n, nil
 }
 func capacityError() error {

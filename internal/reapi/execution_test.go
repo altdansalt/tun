@@ -102,7 +102,7 @@ tree_rule = rule(implementation=_tree)
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		args := []string{"--output_user_root=" + t.TempDir(), "--host_jvm_args=-Xmx512m", "--batch", "build", target, "--jobs=2", "--remote_executor=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=15", "--noremote_upload_local_results", "--enable_bzlmod=false"}
+		args := []string{"--ignore_all_rc_files", "--output_user_root=" + t.TempDir(), "--host_jvm_args=-Xmx512m", "--batch", "build", target, "--jobs=2", "--remote_executor=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=15", "--noremote_upload_local_results", "--enable_bzlmod=false"}
 		cmd := exec.CommandContext(ctx, "bazel", args...)
 		cmd.Dir = work
 		cmd.WaitDelay = 3 * time.Second
