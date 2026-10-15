@@ -26,6 +26,7 @@ go_test(
     srcs = [
         "auth_test.go",
         "bazel_test.go",
+        "bazelci_test.go",
         "fast_test.go",
         "files_review_test.go",
         "files_test.go",
@@ -43,6 +44,7 @@ go_test(
         "visibility_test.go",
     ],
     data = [
+        "//scripts:bazel-ci.sh",
         "//scripts:bb-ci.sh",
         "//scripts:ci.sh",
         "@go_sdk//:bin/go",

@@ -22,9 +22,10 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     `-e E2E=0` disables them (with `-run` they are skipped unless `-e E2E=1`).
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
 - **Bazel** (M0 of docs/bazel.md; `scripts/ci.sh` stays the default CI for now):
-  - `tun run -- ./scripts/bazel-ci.sh` — checks BUILD files against gazelle, then `bazel test //...`
-    (unit + integration tests, and the e2e suites as `//scripts:e2e_test`, `//scripts:e2e_runners_test`
-    against the Bazel-built `//cmd/tun`). Arguments replace `//...` and go to `bazel test` as is:
+  - `tun run -- ./scripts/bazel-ci.sh` — checks that every Go file is in a BUILD.bazel
+    (`-e GAZELLE=1`: gazelle's full diff, ~15s more), then `bazel test //...` (unit + integration
+    tests, and the e2e suites as `//scripts:e2e_test`, `//scripts:e2e_runners_test` against the
+    Bazel-built `//cmd/tun`). Arguments replace `//...` and go to `bazel test` as is:
     `tun run -- ./scripts/bazel-ci.sh --test_filter=TestEphemeral //internal/server:server_test`.
     `--config=race` adds the race detector (ci.sh always uses it; Bazel doesn't by default).
   - After adding/removing Go files or imports: `bazel run //:gazelle` (in a tun job, with

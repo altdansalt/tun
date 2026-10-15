@@ -2,6 +2,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # Read by //internal/client tests that run them in jobs.
 exports_files([
+    "bazel-ci.sh",
     "ci.sh",
     "bb-ci.sh",
 ])

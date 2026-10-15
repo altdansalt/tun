@@ -3,7 +3,7 @@
 #   tun run -- ./scripts/bazel-ci.sh [bazel test args]
 # No arguments: bazel test //... ; otherwise the arguments go to `bazel test` unchanged, so name
 # the targets too (./scripts/bazel-ci.sh --test_filter=TestEphemeral //internal/server:server_test).
-# First it checks that the BUILD files are what gazelle generates (GAZELLE=0 skips that).
+# First it checks that every Go file is in a BUILD.bazel (GAZELLE=1: full gazelle diff).
 #
 # Caches (tun v0 jobs get a fresh path every time, so nothing in-memory survives a job):
 # - output base: under $TMPDIR (private to the job; deleted at exit). Bazel's default would be
@@ -28,17 +28,27 @@ bazel=(bazel --output_user_root="$root")
 # tun keeps a finished job's files (TMPDIR too) for a while (tun serve --keep-work, default 1h);
 # an output root is ~1GB, so drop it now. The Bazel server dies with the job anyway.
 cleanup() {
+  [ -d "$root" ] || return 0
   "${bazel[@]}" shutdown 2>/dev/null || true
   chmod -R u+w "$root" 2>/dev/null || true
   rm -rf "$root"
 }
 trap cleanup EXIT
-# BUILD files must match the Go sources: a new _test.go missing from BUILD.bazel would simply
-# not run. GAZELLE=0 skips the check.
-if [ "${GAZELLE:-1}" != 0 ]; then
+# BUILD files must list every Go file: a new _test.go missing from BUILD.bazel would simply not
+# run (missing deps, by contrast, fail the build). Fix with `bazel run //:gazelle`. GAZELLE=1 runs
+# gazelle's own diff instead: exact, but it builds gazelle (~10-20s even with warm caches).
+if [ "${GAZELLE:-}" = 1 ]; then
   "${bazel[@]}" build "${flags[@]}" //:gazelle
   if ! "${bazel[@]}" run "${flags[@]}" //:gazelle -- -mode=diff; then
     echo "bazel-ci.sh: FAIL: BUILD files are stale; run: bazel run //:gazelle (diff above)" >&2
+    exit 1
+  fi
+else
+  missing=$(find . -name '*.go' -not -path './bazel-*' | sort | while read -r f; do
+    grep -qF "\"${f##*/}\"" "${f%/*}/BUILD.bazel" 2>/dev/null || echo "$f"
+  done)
+  if [ -n "$missing" ]; then
+    echo "bazel-ci.sh: FAIL: not in BUILD.bazel (run: bazel run //:gazelle):" $missing >&2
     exit 1
   fi
 fi
