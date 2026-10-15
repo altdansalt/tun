@@ -126,17 +126,18 @@ exit 99
 	}
 }
 
-// LOAD=N runs N busy loops next to the tests and stops them when ci.sh exits.
+// LOAD=N runs N busy loops next to the tests and stops them when ci.sh exits. Only ci.sh's
+// own children count: without a PID namespace, an outer LOAD run's loops are visible too.
 func TestCIScriptLoad(t *testing.T) {
 	ts := startServer(t, server.Config{})
 	ws := ciWorkspace(t)
 	os.WriteFile(filepath.Join(ws, "bin/go"), []byte(`#!/bin/bash
 case $1 in
 version) echo "go version go1.27.2 linux/amd64" ;;
-test) echo "loops:$(pgrep -c -f ^tun-ci-load)"; printf 'ok  \tpkg/a\t0.5s\n' ;;
+test) pgrep -P $PPID -f ^tun-ci-load >hogs; echo "loops:$(wc -l <hogs)"; printf 'ok  \tpkg/a\t0.5s\n' ;;
 esac
 `), 0o755)
-	r := ts.tun(ws, "run", "-e", "LOAD=2", "-e", "TEST_FLAGS=-run TestA", "-c", `PATH=$PWD/bin:$PATH ./scripts/ci.sh; s=$?; sleep 0.2; echo "left:$(pgrep -c -f ^tun-ci-load)"; exit $s`)
+	r := ts.tun(ws, "run", "-e", "LOAD=2", "-e", "TEST_FLAGS=-run TestA", "-c", `PATH=$PWD/bin:$PATH ./scripts/ci.sh; s=$?; sleep 0.2; echo "left:$(for p in $(cat hogs); do kill -0 $p 2>/dev/null && echo $p; done | wc -l)"; exit $s`)
 	if r.code != 0 || !strings.Contains(r.stdout, "LOAD=2: 2 busy loops") || !strings.Contains(r.stdout, "loops:2") || !strings.Contains(r.stdout, "left:0") {
 		t.Errorf("LOAD=2: %+v", r)
 	}
