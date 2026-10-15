@@ -1,11 +1,14 @@
 package reapi
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,24 +17,91 @@ import (
 	"time"
 )
 
+var errCapacity = errors.New("blob exceeds cache size or declared size")
+
 var errOffset = errors.New("write offset mismatch")
 
+// mu protects only the index. File operations use bounded per-name locks;
+// eviction never holds mu while waiting for disk or another writer.
 type Store struct {
-	mu  sync.Mutex
-	dir string
-	max int64
+	mu       sync.Mutex
+	files    map[string]*list.Element
+	lru      list.List
+	total    int64
+	locks    [256]sync.Mutex
+	eviction sync.Mutex
+	dir      string
+	max      int64
+}
+type cacheEntry struct {
+	name  string
+	size  int64
+	atime time.Time
+	hash  hash.Hash // partial uploads only; nil after restart until first resume
 }
 
+func (s *Store) fileLock(name string) *sync.Mutex {
+	h := sha256.Sum256([]byte(name))
+	return &s.locks[h[0]]
+}
+func (s *Store) record(name string, size int64, h hash.Hash) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetLocked(name)
+	s.files[name] = s.lru.PushBack(&cacheEntry{name, size, time.Now(), h})
+	s.total += size
+}
+func (s *Store) forgetLocked(name string) {
+	if el := s.files[name]; el != nil {
+		s.total -= el.Value.(*cacheEntry).size
+		s.lru.Remove(el)
+		delete(s.files, name)
+	}
+}
+func (s *Store) forget(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetLocked(name)
+}
+func (s *Store) touch(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if el := s.files[name]; el != nil {
+		el.Value.(*cacheEntry).atime = time.Now()
+		s.lru.MoveToBack(el)
+	}
+}
 func Open(dir string, max int64) (*Store, error) {
 	if max <= 0 {
 		return nil, fmt.Errorf("cache max size must be positive")
 	}
-	err := os.MkdirAll(dir, 0700)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	s := &Store{dir: dir, max: max, files: make(map[string]*list.Element)}
+	es, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, max: max}
-	return s, s.evict()
+	var entries []*cacheEntry
+	for _, x := range es {
+		if x.IsDir() || !cacheFile(x.Name()) {
+			continue
+		}
+		info, err := x.Info()
+		if err != nil {
+			log.Printf("cache stat %s: %v", x.Name(), err)
+			continue
+		}
+		entries = append(entries, &cacheEntry{name: x.Name(), size: info.Size(), atime: info.ModTime()})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].atime.Before(entries[j].atime) })
+	for _, x := range entries {
+		s.files[x.name] = s.lru.PushBack(x)
+		s.total += x.size
+	}
+	s.evict()
+	return s, nil
 }
 func digest(b []byte) []byte {
 	h := sha256.Sum256(b)
@@ -47,11 +117,13 @@ func (s *Store) read(kind string, d []byte) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	lock := s.fileLock(kind + k)
+	lock.Lock()
+	defer lock.Unlock()
 	p := filepath.Join(s.dir, kind+k)
 	b, e := os.ReadFile(p)
 	if e == nil {
+		s.touch(kind + k)
 		now := time.Now()
 		_ = os.Chtimes(p, now, now)
 	}
@@ -70,10 +142,12 @@ func (s *Store) put(kind string, d, b []byte) error {
 		return fmt.Errorf("digest mismatch")
 	}
 	if int64(len(b)) > s.max {
-		return fmt.Errorf("blob exceeds cache size")
+		return errCapacity
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.evict()
+	lock := s.fileLock(kind + k)
+	lock.Lock()
+	defer lock.Unlock()
 	f, e := os.CreateTemp(s.dir, ".write-")
 	if e != nil {
 		return e
@@ -89,42 +163,53 @@ func (s *Store) put(kind string, d, b []byte) error {
 	if e = os.Rename(f.Name(), filepath.Join(s.dir, kind+k)); e != nil {
 		return e
 	}
-	return s.evict()
+	s.record(kind+k, int64(len(b)), nil)
+	return nil
 }
-func (s *Store) evict() error {
-	es, e := os.ReadDir(s.dir)
-	if e != nil {
-		return e
+
+// A failed deletion stays indexed, but cannot prevent other victims being tried.
+// Retry it on the next eviction pass; committed writes never fail due to eviction.
+func (s *Store) evict() {
+	s.mu.Lock()
+	over := s.total > s.max
+	s.mu.Unlock()
+	if !over {
+		return
 	}
-	type entry struct {
-		p string
-		n int64
-		t time.Time
-	}
-	var entries []entry
-	var total int64
-	for _, x := range es {
-		if x.IsDir() || !cacheFile(x.Name()) {
+	s.eviction.Lock()
+	defer s.eviction.Unlock()
+	s.mu.Lock()
+	remaining := s.lru.Len()
+	s.mu.Unlock()
+	for remaining > 0 {
+		remaining--
+		s.mu.Lock()
+		if s.total <= s.max || s.lru.Len() == 0 {
+			s.mu.Unlock()
+			return
+		}
+		el := s.lru.Front()
+		name := el.Value.(*cacheEntry).name
+		s.mu.Unlock()
+		lock := s.fileLock(name)
+		lock.Lock()
+		s.mu.Lock()
+		// A concurrent access may have refreshed or replaced the candidate.
+		if s.files[name] != el || s.lru.Front() != el {
+			s.mu.Unlock()
+			lock.Unlock()
 			continue
 		}
-		i, e := x.Info()
-		if e != nil {
-			return e
+		s.mu.Unlock()
+		err := os.Remove(filepath.Join(s.dir, name))
+		if err == nil || os.IsNotExist(err) {
+			s.forget(name)
+		} else {
+			log.Printf("cache evict %s: %v", name, err)
+			s.touch(name)
 		}
-		entries = append(entries, entry{x.Name(), i.Size(), i.ModTime()})
-		total += i.Size()
+		lock.Unlock()
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].t.Before(entries[j].t) })
-	for _, x := range entries {
-		if total <= s.max {
-			break
-		}
-		if e = os.Remove(filepath.Join(s.dir, x.p)); e != nil {
-			return e
-		}
-		total -= x.n
-	}
-	return nil
 }
 
 func (s *Store) uploadPath(name string) string {
@@ -135,10 +220,35 @@ func (s *Store) uploadPath(name string) string {
 // Partial uploads share the disk budget with committed blobs. Eviction may discard
 // an interrupted upload; clients can restart it after QueryWriteStatus returns NOT_FOUND.
 func (s *Store) appendUpload(name string, d []byte, offset uint64, chunk []byte, finish bool) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	p := s.uploadPath(name)
-	f, e := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0600)
+	partial := filepath.Base(p)
+	k, e := key(d)
+	if e != nil {
+		return 0, e
+	}
+	// Lock partial and destination in stripe order so commit is atomic with
+	// respect to eviction and other writes, without holding the index mutex.
+	defer s.evict()
+	ph := sha256.Sum256([]byte(partial))
+	dh := sha256.Sum256([]byte("cas-" + k))
+	first, second := ph[0], dh[0]
+	if first > second {
+		first, second = second, first
+	}
+	s.locks[first].Lock()
+	defer s.locks[first].Unlock()
+	if first != second {
+		s.locks[second].Lock()
+		defer s.locks[second].Unlock()
+	}
+	flags := os.O_RDWR
+	if offset == 0 {
+		flags |= os.O_CREATE
+	}
+	f, e := os.OpenFile(p, flags, 0600)
+	if os.IsNotExist(e) {
+		return 0, errOffset
+	}
 	if e != nil {
 		return 0, e
 	}
@@ -152,35 +262,47 @@ func (s *Store) appendUpload(name string, d []byte, offset uint64, chunk []byte,
 	}
 	size := info.Size() + int64(len(chunk))
 	if size > s.max || uint64(size) > get(d, 2).v {
-		return 0, fmt.Errorf("upload exceeds size limit")
+		os.Remove(p)
+		s.forget(partial)
+		return 0, errCapacity
 	}
-	if _, e = f.Seek(0, 2); e != nil {
-		return 0, e
+	s.mu.Lock()
+	var h hash.Hash
+	if el := s.files[partial]; el != nil {
+		h = el.Value.(*cacheEntry).hash
 	}
-	if _, e = f.Write(chunk); e != nil {
-		return 0, e
-	}
-	if finish {
-		if _, e = f.Seek(0, 0); e != nil {
-			return 0, e
-		}
-		h := sha256.New()
+	s.mu.Unlock()
+	if h == nil {
+		h = sha256.New()
 		if _, e = io.Copy(h, f); e != nil {
 			return 0, e
 		}
-		k, e := key(d)
-		if e != nil {
-			return 0, e
-		}
+	}
+	if _, e = f.Seek(0, io.SeekEnd); e != nil {
+		return 0, e
+	}
+	written, e := f.Write(chunk)
+	if e != nil {
+		// A short write invalidates the hash; resume will reconstruct it.
+		s.record(partial, info.Size()+int64(written), nil)
+		return 0, e
+	}
+	h.Write(chunk)
+	s.record(partial, size, h)
+	if finish {
 		if hex.EncodeToString(h.Sum(nil)) != k || uint64(size) != get(d, 2).v {
 			os.Remove(p)
+			s.forget(partial)
 			return 0, fmt.Errorf("digest mismatch")
 		}
-		if e = os.Rename(p, filepath.Join(s.dir, "cas-"+k)); e != nil {
+		dest := "cas-" + k
+		if e = os.Rename(p, filepath.Join(s.dir, dest)); e != nil {
 			return 0, e
 		}
+		s.forget(partial)
+		s.record(dest, size, nil)
 	}
-	return size, s.evict()
+	return size, nil
 }
 
 // Open files pin bytes while LRU eviction unlinks their names.
@@ -189,8 +311,9 @@ func (s *Store) openBlob(d []byte) (*os.File, error) {
 	if e != nil {
 		return nil, e
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	lock := s.fileLock("cas-" + k)
+	lock.Lock()
+	defer lock.Unlock()
 	p := filepath.Join(s.dir, "cas-"+k)
 	f, e := os.Open(p)
 	if e != nil {
@@ -201,6 +324,7 @@ func (s *Store) openBlob(d []byte) (*os.File, error) {
 		f.Close()
 		return nil, os.ErrNotExist
 	}
+	s.touch("cas-" + k)
 	now := time.Now()
 	_ = os.Chtimes(p, now, now)
 	return f, nil
