@@ -43,9 +43,9 @@ tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>      
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
-           [--net auto|private|host]
+           [--net auto|private|host] [--min-free 10%]
 tun runners                       (JSON lines: the server's live runners)
-tun bazel [--session NAME] [--cold] [--timeout DUR] <bazel command> [args...]   (see Bazel sessions)
+tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
 tun sessions [--client NAME | --mine]   (JSON lines: the server's Bazel sessions)
 tun serve ... [--max-sessions 2] [--session-idle 30m]
 ```
@@ -343,7 +343,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
 
 ## Bazel sessions (tun bazel)
 First step of docs/bazel.md (M1, hub-local only). `tun bazel [--session NAME] [--cold]
-[--timeout DUR] <bazel command> [args...]` runs `bazel <command> [args...]` in a warm session
+[--timeout DUR] [--json] <bazel command> [args...]` runs `bazel <command> [args...]` in a warm session
 on the server and streams its output; the exit status is Bazel's (124 on timeout, 125 for
 tun's errors). The agent's args pass through unchanged; anything flag-like before the bazel
 command other than tun's flags (a Bazel startup option) is a usage error.
@@ -432,6 +432,18 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   over; paths tun never wrote (e.g. `bazel-*` links) are left alone unless the manifest needs
   them; links are checked against the final tree (chains that leave it are removed and fail
   the job); directory modes are applied last.
+- **Results.** For `build`, `test`, `coverage` and `run`, tun inserts
+  `--build_event_json_file=<out>/tun-bep.json` right after the command (any earlier file is
+  removed first). When Bazel exits the server reads it (through an `os.Root`, no links,
+  regular file, at most 256MB) with `internal/bep`, sets Bazel's exit status as the result,
+  appends one line to the job's stderr (`tun: bazel test exit=3 after 12.4s: 2 of 40 tests
+  failed: //a:b_test //c:d_test`; labels capped at 20; a BEP read error is appended in
+  parentheses) and records it as the job's `summary`. For every command whose Bazel ran,
+  the bounded summary object (`bep.Summary.JSON`: command, exit_code, exit_name, success,
+  complete, duration_sec, targets, tests, failed_actions, counts, omitted) is stored as
+  `jobs/<id>/bep.json` and served by `GET /v1/jobs/{id}/bep` (404 without one). `tun bazel
+  --json` sends Bazel's stdout to stderr and prints that object on stdout, adding `job`,
+  `state` and `error` (only those, plus `exit_code`, when the command never ran).
 - **Lifetime.** A session is deleted (Bazel `shutdown` through the agent, then the sandbox is
   closed and the dir removed) after `--session-idle` (default 30m) without a command. At most
   `--max-sessions` (default 2) exist; a bazel job for a new session when that many exist
@@ -454,12 +466,13 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   Bazel sessions; 409 `{error, missing}` if file contents must be uploaded first). The body
   may be gzip-compressed (`Content-Encoding: gzip`); it is limited to `--max-upload`
   (compressed) and 256MB of JSON.
-- `GET /v1/sessions` (see Bazel sessions).
+- `GET /v1/sessions` (see Bazel sessions). `GET /v1/jobs/{id}/bep`: a tun bazel job's
+  summary object (see Bazel sessions, Results).
   `outputs`: at most 256 paths valid for the files endpoint (see Runners).
   `timeout_sec` <= 0 means the default (1800), except for services where 0 (or less) means none; over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason}`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason, summary}`.
 - `GET /v1/jobs?limit=N&state=S[,S...]&client=NAME&mine=1` -> list, newest first, filtered
   before the limit (`mine=1`: client = this request's client identity; with `client` it's a 400;
   unknown states are a 400). `POST /v1/jobs/{id}/cancel`.

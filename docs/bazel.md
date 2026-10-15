@@ -102,27 +102,45 @@ Targets to beat, set at M1 from real numbers: warm one-line-change `test` faster
 no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms.
 
 ## M1 status (feat/bazel-sessions)
-Built: `tun bazel [--session NAME] [--cold] <cmd> [args...]`, `tun sessions`, sessions on the
-hub's local slots (fixed `/work`, `/tun/home`, `/tmp`, output base `/tun/out/base`), a
+Built: `tun bazel [--session NAME] [--cold] [--json] <cmd> [args...]`, `tun sessions`, sessions
+on the hub's local slots (fixed `/work`, `/tun/home`, `/tmp`, output base `/tun/out/base`), a
 long-lived session sandbox whose agent runs each command (so the Bazel server survives between
 commands), manifest sync with in-place apply, idle expiry (`--session-idle`, 30m) and LRU
-eviction (`--max-sessions`, 2), shared repository cache, per-client disk cache. Contract in
-SPEC.md ("Bazel sessions").
+eviction (`--max-sessions`, 2), per-client Bazel caches (bazelisk, repository, disk), the BEP
+summary line and `--json` (internal/bep). Contract in SPEC.md ("Bazel sessions").
 
 Deviations from the model above, and why:
 - **A busy session queues** the next command of the same session instead of starting a new
   cold one. A second Bazel server costs 1GB+ on a 4GB host and a cold analysis; `--session
   NAME` gets the parallel one explicitly. Waiting jobs show `queue_reason`.
-- **Disk cache per client**, not per session: `--cold` and a second `--session` of the same
-  client reuse action results, and one client still can't poison another's cache. Size-capped
-  by Bazel (`--experimental_disk_cache_gc_max_size=5G`); the per-client dirs are not deleted
-  by tun yet.
+- **All Bazel caches per client** (`$DATA/bazel/<client>/`), not per session and not per host:
+  `--cold` and a second `--session` of the same client reuse them, and one client can't poison
+  another's. The plan said "per-host repository cache"; a security review showed why not: Bazel
+  8+/9 keep fetched repository trees (the repo contents cache) in `<repository_cache>/contents`
+  by default (verified on 9.3.0, job 20261015T085624196657-2083995d) and trust them, and
+  bazelisk runs a cached Bazel binary without checking it again, so a shared writable cache lets
+  one client run code in another's builds. The cost is a Bazel download per client and
+  version (`tun serve --bazelisk-seed DIR` copies a server-owned bazelisk cache into new client
+  homes) and repository fetches per client. None of these dirs can be written by v0 jobs (they
+  used to be: bazelisk's home was in the shared XDG cache). The disk cache is size-capped by
+  Bazel (`--experimental_disk_cache_gc_max_size=5G`); tun doesn't delete per-client dirs yet.
+  Isolation is as good as the client identity: unforgeable behind exe.dev's proxy only.
 - **Bazel startup options from the agent are rejected** (tun's own must stay constant per
   session or Bazel restarts its server).
 - The client identifies its workspace by its absolute root path; two checkouts of one repo are
   two sessions (they share the client's disk cache).
 
-Not done yet in M1: the BEP summary line and `--json` (feat/bazel-bep is on it); the optional
+- **Summary only for build, test, coverage, run.** Bazel 9.3.0 accepts
+  `--build_event_json_file` for query, cquery and aquery too (contrary to the note in "M1
+  results" below, verified in job 20261015T085624196657-2083995d), and silently ignores it for
+  info, clean, mod, config; a "N targets built" line would mislead there, so those get only
+  the `--json` object (exit code, duration). The full uncapped snapshot is not kept (only the
+  bounded JSON in the job dir), since `tun get` by label is not built yet.
+- **Leftover processes are killed after each command** (bwrap only): everything in the session
+  sandbox except the agent, its ancestors and the Bazel server (`server.pid.txt`) with its
+  descendants, so a command can't leave something behind that tampers with the next one.
+
+Not done yet in M1: the optional
 BuildBuddy remote cache; sessions on runners and placement; `tun get` of outputs; `bazel run`
 as a separate job; measuring tun's own `bazel test //...` (needs M0's BUILD files) and an
 outside repo, and against `bb remote`.
@@ -158,9 +176,11 @@ VM to the shared server) and 2 more for a change (409, upload).
 - **Nested sandboxing:** Bazel's linux-sandbox inside tun's bwrap needs nested user namespaces;
   verify in M0, else run Bazel with `processwrapper-sandbox` and rely on tun's boundary.
 - **Memory:** 4 GB runners, JVM servers. Tune `--host_jvm_args`, cap sessions per host, evict LRU.
-- **Trust:** shared per-host caches are writable by every job today (v0 limitation); in M1 the
-  repository cache is content-checked by Bazel, and the disk cache is per-session until M2/M3 move
-  shared results to the executor-written remote cache.
+- **Trust:** shared per-host caches are writable by every v0 job today (v0 limitation). Session
+  caches are per client (see M1 status: the repository contents cache and bazelisk downloads
+  are not content-checked on use), until M2/M3 move shared results to the executor-written
+  remote cache. Every bind mount source is opened without following symlinks and passed to
+  bwrap by descriptor.
 - **Bazel versions:** bazelisk + the repo's `.bazelversion`; installs cached per host.
 
 ## M1 results (implemented in internal/bep)

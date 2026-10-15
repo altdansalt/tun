@@ -23,8 +23,13 @@ trap 'exit 143' TERM
 mkfifo "$tmp/env" "$tmp/stdin"
 exec 3<>"$tmp/stdin"
 # DEV_TUN_SERVE_ARGS: extra tun serve flags (word-split), e.g. '--local-slots 0'.
+seed=()
+# In a tun job: seed tun bazel's per-client bazelisk homes from the job's (shared) download cache.
+if [ -n "${XDG_CACHE_HOME:-}" ] && [ -d "$XDG_CACHE_HOME/bazelisk/downloads" ]; then
+  seed=(--bazelisk-seed "$XDG_CACHE_HOME/bazelisk")
+fi
 # shellcheck disable=SC2086
-"$tmp/tun" serve --ephemeral --exit-on-eof ${DEV_TUN_SERVE_ARGS:-} <"$tmp/stdin" >"$tmp/env" 3>&- &
+"$tmp/tun" serve --ephemeral --exit-on-eof "${seed[@]}" ${DEV_TUN_SERVE_ARGS:-} <"$tmp/stdin" >"$tmp/env" 3>&- &
 pid=$!
 {
   IFS= read -r url
