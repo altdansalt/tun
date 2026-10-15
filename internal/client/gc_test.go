@@ -108,8 +108,13 @@ func TestRetentionBlobs(t *testing.T) {
 	id := ts.detach(ws, "-c", "sleep 1; cat f")
 	blob := filepath.Join(ts.data, "blobs", ts.status(id).Workspace+".tar.gz")
 	ts.waitDone(blocker)
-	if j := ts.waitDone(id); j.State != api.Exited || !exists(blob) {
-		t.Fatalf("blob of a live job deleted: %+v, exists=%v", j, exists(blob))
+	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Running })
+	time.Sleep(300 * time.Millisecond) // the blob was last used >2s ago, past KeepBlobs
+	if !exists(blob) {
+		t.Fatal("blob of a running job deleted")
+	}
+	if j := ts.waitDone(id); j.State != api.Exited {
+		t.Fatalf("job: %+v", j)
 	}
 	eventually(t, "unused blob deleted", func() bool { return !exists(blob) })
 	// The client re-uploads a swept workspace transparently.
