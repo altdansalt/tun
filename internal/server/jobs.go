@@ -284,15 +284,28 @@ func openOwn(name string, flag int, perm os.FileMode) (*os.File, error) {
 // schedule starts queued jobs while there are free local slots, and wakes runners waiting
 // for work. Caller holds s.mu.
 func (s *Server) schedule() {
-	for i := 0; !s.closed && s.running < s.cfg.MaxJobs && i < len(s.queue); {
+	for i := 0; !s.closed && i < len(s.queue); {
 		j := s.queue[i]
+		// A session command whose actions execute remotely only orchestrates: it doesn't take
+		// a slot, or its own actions could wait forever for the slots session commands hold.
+		// Sessions are bounded by MaxSessions instead (and run one command at a time).
+		slotless := j.bz != nil && s.sessionExecutesRemotely(j.SessionID)
+		if !slotless && s.running >= s.cfg.MaxJobs {
+			i++ // a slotless session command further back may still start
+			continue
+		}
 		if j.bz != nil && !s.claimSession(j) {
 			i++ // its session is busy (or full): later jobs may go first
 			continue
 		}
 		s.queue = slices.Delete(s.queue, i, i+1)
 		j.Runner = api.LocalRunner
-		s.running++
+		j.slotless = slotless
+		if slotless {
+			s.orchestrating++
+		} else {
+			s.running++
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -303,7 +316,11 @@ func (s *Server) schedule() {
 				s.run(j)
 			}
 			s.mu.Lock()
-			s.running--
+			if slotless {
+				s.orchestrating--
+			} else {
+				s.running--
+			}
 			s.schedule()
 			s.mu.Unlock()
 		}()

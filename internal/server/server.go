@@ -85,18 +85,22 @@ type Server struct {
 	cache       *reapi.Handler // nil without Config.Cache
 	actionStore *reapi.Store   // Config.Cache: the executors' CAS and shared action cache
 
-	mu       sync.Mutex
-	jobs     map[string]*job
-	queue    []*job // FIFO of queued jobs
-	running  int    // local non-service jobs
-	svc      services
-	runners  map[string]*runnerState // the current instance of each runner name
-	retired  map[string]*runnerState // by instance id: superseded or dropped instances
-	sessions map[string]*session     // tun bazel sessions by id
-	closed   bool
-	quit     chan struct{} // closed by Close
-	wg       sync.WaitGroup
-	gc       gcState
+	mu      sync.Mutex
+	jobs    map[string]*job
+	queue   []*job // FIFO of queued jobs
+	running int    // local non-service jobs, except orchestrating session commands
+	// orchestrating counts running session commands whose actions execute remotely: they
+	// don't take a job slot (their actions do; see schedule). At most MaxSessions.
+	orchestrating int
+	executed      map[string]int // actions that completed, by runner ("local" or a name)
+	svc           services
+	runners       map[string]*runnerState // the current instance of each runner name
+	retired       map[string]*runnerState // by instance id: superseded or dropped instances
+	sessions      map[string]*session     // tun bazel sessions by id
+	closed        bool
+	quit          chan struct{} // closed by Close
+	wg            sync.WaitGroup
+	gc            gcState
 }
 
 type job struct {
@@ -124,6 +128,7 @@ type job struct {
 	exited     *api.RunnerDone // what it reported then
 	logMu      sync.Mutex      // serializes log chunk writes
 	bz         *api.BazelJob   // a tun bazel job (kept in memory only: after a restart it has failed)
+	slotless   bool            // a bazel job running outside the job slots (see schedule)
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`
 	OutSkipped []string `json:"out_skipped,omitempty"`
@@ -202,7 +207,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{},
-		sessions: map[string]*session{}, quit: make(chan struct{})}
+		sessions: map[string]*session{}, executed: map[string]int{}, quit: make(chan struct{})}
 	s.gc.fails = map[string]int{}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
@@ -372,6 +377,9 @@ func (s *Server) Handler() http.Handler {
 			MaxServices: s.cfg.MaxServices, Running: s.running + running, Queued: len(s.queue), Services: s.svc.running,
 			LocalSlots: s.cfg.MaxJobs, Runners: runners, Sessions: len(s.sessions), MaxSessions: s.cfg.MaxSessions,
 			RemoteCache: s.cache != nil}
+		if s.cache != nil {
+			h.Execution = s.executionInfo()
+		}
 		s.mu.Unlock()
 		if h.Disk = diskInfo(s.cfg.DataDir, s.cfg.MinFree); h.Disk != nil {
 			h.Disk.ReclaimedWorkDirs, h.Disk.ReclaimedSessions = s.gc.reclaimedWork.Load(), s.gc.reclaimedSessions.Load()
@@ -668,5 +676,8 @@ func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
 	}
 	if j.Action != nil {
 		delete(s.jobs, j.ID)
+		if state == api.Exited {
+			s.executed[j.Runner]++
+		}
 	}
 }

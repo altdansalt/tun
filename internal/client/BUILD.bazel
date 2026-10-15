@@ -36,6 +36,7 @@ go_test(
         "hardening_test.go",
         "integration_test.go",
         "netns_test.go",
+        "rbe_test.go",
         "review2_test.go",
         "review_runner_test.go",
         "review_test.go",

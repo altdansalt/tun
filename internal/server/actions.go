@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -187,4 +188,20 @@ func actionStatus(err error) int {
 		return ex.Code
 	}
 	return 13
+}
+
+// executionInfo is healthz's execution object. Caller holds s.mu.
+func (s *Server) executionInfo() *api.Execution {
+	e := &api.Execution{Slots: s.executionSlots(), Executed: maps.Clone(s.executed), SessionCommands: s.orchestrating}
+	for _, j := range s.queue {
+		if j.Action != nil {
+			e.Queued++
+		}
+	}
+	for _, j := range s.jobs {
+		if j.Action != nil && j.State == api.Running {
+			e.Running++
+		}
+	}
+	return e
 }

@@ -444,9 +444,9 @@ func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 // remoteSetup is how a session's Bazel uses tun's REAPI services.
 type remoteSetup struct {
 	socket string // the session's cache socket as Bazel sees it; "": no remote cache
-	// executors: execution slots (hub and runners) when the server executes actions; 0 runs
-	// actions in the session. (Execution is not part of this server yet: always 0. Once it is,
-	// the same socket serves Execute and executors write the shared action cache namespace.)
+	// executors: execution slots (hub and action-capable runners); the same socket serves
+	// Execute, and executors write the shared action cache namespace. 0: actions run in the
+	// session.
 	executors int
 	readOnly  bool // the session may not upload action results (tun serve --cache-action-writes=false)
 	note      string
@@ -455,7 +455,7 @@ type remoteSetup struct {
 // maxSocketPath is the longest unix socket path connect(2) takes (sun_path holds 108 bytes).
 const maxSocketPath = 107
 
-// remoteSetup says which remote flags a session with paths in gets.
+// remoteSetup says which remote flags a session with paths in gets. Not with s.mu held.
 func (s *Server) remoteSetup(in sessionPaths) remoteSetup {
 	if s.cache == nil {
 		return remoteSetup{}
@@ -464,12 +464,38 @@ func (s *Server) remoteSetup(in sessionPaths) remoteSetup {
 	if len(sock) > maxSocketPath { // sandbox none: the host path, which may be long
 		return remoteSetup{note: fmt.Sprintf("no remote cache: its socket path %s is over %d bytes (tun serve --data with a shorter path, or bwrap)", sock, maxSocketPath)}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return remoteSetup{socket: sock, executors: s.executionSlots(), readOnly: s.cfg.CacheReadOnly}
 }
 
-// executionSlots is the number of actions the server can execute at once for sessions
-// (remote execution); 0 until the REAPI Execution service is part of the server.
-func (s *Server) executionSlots() int { return 0 }
+// sessionExecutesRemotely reports whether session id's commands get remote execution (see
+// remoteSetup): the server executes actions and the session can reach its socket.
+func (s *Server) sessionExecutesRemotely(id string) bool {
+	if s.cache == nil || s.cache.Execution == nil {
+		return false
+	}
+	if s.cfg.Sandbox == sandbox.Bwrap {
+		return true // the socket is at a short fixed path
+	}
+	return len(filepath.Join(s.sessionDir(id), "sock", cacheSock)) <= maxSocketPath
+}
+
+// executionSlots is the number of actions the server can execute at once: its local slots
+// plus the slots of live runners that take actions (0 without the Execution service).
+// Caller holds s.mu.
+func (s *Server) executionSlots() int {
+	if s.cache == nil || s.cache.Execution == nil {
+		return 0
+	}
+	n := s.cfg.MaxJobs
+	for _, rn := range s.runners {
+		if rn.actions {
+			n += rn.slots
+		}
+	}
+	return n
+}
 
 // bazelrc is a session's tun.bazelrc (the "user" rc: the workspace's .bazelrc still applies):
 // the client's repository cache, and either its disk cache or (with r.socket) tun's remote cache through the

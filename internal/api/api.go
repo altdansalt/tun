@@ -103,8 +103,22 @@ type Health struct {
 	Runners          []RunnerInfo `json:"runners"`
 	Sessions         int          `json:"sessions"` // tun bazel sessions (see GET /v1/sessions)
 	MaxSessions      int          `json:"max_sessions"`
-	RemoteCache      bool         `json:"remote_cache"` // the REAPI cache is on (sessions use it)
+	RemoteCache      bool         `json:"remote_cache"`        // the REAPI cache is on (sessions use it)
+	Execution        *Execution   `json:"execution,omitempty"` // with the REAPI cache: remote execution
 	Disk             *Disk        `json:"disk,omitempty"`
+}
+
+// Execution describes the server's REAPI executors (healthz).
+type Execution struct {
+	Slots   int `json:"slots"`   // actions at once: local_slots plus action-capable runners' slots
+	Queued  int `json:"queued"`  // actions waiting for a slot
+	Running int `json:"running"` // actions running
+	// Executed counts the actions that ran to completion since the server started, by where
+	// they ran ("local" or a runner's name).
+	Executed map[string]int `json:"executed"`
+	// SessionCommands: running tun bazel commands that execute remotely; they hold no job
+	// slot (at most max_sessions).
+	SessionCommands int `json:"session_commands"`
 }
 
 // Disk is the state of a data dir's filesystem (healthz; runners report theirs in polls).
