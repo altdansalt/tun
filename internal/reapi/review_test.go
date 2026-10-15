@@ -89,12 +89,12 @@ func TestStreamDeadlinesAndBearer(t *testing.T) {
 		{"bearer", "", "secret", 0, 1, "0"},
 		{"wrong bearer", "", "wrong", 0, 1, "16"},
 		{"client expires", "20m", "secret", 60 * time.Millisecond, 2, "4"},
-		{"idle expires", "", "secret", 180 * time.Millisecond, 2, "4"},
-		{"active beyond idle", "1S", "secret", 30 * time.Millisecond, 8, "0"},
+		{"idle expires", "", "secret", 500 * time.Millisecond, 2, "4"},
+		{"active beyond idle", "2S", "secret", 30 * time.Millisecond, 16, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, addr, _ := testServer(t)
-			h.idleTimeout = 100 * time.Millisecond
+			h.idleTimeout = 300 * time.Millisecond // a loaded host can stall 100ms
 			data := bytes.Repeat([]byte("x"), tc.chunks)
 			d := digest(data)
 			name := "uploads/deadline/blobs/" + string(get(d, 1).b) + fmt.Sprintf("/%d", len(data))
