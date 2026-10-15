@@ -21,6 +21,7 @@ tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N]
           [--cache-dir reapi] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
           [--min-free 10%] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
+          [--session-remote-execution=true]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -584,7 +585,8 @@ cache namespace. Every `tun bazel` session uses it automatically (see the sessio
 `tun.bazelrc`). healthz `execution: {slots, queued, running, executed: {local|runner: n},
 session_commands}`: executor slots (local plus action-capable runners'), actions waiting and
 running, actions completed since start by where they ran, running session commands that
-hold no slot, and seconds summed over completed actions: `queue_sec` (FIFO) and, from the
+hold no slot (`tun serve --session-remote-execution=false`: sessions keep the remote cache
+but execute their actions themselves and take a slot again), and seconds summed over completed actions: `queue_sec` (FIFO) and, from the
 `ExecutedActionMetadata` executors put in every ActionResult, `input_fetch_sec`,
 `execution_sec`, `output_upload_sec`. An input directory of 64+ files or 4MB+ that an action
 names the second time (same digest) is kept materialized per executor data dir

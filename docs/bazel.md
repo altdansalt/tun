@@ -797,6 +797,42 @@ on the same host as the hub; on other hosts each runner action adds its HTTP rou
 the hub (assignment, CAS fetches, started, exited, outputs, done), ~35ms each from an exe.dev
 VM, not measured here (see Deviations).
 
+### tun's tree: remote vs local execution in the session
+
+`scripts/bench-rbe.sh tree`: `tun bazel test -- //... -//internal/client:client_test
+-//internal/reapi:reapi_test -//scripts:e2e_test` (5 test targets, 103 actions to execute),
+same topology (1 hub slot + 2 one-slot runners, all on the job's 2-CPU host). "Local" is
+`--remote_executor= --jobs=auto` from the agent (remote cache still on). Two runs with the tree
+cache, on different hosts at the same time, and one before it (tun-r1):
+
+| step | before tree cache, tun-r1 (20261015T113451972677-18f99969) | tun-r5 (20261015T135623270774-680cef10) | tun-r2 (20261015T135710791852-19c5a9a8) |
+|---|---|---|---|
+| (a) new session, empty caches, remote | 664.6s | 977.9s | 1109.7s |
+| (b) `--cold`, warm remote cache (103 remote cache hits) | 52.0s | 124.7s | 131.6s |
+| (c) no-op | 3.6s | 8.6s | 11.2s |
+| (d) one-line change, **remote** (9 remote actions) | **39.2s** | **60.1s** | **89.5s** |
+| (g) one-line change, **local** (6 linux-sandbox) | **16.7s** | **13.4s** | **8.5s** |
+| (e) `--cold`, every action again, **remote** | 524.6s | 596.6s | 520.5s |
+| (f) the same, **local** | 444.3s | 360.5s | 339.8s |
+| (h) `--cold` local, warm remote cache | 73.9s | 53.1s | 40.0s |
+
+The hosts were busier in the later runs (the no-op went from 3.6s to 9-11s), so compare within
+a column: on one host, remote execution is 1.2-1.65x slower than local for a full rebuild and
+2.3-10x slower for the one-line change. Executors on the same host add no CPU, and each Go
+action pays its input phase (below) and output upload; for (d) the critical path (compile,
+link, test) went from 10.9s locally to 37.7-55s remotely. (a) includes the Go SDK download
+into the client's repository cache. Bazel server CPU during (a): 227-457s; during remote
+(d)/(e): 22-30s/160-218s.
+
+**What this means.** Remote execution only pays off once executors add CPUs the session's host
+doesn't have, and per-action overhead must drop from seconds to tens of milliseconds (the
+genrule overhead) for edit loops: reuse exec roots between actions (only the changed inputs
+copied), bind or link inputs instead of copying them, and download fewer outputs (test
+binaries are top-level outputs, so Bazel fetches each relinked one). Until then an agent
+can get local execution per command with `--remote_executor=`, and an operator for every
+session with `tun serve --session-remote-execution=false` (sessions keep the remote cache and
+take a job slot again). Not done here.
+
 ### Go actions: input materialization and the tree cache
 
 Go compile actions name the Go SDK and the built standard library as inputs, so a remote

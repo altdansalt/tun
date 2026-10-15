@@ -75,6 +75,9 @@ type Config struct {
 	Cache *reapi.Store
 	// CacheReadOnly: clients can't write action results (only executors can).
 	CacheReadOnly bool
+	// SessionsLocal: sessions don't use the Execution service (tun serve
+	// --session-remote-execution=false); they execute actions themselves and take a job slot.
+	SessionsLocal bool
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.

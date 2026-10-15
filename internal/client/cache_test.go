@@ -142,3 +142,22 @@ func TestBazelSessionRemoteCache(t *testing.T) {
 		t.Fatalf("the session socket outlived the server: %s", c)
 	}
 }
+
+// tun serve --session-remote-execution=false: sessions keep the remote cache but run their
+// actions themselves.
+func TestBazelSessionsLocal(t *testing.T) {
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap unusable")
+	}
+	store, err := reapi.Open(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := bazelServer(t, server.Config{Sandbox: sandbox.Bwrap, DataDir: t.TempDir(), Cache: store, SessionsLocal: true}, false)
+	ws := bazelWS(t, map[string]string{"x": "1"})
+	r := ts.tun(ws, "bazel", "sh", "cat /tun/tun.bazelrc")
+	if r.code != 0 || !strings.Contains(r.stdout, "common --remote_cache=grpc://tun\n") || strings.Contains(r.stdout, "--remote_executor") ||
+		strings.Contains(r.stderr, "remote execution") {
+		t.Fatalf("%+v", r)
+	}
+}

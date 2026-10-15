@@ -472,13 +472,17 @@ func (s *Server) remoteSetup(in sessionPaths) remoteSetup {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return remoteSetup{socket: sock, executors: s.executionSlots(), readOnly: s.cfg.CacheReadOnly}
+	r := remoteSetup{socket: sock, readOnly: s.cfg.CacheReadOnly}
+	if !s.cfg.SessionsLocal {
+		r.executors = s.executionSlots()
+	}
+	return r
 }
 
 // sessionExecutesRemotely reports whether session id's commands get remote execution (see
 // remoteSetup): the server executes actions and the session can reach its socket.
 func (s *Server) sessionExecutesRemotely(id string) bool {
-	if s.cache == nil || s.cache.Execution == nil {
+	if s.cache == nil || s.cache.Execution == nil || s.cfg.SessionsLocal {
 		return false
 	}
 	if s.cfg.Sandbox == sandbox.Bwrap {

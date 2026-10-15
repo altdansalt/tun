@@ -105,6 +105,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache and execution service in this directory (relative to the data dir); empty disables it")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
 	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
+	sessionRemote := fs.Bool("session-remote-execution", true, "tun bazel sessions send their actions to this server's executors (local slots and runners) when it has the REAPI cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
@@ -217,7 +218,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf,
-		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed, Cache: store, CacheReadOnly: !*cacheWrites})
+		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed, Cache: store, CacheReadOnly: !*cacheWrites, SessionsLocal: !*sessionRemote})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
