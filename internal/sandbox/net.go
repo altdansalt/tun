@@ -351,25 +351,33 @@ func serveCtl(ctl *net.UnixConn, ln *net.TCPListener) {
 		if err != nil || k == 0 {
 			return
 		}
-		var f *os.File
+		// The descriptor is sent through SyscallConn, never File().Fd(): Fd switches the open
+		// file description, which the server's copy shares, to blocking mode, so a second
+		// "egress" (NetUsable's) could leave the server's proxy in a blocking accept that
+		// Close can't interrupt.
+		var rc syscall.RawConn
+		var c net.Conn
 		req := string(buf[:k])
 		if req == "egress" {
-			f, err = ln.File()
+			rc, err = ln.SyscallConn()
 		} else if p, ok := strings.CutPrefix(req, "dial "); ok {
-			var c net.Conn
 			if c, err = net.DialTimeout("tcp", "127.0.0.1:"+p, 2*time.Second); err == nil {
-				f, err = c.(*net.TCPConn).File()
-				c.Close()
+				rc, err = c.(*net.TCPConn).SyscallConn()
 			}
 		} else {
 			err = fmt.Errorf("unknown request %q", req)
 		}
+		if err == nil {
+			err = rc.Control(func(fd uintptr) {
+				ctl.WriteMsgUnix([]byte("ok"), syscall.UnixRights(int(fd)), nil)
+			})
+		}
+		if c != nil {
+			c.Close()
+		}
 		if err != nil {
 			ctl.WriteMsgUnix([]byte(err.Error()), nil, nil)
-			continue
 		}
-		ctl.WriteMsgUnix([]byte("ok"), syscall.UnixRights(int(f.Fd())), nil)
-		f.Close()
 	}
 }
 
