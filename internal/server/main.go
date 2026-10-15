@@ -52,8 +52,14 @@ func DefaultDataDir() string {
 
 // Main implements `tun serve`. It returns the process exit code.
 func Main(args []string, stderr io.Writer) int {
+	return serve(args, os.Stdin, os.Stdout, stderr)
+}
+
+func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	ephemeral := fs.Bool("ephemeral", false, "use random loopback port and temporary data; print TUN_URL and TUN_TOKEN on stdout when ready")
+	exitOnEOF := fs.Bool("exit-on-eof", false, "shut down when stdin closes")
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
@@ -79,6 +85,24 @@ func Main(args []string, stderr io.Writer) int {
 	}
 	if fs.NArg() > 0 {
 		return fail("serve takes no arguments, got %q", fs.Args())
+	}
+	if *ephemeral {
+		conflict := ""
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "addr" || f.Name == "data" {
+				conflict = f.Name
+			}
+		})
+		if conflict != "" {
+			return fail("--ephemeral cannot be combined with --%s", conflict)
+		}
+		*addr = "127.0.0.1:0"
+		dir, err := os.MkdirTemp("", "tun-ephemeral-")
+		if err != nil {
+			return fail("temporary data dir: %v", err)
+		}
+		defer os.RemoveAll(dir)
+		*data = dir
 	}
 	limit, err := parseSize(*maxUpload)
 	if err != nil {
@@ -121,6 +145,7 @@ func Main(args []string, stderr io.Writer) int {
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
+	defer s.Close()
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		return fail("listen: %v", err)
@@ -129,16 +154,27 @@ func Main(args []string, stderr io.Writer) int {
 	fmt.Fprintf(stderr, "tun: serving on http://%s (data %s, sandbox %s, max-jobs %d)\n", ln.Addr(), s.cfg.DataDir, *mode, *maxJobs)
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	errc := make(chan error, 1)
 	go func() { errc <- hs.Serve(ln) }()
+	eof := make(chan struct{})
+	if *exitOnEOF {
+		go func() { _, _ = io.Copy(io.Discard, stdin); close(eof) }()
+	}
+	if *ephemeral {
+		if _, err := fmt.Fprintf(stdout, "TUN_URL=http://%s\nTUN_TOKEN=%s\n", ln.Addr(), s.Token()); err != nil {
+			hs.Close()
+			return fail("write environment: %v", err)
+		}
+	}
 	select {
+	case <-eof:
 	case sig := <-sigs:
 		fmt.Fprintf(stderr, "tun: %v: shutting down; running jobs are killed and will show as failed\n", sig)
 	case err := <-errc:
 		fmt.Fprintf(stderr, "tun: serve: %v\n", err)
 	}
 	hs.Close()
-	s.Close()
 	return 0
 }
 

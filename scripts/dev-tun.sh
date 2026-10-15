@@ -1,0 +1,34 @@
+#!/bin/bash
+# Build a private tun server and run a command against it.
+set -euo pipefail
+if [ "$#" -eq 0 ]; then
+  echo "usage: scripts/dev-tun.sh COMMAND [ARG...]" >&2
+  exit 125
+fi
+root=$(cd "$(dirname "$0")/.." && pwd)
+tmp=$(mktemp -d)
+pid=
+cleanup() {
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+(cd "$root" && go build -o "$tmp/tun" ./cmd/tun)
+# A FIFO makes readiness explicit and EOF shuts the server down if this wrapper dies.
+mkfifo "$tmp/env" "$tmp/stdin"
+exec 3<>"$tmp/stdin"
+"$tmp/tun" serve --ephemeral --exit-on-eof <"$tmp/stdin" >"$tmp/env" 3>&- &
+pid=$!
+{
+  IFS= read -r url
+  IFS= read -r token
+} <"$tmp/env"
+[[ "$url" == TUN_URL=http://127.0.0.1:* && "$token" == TUN_TOKEN=?* ]]
+export TUN_URL="${url#TUN_URL=}" TUN_TOKEN="${token#TUN_TOKEN=}"
+export PATH="$tmp:$PATH"
+"$@" 3>&-
