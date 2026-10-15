@@ -77,14 +77,15 @@ func NetUsable() error {
 	if err != nil {
 		return err
 	}
-	f, err := n.call("egress")
+	// Wait for Start's own request for the egress listener: asking the helper for it a second
+	// time is what used to race with the server's Accept (see serveCtl).
+	err = n.egressReady()
 	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	cmd.Wait()
 	n.Close()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(out.String()))
 	}
-	f.Close()
 	return nil
 }
 
@@ -93,6 +94,11 @@ type Net struct {
 	mu  sync.Mutex // one request/response at a time on ctl
 	ctl *net.UnixConn
 	hs  *http.Server // the egress proxy
+
+	ready  chan struct{} // closed once serveEgress has the listener (or failed to get it)
+	lnMu   sync.Mutex
+	ln     *net.TCPListener // the egress listener, once serveEgress has it
+	lnErr  error
 }
 
 func newNet() (*Net, *os.File, error) {
@@ -107,21 +113,38 @@ func newNet() (*Net, *os.File, error) {
 		syscall.Close(fds[1])
 		return nil, nil, err
 	}
-	n := &Net{ctl: c.(*net.UnixConn), hs: &http.Server{Handler: http.HandlerFunc(egress), ReadHeaderTimeout: time.Minute}}
+	n := &Net{ctl: c.(*net.UnixConn), hs: &http.Server{Handler: http.HandlerFunc(egress), ReadHeaderTimeout: time.Minute}, ready: make(chan struct{})}
 	return n, os.NewFile(uintptr(fds[1]), "tun-netns-ctl"), nil
 }
 
 // serveEgress gets the egress listener from the helper and serves the proxy on it until Close.
+// It asks only once: the listener's open file description is shared with the helper.
 func (n *Net) serveEgress() {
+	var ln net.Listener
 	f, err := n.call("egress")
-	if err != nil {
-		return // the job didn't start or the helper is gone; Dial reports such errors
+	if err == nil {
+		ln, err = net.FileListener(f)
+		f.Close()
 	}
-	ln, err := net.FileListener(f)
-	f.Close()
+	n.lnMu.Lock()
+	if err == nil {
+		n.ln = ln.(*net.TCPListener)
+	}
+	n.lnErr = err
+	n.lnMu.Unlock()
+	close(n.ready)
 	if err == nil {
 		n.hs.Serve(ln) // closes ln; returns at once if Close came first
 	}
+	// Otherwise the job didn't start or the helper is gone; Dial reports such errors.
+}
+
+// egressReady waits until serveEgress got the egress listener and returns its error.
+func (n *Net) egressReady() error {
+	<-n.ready // call has a deadline
+	n.lnMu.Lock()
+	defer n.lnMu.Unlock()
+	return n.lnErr
 }
 
 // Dial connects to 127.0.0.1:port inside the job's network namespace.
@@ -135,7 +158,20 @@ func (n *Net) Dial(port int) (net.Conn, error) {
 }
 
 // Close stops the egress proxy and drops the control connection. Call it once the job ended.
+//
+// The listener's open file description is shared with the helper inside the sandbox, so its
+// O_NONBLOCK flag is not ours alone: if it ever ends up in blocking mode, Accept sits in the
+// accept4 syscall and closing the fd waits for it forever. shutdown(2) wakes such an accept
+// (EINVAL on Linux), so it comes first.
 func (n *Net) Close() {
+	n.lnMu.Lock()
+	ln := n.ln
+	n.lnMu.Unlock()
+	if ln != nil {
+		if rc, err := ln.SyscallConn(); err == nil {
+			rc.Control(func(fd uintptr) { syscall.Shutdown(int(fd), syscall.SHUT_RDWR) })
+		}
+	}
 	n.hs.Close()
 	n.ctl.Close()
 }
@@ -351,25 +387,33 @@ func serveCtl(ctl *net.UnixConn, ln *net.TCPListener) {
 		if err != nil || k == 0 {
 			return
 		}
-		var f *os.File
+		// The descriptor is sent straight from the socket (SyscallConn), never via File().Fd():
+		// Fd puts the open file description into blocking mode, and the server's copy shares
+		// it. A second "egress" request used to do that after the server had made its listener
+		// non-blocking, so the server's Accept blocked in the syscall and Close hung with it.
+		var rc syscall.RawConn
+		var c net.Conn
 		req := string(buf[:k])
 		if req == "egress" {
-			f, err = ln.File()
+			rc, err = ln.SyscallConn()
 		} else if p, ok := strings.CutPrefix(req, "dial "); ok {
-			var c net.Conn
 			if c, err = net.DialTimeout("tcp", "127.0.0.1:"+p, 2*time.Second); err == nil {
-				f, err = c.(*net.TCPConn).File()
-				c.Close()
+				rc, err = c.(*net.TCPConn).SyscallConn()
 			}
 		} else {
 			err = fmt.Errorf("unknown request %q", req)
 		}
+		if err == nil {
+			err = rc.Control(func(fd uintptr) {
+				_, _, err = ctl.WriteMsgUnix([]byte("ok"), syscall.UnixRights(int(fd)), nil)
+			})
+		}
+		if c != nil {
+			c.Close()
+		}
 		if err != nil {
 			ctl.WriteMsgUnix([]byte(err.Error()), nil, nil)
-			continue
 		}
-		ctl.WriteMsgUnix([]byte("ok"), syscall.UnixRights(int(f.Fd())), nil)
-		f.Close()
 	}
 }
 
