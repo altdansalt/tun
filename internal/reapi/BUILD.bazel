@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "reapi",
+    srcs = [
+        "action.go",
+        "grpc.go",
+        "store.go",
+        "wire.go",
+    ],
+    importpath = "github.com/altdansalt/tun/internal/reapi",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "reapi_test",
+    srcs = [
+        "reapi_test.go",
+        "review_test.go",
+    ],
+    embed = [":reapi"],
+)

@@ -1,0 +1,45 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "server",
+    srcs = [
+        "disk.go",
+        "exec.go",
+        "files.go",
+        "gc.go",
+        "hub.go",
+        "jobs.go",
+        "logcap.go",
+        "main.go",
+        "runner.go",
+        "runnermain.go",
+        "server.go",
+        "services.go",
+        "session.go",
+    ],
+    importpath = "github.com/altdansalt/tun/internal/server",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/api",
+        "//internal/bep",
+        "//internal/reapi",
+        "//internal/sandbox",
+        "//internal/workspace",
+    ],
+)
+
+go_test(
+    name = "server_test",
+    srcs = [
+        "disk_test.go",
+        "main_test.go",
+        "review2_test.go",
+        "session_test.go",
+    ],
+    embed = [":server"],
+    deps = [
+        "//internal/api",
+        "//internal/sandbox",
+        "//internal/workspace",
+    ],
+)

@@ -551,6 +551,8 @@ Bazel flags.
 - Sandbox tests skip (t.Skip) when bwrap is unusable, so the suite passes on hosts without it;
   network isolation tests likewise when `bwrap --unshare-net` with the helper is unusable.
 - `scripts/ci.sh` (vet, build, test -race) must pass.
+- `bazel test //...` (`scripts/bazel-ci.sh`) must pass too: MODULE.bazel with rules_go, gazelle-generated
+  BUILD files, hermetic Go SDK at go.mod's version (so the code must build and pass with Go 1.25).
 
 ## Non-goals for v0 (later, driven by usage)
 Service-to-service networking (with isolation, jobs can't reach each other at all),

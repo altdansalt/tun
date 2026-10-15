@@ -1,0 +1,5 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/altdansalt/tun
+# Regenerate BUILD files after adding packages or imports: bazel run //:gazelle
+gazelle(name = "gazelle")

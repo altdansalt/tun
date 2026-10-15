@@ -30,6 +30,21 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     Sessions use the server's REAPI remote cache automatically (`tun serve --cache-dir`, on by
     default) through a per-session socket; action results are per client.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
+- **Bazel** (M0 of docs/bazel.md; `scripts/ci.sh` stays the default CI for now):
+  - `tun run -- ./scripts/bazel-ci.sh` — checks that every Go file is in a BUILD.bazel
+    (`-e GAZELLE=1`: gazelle's full diff, ~15s more), then `bazel test //...` (unit + integration
+    tests, and the e2e suites as `//scripts:e2e_test`, `//scripts:e2e_runners_test` against the
+    Bazel-built `//cmd/tun`). Arguments replace `//...` and go to `bazel test` as is:
+    `tun run -- ./scripts/bazel-ci.sh --test_filter=TestEphemeral //internal/server:server_test`.
+    `--config=race` adds the race detector (ci.sh always uses it; Bazel doesn't by default).
+  - After adding/removing Go files or imports: `bazel run //:gazelle` (in a tun job, with
+    `--out` for the BUILD files; e.g. `tun run --out internal -c 'bazel --output_user_root=$TMPDIR/b run //:gazelle'`)
+    and commit the BUILD.bazel changes. Test data/tags/size in BUILD files are kept by gazelle.
+  - Caches: output base in the job's `$TMPDIR` (deleted at exit; never let Bazel default to
+    `$XDG_CACHE_HOME/bazel`), shared repository cache and disk cache in
+    `$XDG_CACHE_HOME/tun-bazel/` on each tun host. The disk cache also caches test results:
+    an unchanged test shows `(cached) PASSED`; `--nocache_test_results` reruns it. Every job on a
+    host can write that cache (see the trust note in scripts/bazel-ci.sh; `BAZEL_DISK_CACHE=0` skips it).
 - Fallback if tun is down or you suspect tun itself: `scripts/bb-ci.sh` (same CI on a BuildBuddy runner).
 - If tun gets in your way (missing feature, confusing error, slow), note it in your final report under
   "tun friction" — that's the most valuable feedback for what to build next.

@@ -9,4 +9,4 @@ tun help                          # full CLI docs
 tun runner --hub URL              # on another machine: run that server's jobs too (pull-based)
 ```
 
-See SPEC.md for the contract (CLI, HTTP API, sandboxing). `scripts/ci.sh` builds and tests.
+See SPEC.md for the contract (CLI, HTTP API, sandboxing). `scripts/ci.sh` builds and tests; so does `scripts/bazel-ci.sh` (Bazel, see AGENTS.md).
