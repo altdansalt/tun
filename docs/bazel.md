@@ -55,6 +55,15 @@ server**. Warm Bazel alone is the first stepping stone.
 2. Per-host `--repository_cache` (downloads) and `--disk_cache`.
 3. tun's remote cache on the hub: CAS + action cache. Bootstrap: BuildBuddy's.
 
+**How jobs reach the cache/executor: a unix socket, not the network.** Verified 2026-10-15: Bazel's
+gRPC client ignores HTTPS_PROXY, and jobs have no DNS, so `--remote_cache=grpcs://...` fails in a
+job. `--remote_proxy=unix:PATH` works: Bazel speaks grpcs (TLS, authority from the URL) over the
+socket; a host-side forwarder to remote.buildbuddy.dev:443 gave remote cache hits. So tun binds a
+socket into the sandbox (e.g. `/tun/cache.sock`) and adds `--remote_proxy=unix:...` itself. The
+bootstrap forwarder is a fixed-destination TCP passthrough (the BuildBuddy key is then a job flag);
+tun's own cache/executor later serves h2c on that socket with auth on the host side, so jobs never
+need a network or a token for it.
+
 Only executors (tun itself) write the action cache once remote execution exists; sessions
 upload no local results (`--noremote_upload_local_results`), so a job can't poison the cache.
 
