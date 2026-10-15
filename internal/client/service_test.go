@@ -383,3 +383,40 @@ func TestServiceJSONFailureAndEarlyLimit(t *testing.T) {
 		t.Errorf("over max-services: %+v, job dirs %d -> %d", r, len(before), len(after))
 	}
 }
+
+// TestServiceSurvivesGC: the retention sweep must leave a running service (EndedAt nil) alone
+// even with retention far shorter than its lifetime, while sweeping services that ended,
+// including ones canceled before they started.
+func TestServiceSurvivesGC(t *testing.T) {
+	ts := startServer(t, server.Config{KeepWork: time.Millisecond, GCInterval: 20 * time.Millisecond, MaxServices: 2})
+	ws := t.TempDir()
+	os.WriteFile(ws+"/f", []byte("x"), 0o644)
+	r := ts.tun(ws, append([]string{"run", "--service", "--port", "8080"}, helperArgs(t)[1:]...)...) // with a workspace
+	lines := strings.Split(strings.TrimSpace(r.stdout), "\n")
+	if r.code != 0 || len(lines) != 2 {
+		t.Fatalf("service: %+v", r)
+	}
+	id := lines[0]
+	_, u, _ := strings.Cut(lines[1], " ")
+	for i := 0; i < 20; i++ {
+		c := ts.client()
+		j, err := c.Create(context.Background(), api.CreateJob{Argv: []string{"sleep", "30"}, Service: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Cancel(context.Background(), j.ID)
+		ts.waitDone(j.ID)
+	}
+	time.Sleep(300 * time.Millisecond) // many sweeps
+	if code, body := ts.get(u+"env", true); code != 200 || !strings.Contains(body, "PORT=") {
+		t.Errorf("service after sweeps: %d %q", code, body)
+	}
+	if j := ts.status(id); j.State != api.Running || j.WorkDeleted {
+		t.Errorf("running service touched by gc: %+v", j)
+	}
+	if _, err := os.Stat(ts.data + "/jobs/" + id + "/sandbox/work/f"); err != nil {
+		t.Errorf("running service's workspace deleted: %v", err)
+	}
+	ts.tun("", "cancel", id)
+	ts.waitFor(id, func(j api.Job) bool { return j.WorkDeleted })
+}
