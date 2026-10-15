@@ -71,14 +71,19 @@ client works with zero config.
 For testing, `tun serve --ephemeral` uses a random loopback port and a fresh temporary
 data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
 it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
-stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
-diagnostics go to stderr. SIGINT/SIGTERM drain admitted jobs (including queued commands) for up to --drain-timeout
+stdout contains exactly three lines: `TUN_URL=http://127.0.0.1:PORT`, `TUN_TOKEN=TOKEN` (admin)
+and `TUN_DATA=DIR` (the data dir, e.g. for `tun token --data DIR new NAME`); diagnostics go
+to stderr. SIGINT/SIGTERM drain admitted jobs (including queued commands) for up to --drain-timeout
 (default 15m), rejecting new submissions with retryable 503s; then stop the server.
 See docs/deploy.md for required systemd settings and session restart behavior.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
 `scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server
 (with extra `tun serve` flags from `$DEV_TUN_SERVE_ARGS`, word-split),
 exports its credentials and prepends the binary directory to PATH, runs COMMAND, and cleans up.
+`DEV_TUN_CLIENTS=alice,bob` also issues a client token per name and exports it as
+`TUN_TOKEN_alice`, `TUN_TOKEN_bob` (names: letters, digits, `_`), for multi-client tests:
+`TUN_TOKEN=$TUN_TOKEN_alice tun run ...`. `TUN_TOKEN` stays the admin token; `TUN_DATA` is the
+server's data dir.
 For example: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
 CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable explicitly
 (also with `-run` in `TEST_FLAGS`, where it is otherwise skipped). `scripts/ci.sh` splits
@@ -379,7 +384,8 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   dir, read from the dir at start) names it, the old instance is gone and its jobs fail at
   once ("runner N restarted"). Otherwise the old instance is *retired*: its unstarted jobs
   are requeued, it gets no more work, and its polls (still its heartbeat) are answered with
-  `superseded` set; it finishes and reports the jobs it holds, then exits (status 1). So two
+  `superseded` set (for an instance the hub dropped, e.g. as lost, the message says why); it
+  finishes and reports the jobs it holds, then exits (status 1). So two
   live runners with one name don't fight: the older one drains. Polls from retired instances
   never touch the current one (retired ids are remembered for an hour after their last job),
   and within one instance `seq` is checked before anything is updated. A running job that

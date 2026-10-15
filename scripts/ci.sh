@@ -57,7 +57,7 @@ fi
 # with -run or PKGS only if E2E=1.
 e2e() {
   if [ "${E2E:-$((run_e2e && !run))}" = 1 ]; then
-    time scripts/dev-tun.sh ./scripts/e2e.sh
+    time DEV_TUN_CLIENTS=alice,bob scripts/dev-tun.sh ./scripts/e2e.sh
     time DEV_TUN_SERVE_ARGS='--local-slots 0 --runner-timeout 3s' scripts/dev-tun.sh ./scripts/e2e-runners.sh
   fi
 }

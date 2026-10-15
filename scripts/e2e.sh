@@ -75,6 +75,13 @@ if command -v bazel >/dev/null; then
   grep -Eq "[0-9]+ remote cache hit" "$tmp/other"
   cd "$tmp"
 fi
+# Per-client tokens from dev-tun.sh (DEV_TUN_CLIENTS=alice,bob): logs are per client.
+if [ -n "${DEV_TUN_CLIENTS:-}" ]; then
+  a=$(TUN_TOKEN=$TUN_TOKEN_alice tun run --detach -- echo from-alice)
+  [ "$(TUN_TOKEN=$TUN_TOKEN_alice tun logs -f "$a")" = from-alice ]
+  ! TUN_TOKEN=$TUN_TOKEN_bob tun logs "$a" >/dev/null 2>&1
+  [ "$(tun logs "$a")" = from-alice ] # TUN_TOKEN is still the admin token
+fi
 echo 'e2e: passed'
 
 # Real process restart regression.

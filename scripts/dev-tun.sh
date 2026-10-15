@@ -39,8 +39,20 @@ pid=$!
 {
   IFS= read -r url
   IFS= read -r token
+  IFS= read -r data
 } <"$tmp/env"
-[[ "$url" == TUN_URL=http://127.0.0.1:* && "$token" == TUN_TOKEN=?* ]]
-export TUN_URL="${url#TUN_URL=}" TUN_TOKEN="${token#TUN_TOKEN=}"
+[[ "$url" == TUN_URL=http://127.0.0.1:* && "$token" == TUN_TOKEN=?* && "$data" == TUN_DATA=/* ]]
+export TUN_URL="${url#TUN_URL=}" TUN_TOKEN="${token#TUN_TOKEN=}" TUN_DATA="${data#TUN_DATA=}"
+# DEV_TUN_CLIENTS=alice,bob: issue a client token per name, exported as TUN_TOKEN_alice etc.
+# (TUN_TOKEN stays the admin token).
+IFS=, read -r -a clients <<<"${DEV_TUN_CLIENTS:-}"
+for c in "${clients[@]}"; do
+  if [[ ! "$c" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "dev-tun.sh: DEV_TUN_CLIENTS: client name '$c' must be letters, digits and _" >&2
+    exit 125
+  fi
+  t=$("$tmp/tun" token --data "$TUN_DATA" new "$c")
+  export "TUN_TOKEN_$c=$t"
+done
 export PATH="$tmp:$PATH"
 "$@" 3>&-

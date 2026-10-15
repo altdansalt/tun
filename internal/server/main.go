@@ -99,7 +99,7 @@ func Main(args []string, stderr io.Writer) int {
 func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	ephemeral := fs.Bool("ephemeral", false, "use random loopback port and temporary data; print TUN_URL and TUN_TOKEN on stdout when ready")
+	ephemeral := fs.Bool("ephemeral", false, "use random loopback port and temporary data; print TUN_URL, TUN_TOKEN and TUN_DATA on stdout when ready")
 	exitOnEOF := fs.Bool("exit-on-eof", false, "shut down when stdin closes")
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
@@ -314,7 +314,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		go func() { _, _ = io.Copy(io.Discard, stdin); close(eof) }()
 	}
 	if *ephemeral {
-		if _, err := fmt.Fprintf(stdout, "TUN_URL=http://%s\nTUN_TOKEN=%s\n", ln.Addr(), s.Token()); err != nil {
+		if _, err := fmt.Fprintf(stdout, "TUN_URL=http://%s\nTUN_TOKEN=%s\nTUN_DATA=%s\n", ln.Addr(), s.Token(), s.cfg.DataDir); err != nil {
 			hs.Close()
 			return fail("write environment: %v", err)
 		}

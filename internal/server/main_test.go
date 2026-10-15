@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,8 +38,16 @@ func TestEphemeral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(url, "TUN_URL=http://127.0.0.1:") || !strings.HasPrefix(token, "TUN_TOKEN=") {
-		t.Fatalf("environment: %q %q", url, token)
+	data, err := lines.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(url, "TUN_URL=http://127.0.0.1:") || !strings.HasPrefix(token, "TUN_TOKEN=") || !strings.HasPrefix(data, "TUN_DATA=/") {
+		t.Fatalf("environment: %q %q %q", url, token, data)
+	}
+	dataDir := strings.TrimSpace(strings.TrimPrefix(data, "TUN_DATA="))
+	if _, err := os.Stat(filepath.Join(dataDir, "token")); err != nil {
+		t.Fatalf("TUN_DATA is not the data dir: %v", err)
 	}
 	base := strings.TrimSpace(strings.TrimPrefix(url, "TUN_URL="))
 	req, _ := http.NewRequest("GET", base+"/v1/jobs", nil)
@@ -75,6 +84,9 @@ func TestEphemeral(t *testing.T) {
 		t.Fatalf("missing data diagnostic: %s", diagnostic)
 	}
 	dir := diagnostic[start+6 : start+end]
+	if dir != dataDir {
+		t.Fatalf("TUN_DATA %s, diagnostic data %s", dataDir, dir)
+	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("temporary dir remains: %s: %v", dir, err)
 	}
