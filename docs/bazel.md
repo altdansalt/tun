@@ -730,6 +730,7 @@ Validation of the zero-slot follow-up (2026-10-15):
 
 | exercise | outer tun job | result |
 |---|---|---|
+| full CI: vet, build, race tests, CLI suites and drain/restart checks (`TEST_FLAGS="-p 1"`) | `20261015T135806072272-f1303fc8` (tun-r4) | passed in 1285.220s; client 477.385s, REAPI 215.610s; zero-slot hub drain 3.000s, session hub/runner drains 54.848/60.396s |
 | real hub/runner restarts, including zero-slot hub and runner-hosted sessions | `20261015T134528679625-281e4940` (tun-r4) | 222.811s; ordinary zero-slot hub drain 4.249s; session hub/runner drains 58.000/51.097s, retained output/logs and cache hits after restart |
 | runner service HTTP streaming/WebSocket, service re-adoption after hub drain timeout, synchronized session cancellation | `20261015T135044572540-2a60fdf7` (tun-r6) | 111.789s including compilation; tests 4.606s, service 0.40s, service restart 1.11s |
 | HTTP/1.1 tunnel ALPN against an HTTP/2-capable TLS hub | `20261015T134820174178-8554debd` (tun-r5) | passed; test 0.11s |
@@ -751,3 +752,10 @@ passed all Go packages in `20261015T134835670473-6b23a643` (client 366.601s, REA
 144.093s); that superseded job was canceled before finishing its old smoke script.
 The failure also exposed a cancellation test racing runner sandbox startup; it now
 waits for command output before asserting that a warm lease survives cancellation.
+
+The passing full run also downloaded 3 files (751 bytes) by test label and 2 log
+files (720 bytes) by `.log`, after another session command, and passed private-network
+runner service readiness/proxy checks. A redundant standalone service check
+(`20261015T140920775200-6fc650c8`) stayed queued for 558.903s before cancellation;
+the full CI covered that check. A second verbose full CI was canceled once the
+complete run passed. No shared hub or runner was restarted for these checks.
