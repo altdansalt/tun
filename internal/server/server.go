@@ -24,11 +24,12 @@ import (
 
 // Config configures a Server.
 type Config struct {
-	DataDir   string
-	MaxJobs   int
-	Sandbox   string // sandbox.Bwrap or sandbox.None (already resolved)
-	MaxUpload int64  // bytes
-	KillGrace time.Duration
+	DataDir     string
+	MaxJobs     int
+	MaxServices int    // service jobs run at once, separately from MaxJobs; more are rejected
+	Sandbox     string // sandbox.Bwrap or sandbox.None (already resolved)
+	MaxUpload   int64  // bytes
+	KillGrace   time.Duration
 
 	MaxDownload int64 // max total file bytes per files request; 0 = DefaultMaxDownload
 	// Retention (see gc.go); zero keeps forever.
@@ -47,6 +48,7 @@ type Server struct {
 	jobs    map[string]*job
 	queue   []*job // FIFO of queued jobs
 	running int
+	svc     services
 	closed  bool
 	wg      sync.WaitGroup
 	gc      gcState
@@ -57,6 +59,9 @@ type job struct {
 	Env  map[string]string  `json:"env,omitempty"`
 	done chan struct{}      // closed when the job reaches a terminal state
 	kill func(state string) // set while running; requests termination with the given end state
+	// cancelReq is set by a cancel that arrives after the job left the queue (or, for a
+	// service, was admitted) but before run started it; run then finishes it as canceled.
+	cancelReq bool
 }
 
 // New opens (creating if needed) the data dir, loads the token and existing jobs, and marks
@@ -64,6 +69,9 @@ type job struct {
 func New(cfg Config) (*Server, error) {
 	if cfg.MaxJobs < 1 {
 		cfg.MaxJobs = 1
+	}
+	if cfg.MaxServices < 1 {
+		cfg.MaxServices = 4
 	}
 	if cfg.KillGrace == 0 {
 		cfg.KillGrace = 10 * time.Second
@@ -208,7 +216,7 @@ func newID() string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"ok": true, "sandbox": s.cfg.Sandbox, "max_jobs": s.cfg.MaxJobs})
+		writeJSON(w, 200, map[string]any{"ok": true, "sandbox": s.cfg.Sandbox, "max_jobs": s.cfg.MaxJobs, "max_services": s.cfg.MaxServices})
 	})
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +240,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", auth(s.cancelJob))
 	mux.HandleFunc("GET /v1/jobs/{id}/{stream}", auth(s.logs))
 	mux.HandleFunc("GET /v1/jobs/{id}/files", auth(s.files))
+	mux.HandleFunc("/v1/jobs/{id}/ports/{port}", auth(s.proxy))
+	mux.HandleFunc("/v1/jobs/{id}/ports/{port}/{path...}", auth(s.proxy))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, fmt.Sprintf("no such endpoint: %s %s", r.Method, r.URL.Path))
 	})
@@ -301,13 +311,19 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	switch {
 	case j.State == api.Queued:
+		queued := false
 		for i, q := range s.queue {
 			if q == j {
 				s.queue = append(s.queue[:i], s.queue[i+1:]...)
+				queued = true
 				break
 			}
 		}
-		s.finish(j, api.Canceled, nil, nil, "canceled while queued")
+		if queued {
+			s.finish(j, api.Canceled, nil, nil, "canceled while queued")
+		} else {
+			j.cancelReq = true // run() owns it now and will finish it before starting
+		}
 	case j.kill != nil:
 		j.kill(api.Canceled)
 	}
@@ -315,8 +331,13 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.snapshot(j))
 }
 
-// finish records a terminal state. Caller holds s.mu.
+// finish records a terminal state, once; later calls are no-ops. Caller holds s.mu.
 func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
+	select {
+	case <-j.done:
+		return
+	default:
+	}
 	now := time.Now().UTC()
 	j.State, j.ExitCode, j.Signal, j.EndedAt, j.kill = state, code, sig, &now, nil
 	if msg != "" {
@@ -325,5 +346,6 @@ func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
 	if err := s.persist(j); err != nil && j.Error == "" {
 		j.Error = "persisting job state: " + err.Error()
 	}
+	s.serviceDone(j)
 	close(j.done)
 }

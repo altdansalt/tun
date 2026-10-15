@@ -25,6 +25,9 @@ const Usage = `tun: run commands on a tun server, in a fresh sandboxed copy of y
 usage:
   tun run [flags] -- <argv...>       run argv (no shell) and stream its output
   tun run [flags] -c '<script>'      run a script via bash -c
+  tun run --service [--port N]... -- <argv...>
+                                     start a long-running service, proxied at
+                                     <server>/v1/jobs/<id>/ports/N/; exits once it's ready
   tun status <id>                    print the job as one JSON object
   tun logs [-f] [--stderr] <id>      print a job's stdout (or stderr); -f follows until it ends
   tun cancel <id>                    kill a job (whole process group) or drop it from the queue
@@ -48,8 +51,9 @@ environment:
 
 job objects (status, ls, cancel) have fields: id, state (queued|running|exited|failed|timeout|
 canceled), exit_code, signal, created_at, started_at, ended_at, argv, script, cwd,
-timeout_sec, workspace, sandbox, error, work_deleted (true once the server's retention
+timeout_sec (0 = none), workspace, sandbox, error, work_deleted (true once the server's retention
 deleted the job's files; status and logs remain).
+Services also have service: true and ports: [{port, host_port, ready, path, url}].
 `
 
 const runUsage = `usage: tun run [flags] -- <argv...>
@@ -176,6 +180,8 @@ func runCmd(args []string, e Env) int {
 	script := fs.String("c", "", "run this `script` with bash -c instead of argv")
 	var outs envFlag
 	fs.Var(&outs, "out", "after the job ends, copy `PATH` (file, dir or glob, relative to the workspace root)\nfrom its work dir into the local workspace (repeatable)")
+	svc := serviceFlags(fs)
+	fs.Usage = func() { fmt.Fprint(e.Stderr, runUsage); fs.PrintDefaults(); fmt.Fprint(e.Stderr, serviceUsage) }
 	if err := fs.Parse(args); err != nil {
 		return flagErr(e, err)
 	}
@@ -204,6 +210,12 @@ func runCmd(args []string, e Env) int {
 		}
 	}
 	req.TimeoutSec = int((*timeout + time.Second - 1) / time.Second)
+	if err := svc.apply(fs, &req); err != nil {
+		return errorf(e, "%v", err)
+	}
+	if req.Service && len(outs) > 0 {
+		return errorf(e, "run: --out can't be used with --service (a service doesn't end on its own); stop it with tun cancel, then tun get <id> <path>")
+	}
 	for _, kv := range envs {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
@@ -251,6 +263,9 @@ func runCmd(args []string, e Env) int {
 				fmt.Fprintf(e.Stderr, "tun: workspace %s\n", root)
 			}
 		}
+	}
+	if j.Service {
+		return waitReady(ctx, c, j, *svc.readyTimeout, *jsonOut, e)
 	}
 	code := wait(ctx, cancel, c, j, *jsonOut, e)
 	if len(outs) > 0 {
@@ -420,6 +435,7 @@ func statusCmd(args []string, e Env) int {
 	if err != nil {
 		return errorf(e, "%v", err)
 	}
+	withURLs(newClient(e), &j)
 	printJSON(e, j)
 	return 0
 }
@@ -479,6 +495,7 @@ func lsCmd(args []string, e Env) int {
 		return errorf(e, "%v", err)
 	}
 	for _, j := range js {
+		withURLs(newClient(e), &j)
 		printJSON(e, j)
 	}
 	return 0

@@ -57,6 +57,7 @@ func Main(args []string, stderr io.Writer) int {
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
+	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
@@ -115,7 +116,7 @@ func Main(args []string, stderr io.Writer) int {
 	if *mode == sandbox.None {
 		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit,
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, MaxServices: *maxServices, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)

@@ -29,6 +29,8 @@ type CreateJob struct {
 	Env        map[string]string `json:"env,omitempty"`
 	TimeoutSec int               `json:"timeout_sec,omitempty"`
 	Workspace  string            `json:"workspace,omitempty"` // sha256 of an uploaded tar.gz blob; empty = empty dir
+	Service    bool              `json:"service,omitempty"`   // long-running service: see service.go
+	Ports      []int             `json:"ports,omitempty"`     // ports to expose (service only)
 }
 
 // Job is the job object returned by the API.
@@ -48,7 +50,9 @@ type Job struct {
 	Sandbox    string     `json:"sandbox"`
 	Error      string     `json:"error,omitempty"`
 	// WorkDeleted: retention deleted the job's work/home/tmp dirs; status and logs remain.
-	WorkDeleted bool `json:"work_deleted,omitempty"`
+	WorkDeleted bool   `json:"work_deleted,omitempty"`
+	Service     bool   `json:"service,omitempty"`
+	Ports       []Port `json:"ports,omitempty"`
 }
 
 // Error is the body of every non-2xx response.
