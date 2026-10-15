@@ -65,3 +65,8 @@ With three-second commands, SIGTERM-to-exit measured 2.855s for the hub and
 2.723s for the runner (the signal arrives after the first output). Both retained
 exact stdout/stderr and exit 7; queued work and a submission retry during the
 hub drain also completed.
+
+Full vet/build/race tests and both CLI smoke suites passed in remote tun job
+`20261015T103157856778-48c41529` (177.261s, 0.021s queued). That run measured
+hub drain 2.863s and runner drain 2.723s, and also checked runner loss, replacement,
+network isolation and graceful SIGTERM completion in the existing runner suite.
