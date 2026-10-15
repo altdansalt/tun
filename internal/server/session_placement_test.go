@@ -137,7 +137,7 @@ func TestRunnerCacheProxyRejectsPathsAndRedirects(t *testing.T) {
 		w.WriteHeader(307)
 	}))
 	upstream.Config.Protocols = new(http.Protocols)
-	upstream.Config.Protocols.SetUnencryptedHTTP2(true)
+	upstream.Config.Protocols.SetHTTP1(true)
 	upstream.Start()
 	defer upstream.Close()
 	r := &Runner{cfg: RunnerConfig{Hub: upstream.URL, DataDir: t.TempDir(), Sandbox: "none", KeepBlobs: time.Hour}}

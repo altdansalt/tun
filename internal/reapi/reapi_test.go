@@ -3,11 +3,15 @@ package reapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -474,3 +478,131 @@ func TestStoreRestartBudget(t *testing.T) {
 		t.Fatalf("evicted unrelated file: %v", e)
 	}
 }
+
+// Exercise the actual HTTP/1 backend hop, with chunked multi-message uploads and
+// streamed downloads larger than the frame limit. No HTTP trailers cross it.
+func TestGRPCWebHTTP1Proxy(t *testing.T) {
+	h, _, _ := testServer(t)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 1 {
+			t.Error("backend must use HTTP/1")
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = &http.Transport{Protocols: http1Protocols()}
+	edge := httptest.NewServer(proxy)
+	defer edge.Close()
+	native := httptest.NewUnstartedServer(&httputil.ReverseProxy{
+		Rewrite:   func(p *httputil.ProxyRequest) { u, _ := url.Parse(edge.URL); p.SetURL(u) },
+		Transport: WebTransport{Base: &http.Transport{Protocols: http1Protocols()}},
+	})
+	native.Config.Protocols = Protocols()
+	native.Start()
+	defer native.Close()
+	addr := strings.TrimPrefix(native.URL, "http://")
+	_, status := rpc(t, addr, "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities", "secret", nil)
+	if status != "0" {
+		t.Fatal(status)
+	}
+	_, status = rpc(t, addr, "/unknown.Service/Method", "secret", nil)
+	if status != "12" {
+		t.Fatal(status)
+	}
+	_, status = rpc(t, addr, "/unknown.Service/Method", "bad", nil)
+	if status != "16" {
+		t.Fatal(status)
+	}
+	data := bytes.Repeat([]byte("large blob"), 1<<20)
+	sum := sha256.Sum256(data)
+	name := fmt.Sprintf("uploads/web/blobs/%x/%d", sum, len(data))
+	pr, pw := io.Pipe()
+	produced := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		var err error
+		for off := 0; off < len(data); {
+			end := off + (64 << 10)
+			if end > len(data) {
+				end = len(data)
+			}
+			b := msg(bytesField(1, []byte(name)), intField(2, int64(off)), bytesField(10, data[off:end]))
+			if end == len(data) {
+				b = append(b, intField(3, 1)...)
+			}
+			var prefix [5]byte
+			binary.BigEndian.PutUint32(prefix[1:], uint32(len(b)))
+			if _, err = pw.Write(prefix[:]); err != nil {
+				break
+			}
+			if _, err = pw.Write(b); err != nil {
+				break
+			}
+			off = end
+			if off == 64<<10 {
+				// The backend must ingest the first chunk before we send the
+				// rest: a proxy buffering the whole upload cannot pass.
+				until := time.Now().Add(5 * time.Second)
+				for {
+					info, statErr := os.Stat(h.Store.uploadPath(name))
+					if statErr == nil && info.Size() >= int64(off) {
+						break
+					}
+					if time.Now().After(until) {
+						err = fmt.Errorf("proxy buffered streaming upload")
+						pw.CloseWithError(err)
+						produced <- err
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}
+		produced <- err
+	}()
+	req, _ := http.NewRequest("POST", native.URL+"/google.bytestream.ByteStream/Write", pr)
+	req.Header.Set("X-Tun-Token", "secret")
+	tr := &http.Transport{Protocols: func() *http.Protocols { p := new(http.Protocols); p.SetUnencryptedHTTP2(true); return p }()}
+	defer tr.CloseIdleConnections()
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if _, err = io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Trailer.Get("Grpc-Status") != "0" {
+		t.Fatal(resp.Trailer)
+	}
+	if err = <-produced; err != nil {
+		t.Fatal(err)
+	}
+	b := bytesField(1, []byte(strings.TrimPrefix(name, "uploads/web/")))
+	var prefix [5]byte
+	binary.BigEndian.PutUint32(prefix[1:], uint32(len(b)))
+	req, _ = http.NewRequest("POST", native.URL+"/google.bytestream.ByteStream/Read", bytes.NewReader(append(prefix[:], b...)))
+	req.Header.Set("X-Tun-Token", "secret")
+	resp, err = tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got []byte
+	for {
+		b, err := frameRead(resp.Body)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, get(b, 10).b...)
+	}
+	if !bytes.Equal(got, data) || resp.Trailer.Get("Grpc-Status") != "0" {
+		t.Fatalf("read %d bytes, trailers %v", len(got), resp.Trailer)
+	}
+}
+func http1Protocols() *http.Protocols { p := new(http.Protocols); p.SetHTTP1(true); return p }

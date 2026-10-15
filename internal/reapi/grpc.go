@@ -87,14 +87,31 @@ func grpcTimeout(err error) bool {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/grpc")
-	w.Header().Set("Trailer", "grpc-status, grpc-message")
+	web := r.Header.Get("Content-Type") == "application/grpc-web+proto"
+	if web {
+		w.Header().Set("Content-Type", "application/grpc-web+proto")
+		// HTTP/1 normally drains the request before writing a response. Streaming
+		// RPCs must also be able to report an error before the upload finishes.
+		_ = http.NewResponseController(w).EnableFullDuplex()
+	} else {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Trailer", "grpc-status, grpc-message")
+	}
 	code := 0
 	message := ""
 	defer func() {
 		_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
-		w.Header().Set("grpc-status", strconv.Itoa(code))
-		w.Header().Set("grpc-message", url.PathEscape(message))
+		if web {
+			b := []byte("grpc-status: " + strconv.Itoa(code) + "\r\ngrpc-message: " + url.PathEscape(message) + "\r\n")
+			var prefix [5]byte
+			prefix[0] = 0x80
+			binary.BigEndian.PutUint32(prefix[1:], uint32(len(b)))
+			_, _ = w.Write(prefix[:])
+			_, _ = w.Write(b)
+		} else {
+			w.Header().Set("grpc-status", strconv.Itoa(code))
+			w.Header().Set("grpc-message", url.PathEscape(message))
+		}
 	}()
 	fail := func(c int, e error) {
 		code = c
@@ -119,7 +136,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Client != nil {
 		ns = h.Client(r)
 	}
-	if r.Method != "POST" || r.ProtoMajor != 2 {
+	if r.Method != "POST" || (!web && r.ProtoMajor != 2) {
 		fail(3, fmt.Errorf("gRPC requires HTTP/2 POST"))
 		return
 	}
