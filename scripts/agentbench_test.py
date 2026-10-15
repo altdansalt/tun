@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('agentbench', Path(__file__).with_name('agentbench.py'))
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
@@ -75,6 +77,8 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(set(server.tokens), {'test-token'})
                 self.assertEqual(b.git(repo, 'status', '--porcelain'), '')
                 self.assertEqual(len({r['edit'] for r in rows}), 3)
+                self.assertTrue(all(r['started_at'] for r in rows))
+                self.assertEqual(len({r['job']['id'] for r in rows}), 1)
             finally:
                 server.shutdown()
                 thread.join()

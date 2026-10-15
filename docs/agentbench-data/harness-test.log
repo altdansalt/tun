@@ -1,0 +1,75 @@
+
+Waiting for available remote runner...
+Streaming remote runner logs to: https://app.buildbuddy.dev/invocation/74297ff4-a556-4acc-ac07-ef942a04c496
+[90m2026-10-15 14:29:36.325 UTC [mSyncing existing repo...
+[90m2026-10-15 14:29:36.325 UTC [mConfiguring repository...
+[90m2026-10-15 14:29:36.476 UTC [mConfiguring remote "origin"...
+[90m2026-10-15 14:29:36.482 UTC [32m$ [mgit fetch --force --progress --depth=1 origin aacd144af4faadbd54f01cad001b211be3b20a51
+remote: Total 0 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
+From https://github.com/altdansalt/tun
+ * branch            aacd144af4faadbd54f01cad001b211be3b20a51 -> FETCH_HEAD
+warning: fetch normally indicates which branches had a forced update,
+but that check has been disabled; to re-enable, use '--show-forced-updates'
+flag or run 'git config fetch.showForcedUpdates true'
+[90m2026-10-15 14:29:37.006 UTC [32m$ [mgit clean -x -d --force
+Removing 7cace20c6fe9bdc73ff1802953e90e6f1c13e86b91081332036c4ce752d5ec6e
+Removing 904419a1c9a8fa267d4cfa8ccc89f10998dbbd707a74dd13f88c137bd4e9e55f
+Removing fa1851e0a4c8e92ef758732ef65462c970d4b9ed5b08938445cdd416b734f030
+Removing scripts/__pycache__/
+Removing scripts/agentbench.py
+Removing scripts/agentbench.sh
+Removing scripts/agentbench_test.py
+[90m2026-10-15 14:29:37.016 UTC [32m$ [mgit checkout --force -B main aacd144af4faadbd54f01cad001b211be3b20a51
+Reset branch 'main'
+[90m2026-10-15 14:29:37.133 UTC [32m$ [mgit apply --verbose 7d37ea9e08704cc1402c8ab21541037d25ab28b041a34833dd0b1e563236358f
+Checking patch AGENTS.md...
+Checking patch SPEC.md...
+Checking patch docs/agentbench.md...
+Checking patch docs/bazel.md...
+Checking patch scripts/agentbench.py...
+Checking patch scripts/agentbench.sh...
+Checking patch scripts/agentbench_test.py...
+Applied patch AGENTS.md cleanly.
+Applied patch SPEC.md cleanly.
+Applied patch docs/agentbench.md cleanly.
+Applied patch docs/bazel.md cleanly.
+Applied patch scripts/agentbench.py cleanly.
+Applied patch scripts/agentbench.sh cleanly.
+Applied patch scripts/agentbench_test.py cleanly.
+[90m2026-10-15 14:29:37.150 UTC [32m$ [mif [ -x /usr/local/bin/bazelisk ]; then
+  tun_ci_bin=$(mktemp -d)
+  ln -s /usr/local/bin/bazelisk "$tun_ci_bin/bazel"
+  export PATH="$tun_ci_bin:$PATH"
+  export USE_BAZEL_VERSION=9.3.0
+fi
+python3 scripts/agentbench_test.py
+HEAD is now at 0c9c023 fixture
+HEAD is now at 0c9c023 fixture
+HEAD is now at 0c9c023 fixture
+tun N=3 agent=1 iteration=0 exit=0 wall=0.012s
+tun N=3 agent=0 iteration=0 exit=0 wall=0.013s
+tun N=3 agent=2 iteration=0 exit=0 wall=0.014s
+tun N=3 agent=1 iteration=1 exit=0 wall=0.011s
+tun N=3 agent=0 iteration=1 exit=0 wall=0.013s
+tun N=3 agent=2 iteration=1 exit=0 wall=0.017s
+tun N=3 agent=1 iteration=2 exit=0 wall=0.010s
+tun N=3 agent=0 iteration=2 exit=0 wall=0.010s
+tun N=3 agent=2 iteration=2 exit=0 wall=0.016s
+| system | N | samples | failed | p50 s | p90 s | max s | sum wall s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| tun | 3 | 9 | 0 | 0.013 | 0.017 | 0.017 | 0.116 |
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.980s
+
+OK
+[90m2026-10-15 14:29:38.424 UTC (command exited with code 0)
+
+2026-10-15 14:29:38.424 UTC [mUploading artifacts from /home/buildbuddy/workspace/artifacts/command-0
+[90m2026-10-15 14:29:38.428 UTC [mUploaded 0 artifacts
+[90m2026-10-15 14:29:38.428 UTC [mStarting cleanup
+[90m2026-10-15 14:29:38.429 UTC [mChecking Bazel workspace lock
+[90m2026-10-15 14:29:39.348 UTC [32m$ [mgit gc --auto
+[90mGit maintenance cleaned 0MB
+
+Remote run completed at 2026-10-15 14:29:39.350 UTC

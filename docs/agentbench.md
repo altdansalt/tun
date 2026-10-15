@@ -81,6 +81,54 @@ claiming zero machine work in that case.
 
 ## Measurements (2026-10-15)
 
-Pending final ledger. This exercise uses the shared deployment as observed, with no
-remote-execution flags and no service restart or cache deletion. Bounded selected targets
-replace a full-suite run to limit shared machine time; no milestone deviation.
+Runs use tun commit `b806fc89b3cf720062f8a5f8568b71826b309a63` (benchmark only;
+production/test source matches origin/main `aacd144`) and Gazelle
+`97454a6a7c6088327f0d68938d90ce49facf2132`. Tun uses Bazel 9.3.0; Gazelle retains
+upstream's 8.2.1. Builds run remotely, from this agent VM's checkout.
+
+The initial version used the same nonce/input for all agents and N values within one
+invocation, so concurrent workers could share compiled edited-test results through their
+common client cache. The current script includes N and agent index in input values to
+avoid that shortcut. Separate service invocations have different nonce bytes but the
+same test operations and payload length. Do not compare these tiny regression cases as
+production algorithm rebuild throughput.
+
+### BuildBuddy
+
+All samples passed. The first two tun-repo iterations started fresh Bazel servers;
+subsequent iterations reused analysis. No caches were cleared. [Raw logs and JSONL](agentbench-data/bb/)
+include outer remote-run and inner Bazel invocation URLs. [Gazelle smoke data](agentbench-data/gazelle-bb/)
+contains two iterations to verify the external profile; it is not a five-sample trial.
+
+| system | N | samples | failed | p50 s | p90 s | max s | sum wall s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| bb | 1 | 5 | 0 | 13.596 | 39.290 | 39.290 | 111.576 |
+
+Gazelle N=1, K=2: p50 12.884s, p90/max 17.144s, sum 30.028s.
+
+| repo | iteration | edit | wall s | BB outer remote-run ID |
+|---|---:|---|---:|---|
+
+| tun | 0 | internal/workspace/workspace_test.go | 39.290 | [9466d82f-300a-408c-bd9d-1d951b19b9b9](https://app.buildbuddy.dev/invocation/9466d82f-300a-408c-bd9d-1d951b19b9b9) |
+| tun | 1 | internal/workspace/sync_test.go | 35.947 | [d0f93eba-8e2f-4de6-800f-d23b8b16cdd1](https://app.buildbuddy.dev/invocation/d0f93eba-8e2f-4de6-800f-d23b8b16cdd1) |
+| tun | 2 | internal/server/identity_test.go | 13.596 | [21c43cd1-90b1-4283-b080-c10bf25e6750](https://app.buildbuddy.dev/invocation/21c43cd1-90b1-4283-b080-c10bf25e6750) |
+| tun | 3 | internal/workspace/workspace_test.go | 11.395 | [7219a502-e246-49e6-b41b-7239b8284911](https://app.buildbuddy.dev/invocation/7219a502-e246-49e6-b41b-7239b8284911) |
+| tun | 4 | internal/workspace/sync_test.go | 11.349 | [97c02d9d-481f-4e76-ba1b-1866a8d28b8f](https://app.buildbuddy.dev/invocation/97c02d9d-481f-4e76-ba1b-1866a8d28b8f) |
+| Gazelle | 0 | v2/label/label_test.go | 17.144 | [4265476d-964f-4059-ad69-eb4da9ca9c80](https://app.buildbuddy.dev/invocation/4265476d-964f-4059-ad69-eb4da9ca9c80) |
+| Gazelle | 1 | v2/label/label_test.go | 12.884 | [06dc2343-8c37-46b8-89d1-083d06603d96](https://app.buildbuddy.dev/invocation/06dc2343-8c37-46b8-89d1-083d06603d96) |
+
+### Validation
+
+The three harness tests passed in [74297ff4-a556-4acc-ac07-ef942a04c496](https://app.buildbuddy.dev/invocation/74297ff4-a556-4acc-ac07-ef942a04c496)
+([captured log](agentbench-data/harness-test.log)): concurrent clone/edit/reset loops,
+a real in-process HTTP telemetry endpoint, token forwarding, distinct sessions, summary
+and job capture, nearest-rank percentiles/failure counts, and subprocess timeout cleanup.
+The fallback fixture stubs gofmt because BuildBuddy's default PATH lacks it; actual
+benchmark edits were gofmt'd on the agent VM and compiled/tested remotely on BB.
+An initial harness run failed because the fixture depended on gofmt being installed;
+that fixture dependency is fixed. These are script tests, so no new Go server tests or
+BUILD entries are needed; no server or CLI code changed.
+
+### Tun measurement ledger
+
+Pending bounded shared-deployment runs.
