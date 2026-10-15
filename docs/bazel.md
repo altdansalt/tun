@@ -375,7 +375,52 @@ per-client namespaces client writes can't poison anyone else, so the default can
 Then `executionSlots` returns local slots plus action-capable runner slots when Execution is on.
 
 Deviations from the plan above: sessions upload local results (own namespace, see Trust);
-the per-client disk cache is kept for now (see the measurements); the socket lives under the
+with a remote cache sessions get no `--disk_cache` (measured below: no faster with both); the socket lives under the
 session dir (not `/tun/cache.sock`, since the bind source must be a server-owned directory).
 With `--sandbox none` the rc uses the host path, and a session whose socket path is longer
 than sun_path allows gets no remote cache (and says so).
+
+### Measurements (2026-10-15, tun's own tree)
+
+`scripts/bench-session.sh` in a tun job: `scripts/dev-tun.sh` starts a private server from
+this branch (cache on by default) on the job's host, and the client runs on the same host (no
+network round trips). The tree is this branch merged with feat/bazel-m0 plus gazelle (scratch
+branch, not pushed). Bazel 9.3.0, Go SDK 1.25.14 from M0's MODULE.bazel.
+
+Run 2, `tun bazel test -- //... -//internal/client:client_test -//internal/reapi:reapi_test
+-//scripts:e2e_test` (5 test targets), sessions without a disk cache; outer job
+`20261015T100741124967-924c9aa6` on runner tun-r4 (inner job ids are the private server's):
+
+| step | wall | Bazel | processes | inner job |
+|---|---|---|---|---|
+| (a) new session, empty caches (repository cache too: Go SDK download) | 121.4s | 120.4s | 103 linux-sandbox | 20261015T100801391780-41962487 |
+| (b) `--cold`, warm remote cache ("session on a new host") | **12.6s** | 10.8s | 103 remote cache hit | 20261015T101002693438-3fa8d8e2 |
+| (b) again (`--cold`, remote only) | 13.3s | 11.5s | 103 remote cache hit | 20261015T101137235787-c333181e |
+| (b') `--cold --remote_cache=` (no action cache at all, warm repository cache) | 81.9s | 81.0s | 103 linux-sandbox | 20261015T101015294282-05f286de |
+| (c) warm no-op | **0.98s** | 0.95s | 7 action cache hit | 20261015T101150494377-ad38224e |
+| (d) one-line change in internal/server/server.go | **2.67s** | 2.62s | 4 linux-sandbox | 20261015T101151478407-52e1a9a1 |
+| (d) its no-op | 0.58s | 0.55s | 5 action cache hit | 20261015T101154148120-7e0661a2 |
+
+The one-line change sent one 7.7KB file (12KB manifest); it was a trailing comment, so the
+recompiled server library had the same output and the dependent tests stayed cached (4 actions
+ran). The remote cache held 294MB afterwards.
+
+Run 1, all of `//...` (8 test targets, 3 of which fail in a session, see below), sessions with
+disk *and* remote cache; outer job `20261015T094443470466-e64bc22d` on runner tun-r2: (a)
+447.6s; (b1) `--cold` with disk and remote warm 168.2s (113 disk cache hits); (b2) `--cold`
+with only the remote cache (disk cache deleted) 167.2s (113 remote cache hits); (b3) `--cold
+--remote_cache=` with only the disk cache 226.9s (0 disk cache hits: not understood; Bazel
+re-executed all 117 actions); (c) no-op 96.4s; (d) one-line change 103.9s. The failing tests
+are not cached, so they rerun every time and dominate (c) and (d) (critical path ~95s).
+Disk + remote vs remote only: 168.2s vs 167.2s, hence no disk cache next to the remote cache.
+
+For comparison, `tun run -- ./scripts/ci.sh` (go vet/build, `go test -race` of everything, both
+smoke suites) took 233.7s (job 20261015T093529837825-42cbbe49) and 249.6s
+(20261015T094450267997-c543fe16) on runners: every run pays the whole test suite.
+
+The three targets that fail in a session run a real Bazel themselves (TestBazelReal,
+reapi's TestBazelCache, scripts/e2e.sh's Bazel part): inside Bazel's test sandbox bazelisk has
+no cached Bazel binary and can't download one (Bad Gateway through the session's proxy;
+`latest` needs DNS for the version lookup). That is M0's tests' environment (they pass under
+`go test` in tun run), not the session cache; fix in M0 by passing a Bazel binary as test data
+or tagging them `manual`.
