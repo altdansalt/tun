@@ -170,3 +170,13 @@ process restarts. Cancel/migrate long-lived services before draining for a bound
 restart: a runner's drain timeout kills its remaining services. A hub timeout can leave
 remote jobs/services running; the restarted hub re-adopts them, including their proxy
 and service admission count. Cancellation remains available while draining.
+
+### Cache traffic through HTTP/1 proxies
+
+Deploy the gRPC-Web bridge to **both hub and runners** before enabling runner session
+caches behind exe.dev. Keep the runner's HTTPS hub URL. Restore
+`--cache-dir reapi --cache-max-size 6GB --cache-action-writes=true` on the hub;
+preserve the other flags and data path above. No new runner flag is needed.
+Native Bazel gRPC still uses the local session socket; the runner translates the network
+hop to binary gRPC-Web over HTTP/1.1. A direct external Bazel client still needs native
+HTTP/2 end to end or a local bridge; Bazel does not speak gRPC-Web itself.

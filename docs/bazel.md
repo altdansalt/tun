@@ -544,7 +544,8 @@ manifest sync, per-client caches and BEP parser. Runner log chunks, cancellation
 exit/done acknowledgements use the existing transport. The engine's parent runner data dir
 is hidden in bwrap, including v0 jobs. Session caches remain per client on each host.
 
-The runner's Unix cache socket is an HTTP/2 reverse proxy to the hub. Each lease has a
+The runner's Unix cache socket terminates HTTP/2 gRPC and bridges to binary gRPC-Web
+over HTTP/1.1 to the hub (see the proxy correction below). Each lease has a
 random server-issued cache credential, retained outside the sandbox. The hub binds that
 credential to the lease's client namespace and revokes it on eviction or host loss; it
 cannot authorize the ordinary tun API. Identity headers from the sandbox cannot change
