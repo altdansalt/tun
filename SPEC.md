@@ -25,7 +25,15 @@ tun run [flags] -c '<shell script>' run via bash -c
                     instead of streaming (stdout/stderr then in the object, truncated to a limit)
 tun status <id>   (JSON)          tun logs [-f] <id> [--stderr]       tun cancel <id>
 tun ls            (JSON lines: recent jobs, newest first)
+tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 ```
+`tun run --out PATH` (repeatable): after the job ends (any state), download PATH (relative to the
+workspace root; file, dir, or `path.Match` glob) from the job's work dir into the same relative path
+of the local workspace root (`tun get`: or under `-o DIR`), replacing existing files (temp + rename),
+keeping modes/mtimes. A PATH matching nothing is a `tun: warning:` on stderr; the exit status stays
+the command's. A failed download (size limit, network) turns exit 0 into 125. `tun get` exits 1 if
+any PATH matched nothing or was refused, 125 on errors. Local writes go through an `os.Root`, so
+neither the stream nor local symlinks can write outside the target dir.
 Server address: `$TUN_URL` (default `http://127.0.0.1:7070`). Auth: bearer token. The server
 creates `$DATA/token` on first start (0600) if absent; clients read `$TUN_TOKEN`, else
 `~/.config/tun/token`, else `$DATA/token` for the default data dir (`~/.local/share/tun`), so a local
@@ -72,6 +80,13 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
 - `GET /v1/jobs?limit=N` -> list. `POST /v1/jobs/{id}/cancel`.
 - `GET /v1/jobs/{id}/stdout?offset=N&follow=1` (and `/stderr`): raw bytes from offset; with follow,
   streams (flush as written) until the job ends and all bytes are sent. Reattachable at any offset.
+- `GET /v1/jobs/{id}/files?path=P&path=Q...` -> `application/x-tar` of those paths (dirs recursive)
+  relative to the work dir. 409 while the job is not terminal; 400 for absolute paths, `..`, bad
+  globs; 413 if regular files total more than `--max-download` (default 1GB). All reads go through an
+  `os.Root` on the work dir: symlinks are never followed out of it; links inside the tree are sent as
+  links only if relative and lexically inside; special files are left out. Paths that matched nothing
+  come back as repeated `X-Tun-Missing` headers, left-out entries as `X-Tun-Skipped: path: reason`
+  (values `url.PathEscape`d).
 - `GET /v1/healthz` (no auth).
 Errors: JSON `{"error": "..."}` with proper status codes.
 
@@ -84,5 +99,5 @@ Errors: JSON `{"error": "..."}` with proper status codes.
 - `scripts/ci.sh` (vet, build, test -race) must pass.
 
 ## Non-goals for v0 (later, driven by usage)
-Long-running services / port exposure, artifact download, multi-host scheduling, persistent
+Long-running services / port exposure, multi-host scheduling, persistent
 workspaces, snapshots, incremental (per-file) upload.

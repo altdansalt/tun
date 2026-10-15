@@ -46,6 +46,7 @@ func Main(args []string, stderr io.Writer) int {
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
+	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -64,6 +65,10 @@ func Main(args []string, stderr io.Writer) int {
 	if err != nil {
 		return fail("--max-upload: %v", err)
 	}
+	dlimit, err := parseSize(*maxDownload)
+	if err != nil {
+		return fail("--max-download: %v", err)
+	}
 	switch *mode {
 	case "auto":
 		*mode = sandbox.None
@@ -78,7 +83,7 @@ func Main(args []string, stderr io.Writer) int {
 	default:
 		return fail("--sandbox must be auto, bwrap or none, got %q", *mode)
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit})
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
