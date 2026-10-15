@@ -29,6 +29,7 @@ usage:
   tun logs [-f] [--stderr] <id>      print a job's stdout (or stderr); -f follows until it ends
   tun cancel <id>                    kill a job (whole process group) or drop it from the queue
   tun ls [--limit N]                 recent jobs as JSON lines, newest first
+  tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
   tun serve [flags]                  run the server (tun serve -h)
   tun help                           this text; 'tun <cmd> -h' for per-command flags
 
@@ -63,6 +64,15 @@ cancel the job and exit 128+signal.
 The job's environment is minimal: PATH, LANG, TERM=dumb, USER, HOME and TMPDIR (private to
 the job), GOCACHE/GOMODCACHE/XDG_CACHE_HOME (caches shared across jobs), TUN_JOB_ID, plus -e.
 
+--out PATH (repeatable) gets build outputs back: after the job ends, in any state, PATH
+(relative to the workspace root; file, directory or glob) is copied from the job's work dir
+to the same path in the local workspace, replacing existing files. It copies whatever the
+job left there: '--out .' also pulls job-created files such as .git/hooks into your checkout,
+so name the outputs you want. A PATH that matched
+nothing is a "tun: warning:" on stderr and the exit status stays the command's; if the
+download itself fails (e.g. over the server's size limit), a 0 exit becomes 125.
+Later, or for other paths: tun get <id> PATH...
+
 flags:
 `
 
@@ -82,7 +92,7 @@ func Main(args []string, e Env) int {
 	}
 	cmd, args := args[0], args[1:]
 	run := map[string]func([]string, Env) int{
-		"run": runCmd, "status": statusCmd, "logs": logsCmd, "cancel": cancelCmd, "ls": lsCmd,
+		"run": runCmd, "status": statusCmd, "logs": logsCmd, "cancel": cancelCmd, "ls": lsCmd, "get": getCmd,
 	}[cmd]
 	switch {
 	case cmd == "help" || cmd == "-h" || cmd == "--help":
@@ -163,6 +173,8 @@ func runCmd(args []string, e Env) int {
 	detach := fs.Bool("detach", false, "print the job id to stdout and exit 0 immediately")
 	jsonOut := fs.Bool("json", false, "don't stream; when the job ends print one JSON object {id, state, exit_code, signal, error,\nduration (seconds), stdout, stderr, stdout_truncated, stderr_truncated} (output: last 64KiB of each)")
 	script := fs.String("c", "", "run this `script` with bash -c instead of argv")
+	var outs envFlag
+	fs.Var(&outs, "out", "after the job ends, copy `PATH` (file, dir or glob, relative to the workspace root)\nfrom its work dir into the local workspace (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return flagErr(e, err)
 	}
@@ -176,6 +188,19 @@ func runCmd(args []string, e Env) int {
 		return errorf(e, "run: --timeout must be positive")
 	case *timeout > api.MaxTimeoutSec*time.Second:
 		return errorf(e, "run: --timeout %v is over the server maximum of %v", *timeout, api.MaxTimeoutSec*time.Second)
+	}
+	if err := checkPaths(outs); err != nil {
+		return errorf(e, "run: --out: %v", err)
+	}
+	if *detach && len(outs) > 0 {
+		return errorf(e, "run: --out does not work with --detach; fetch later with tun get <id> PATH...")
+	}
+	var outDir string
+	if len(outs) > 0 {
+		var err error
+		if outDir, err = localRoot(e.Cwd); err != nil {
+			return errorf(e, "run: --out: %v", err)
+		}
 	}
 	req.TimeoutSec = int((*timeout + time.Second - 1) / time.Second)
 	for _, kv := range envs {
@@ -220,8 +245,17 @@ func runCmd(args []string, e Env) int {
 	}
 	if !*jsonOut {
 		fmt.Fprintf(e.Stderr, "tun: job %s\n", j.ID)
+		if !*noWS {
+			if root, err := localRoot(e.Cwd); err == nil {
+				fmt.Fprintf(e.Stderr, "tun: workspace %s\n", root)
+			}
+		}
 	}
-	return wait(ctx, cancel, c, j, *jsonOut, e)
+	code := wait(ctx, cancel, c, j, *jsonOut, e)
+	if len(outs) > 0 {
+		code = fetchOuts(c, j.ID, outs, outDir, code, e)
+	}
+	return code
 }
 
 // upload packs the workspace containing cwd and uploads it unless the server already has it.
