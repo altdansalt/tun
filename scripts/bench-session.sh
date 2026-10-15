@@ -31,6 +31,8 @@ step() {
   end=$(date +%s.%N)
   printf '== %s: exit %d, wall %.2fs: tun bazel %s\n' "$name" "$code" "$(awk "BEGIN {print $end - $start}")" "$*"
   grep -E '^tun: (job|sync|session|bazel)|INFO: (Elapsed|[0-9]+ process)|Executed .* out of|FAILED|NO STATUS' "$out/$name.err" | head -20
+  # Why tests failed (Bazel prints failing tests' logs with --test_output=errors).
+  [ "$code" = 0 ] || grep -E -B2 -A8 -- '^--- FAIL|^FAIL:|panic:|e2e.*FAIL' "$out/$name.err" | head -60
 }
 step a test "$@"
 step b1 --cold test "$@"
