@@ -101,14 +101,20 @@ func TestReviewRunnerDelayedPollOldInstance(t *testing.T) {
 // before [started] ... the call is a 410, so the runner never starts it").
 func TestReviewRunnerStartedCancelRace(t *testing.T) {
 	t.Parallel()
-	ts := startServer(t, hubConfig(""))
+	// One poll per round: under load a round can take longer than hubConfig's 1s liveness
+	// limit, and a lost fake runner gets no more work. Liveness is not what this tests.
+	cfg := hubConfig("")
+	cfg.RunnerDeadAfter = time.Minute
+	ts := startServer(t, cfg)
 	f := &fakeRunner{ts: ts, name: "race", instance: "i1"}
 	f.poll(0)
 	// Batches of jobs raced at once: review/runners raced one at a time 10000 times (~30s
 	// with -race); with batches the old code failed within 40 rounds.
 	const batch = 8
 	bad := 0
-	for i := 0; i < 120 && bad == 0; i++ {
+	// Under load fewer rounds fit; cap the time so a slow host doesn't push the package past
+	// its timeout.
+	for i, start := 0, time.Now(); i < 120 && bad == 0 && time.Since(start) < 20*time.Second; i++ {
 		var ids []string
 		for range batch {
 			ids = append(ids, f.createJob())

@@ -652,3 +652,22 @@ func TestRunnerStartTimeout(t *testing.T) {
 		t.Errorf("requeued: %+v", j)
 	}
 }
+
+// An instance the hub dropped as lost is told why, not that a newer instance took over.
+func TestRunnerLostInstanceToldWhy(t *testing.T) {
+	t.Parallel()
+	cfg := hubConfig("")
+	cfg.RunnerDeadAfter = 200 * time.Millisecond
+	ts := startServer(t, cfg)
+	f := &fakeRunner{ts: ts, name: "quiet", instance: "i1"}
+	f.poll(0)
+	var resp api.RunnerPollResponse
+	eventually(t, "dropped answer", func() bool {
+		time.Sleep(300 * time.Millisecond)
+		_, resp = f.poll(0)
+		return resp.Superseded != ""
+	})
+	if !strings.Contains(resp.Superseded, "dropped by the hub: runner quiet lost") || strings.Contains(resp.Superseded, "newer") {
+		t.Errorf("lost instance's poll: %q", resp.Superseded)
+	}
+}

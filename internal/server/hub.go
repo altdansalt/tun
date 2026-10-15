@@ -45,6 +45,7 @@ type runnerState struct {
 	slots                           int
 	lastSeen                        time.Time
 	retiredAt                       time.Time       // when a newer instance took the name (or it was dropped)
+	dropped                         string          // why the hub gave up on it ("" if superseded)
 	jobs                            map[string]*job // assigned to it and not ended
 	seq                             int             // polls received; only the latest may assign
 	pollSeq                         int64           // highest RunnerPoll.Seq seen from this instance
@@ -149,9 +150,12 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	// A retired instance (superseded by a newer one, or dropped) only heartbeats for the
 	// jobs it still holds; nothing it says touches the current instance.
 	if old := s.retired[p.Instance]; old != nil && p.Instance != "" {
+		why := fmt.Sprintf("superseded by a newer one with the same name (another tun runner --name %s, or a restart)", old.name)
+		if old.dropped != "" {
+			why = "dropped by the hub: " + old.dropped
+		}
 		resp := api.RunnerPollResponse{Jobs: []api.RunnerJob{}, Cancel: []string{}, Superseded: fmt.Sprintf(
-			"runner %s: this instance was superseded by a newer one with the same name (another tun runner --name %s, or a restart); it gets no more work",
-			old.name, old.name)}
+			"runner %s: this instance was %s; it gets no more work", old.name, why)}
 		if old.name == name && (p.Seq == 0 || p.Seq > old.pollSeq) {
 			old.pollSeq, old.lastSeen = max(old.pollSeq, p.Seq), arrival
 			resp.Cancel = s.reconcile(old, held, arrival)
@@ -254,6 +258,7 @@ func (s *Server) retire(rn *runnerState, now time.Time) {
 // with msg, or with the result it already reported via .../exited). Caller holds s.mu.
 func (s *Server) dropRunner(rn *runnerState, msg string) {
 	s.retire(rn, time.Now())
+	rn.dropped = msg
 	for _, j := range rn.jobs {
 		if d := j.exited; d != nil {
 			s.finishRunnerJob(j, *d, msg+" before it finished shipping the job's logs and outputs")
