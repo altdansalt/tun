@@ -41,8 +41,8 @@ if [ -n "$bep" ]; then # a target (or for test, a failed test) per non-flag arg
 fi
 mkdir -p "$ob/server"
 pid=$(cat "$ob/server/server.pid.txt" 2>/dev/null)
-if [ "$cmd" = shutdown ]; then
-  [ -n "$pid" ] && kill "$pid"
+if [ "$cmd" = shutdown ]; then # like Bazel's: returns once the server is gone
+  [ -n "$pid" ] && kill "$pid" && while kill -0 "$pid" 2>/dev/null; do sleep 0.01; done
   rm -f "$ob/server/server.pid.txt"
   exit 0
 fi
