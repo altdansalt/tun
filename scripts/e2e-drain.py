@@ -113,12 +113,12 @@ with tempfile.TemporaryDirectory() as tmp:
                     port = sock.getsockname()[1]
                 url = "http://127.0.0.1:"+str(port)
                 args = ["serve", "--addr", "127.0.0.1:"+str(port), "--data", data,
-                        "--local-slots", "0", "--runner-timeout", "1s", "--drain-timeout", "2m"]
+                        "--local-slots", "0", "--runner-timeout", "1s", "--drain-timeout", "5m"]
                 hub = launch(args, name+"-server")
                 until(lambda: urllib.request.urlopen(url+"/v1/healthz").status == 200)
                 env = dict(os.environ, TUN_URL=url, TUN_TOKEN=open(data+"/token").read().strip())
                 rargs = ["runner", "--hub", url, "--name", "session-worker", "--slots", "1",
-                         "--data", data+"-runner", "--drain-timeout", "2m"]
+                         "--data", data+"-runner", "--drain-timeout", "5m"]
                 worker = launch(rargs, name+"-worker", env)
                 until(lambda: json.loads(urllib.request.urlopen(url+"/v1/healthz").read())["runners"])
                 job = launch(["bazel", "build", "//:slow"], name+"-job", env, ws)
@@ -130,8 +130,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 target = worker if signal_runner else hub
                 drain_start = time.monotonic()
                 target.send_signal(signal.SIGTERM)
-                assert job.wait(timeout=120) == 0, contents(name+"-job", "err")
-                assert target.wait(timeout=120) == 0
+                assert job.wait(timeout=300) == 0, contents(name+"-job", "err")  # a cold nested Bazel: 70-110s on a loaded host
+                assert target.wait(timeout=300) == 0
                 seconds = time.monotonic()-drain_start
                 if signal_runner:
                     worker = launch(rargs, name+"-worker2", env)
@@ -143,7 +143,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 subprocess.run(["tun", "get", "-o", ws+"/got", jid, "//:slow"], env=env, check=True)
                 assert open(ws+"/got/bazel-bin/result.txt").read() == "retained\n"
                 again = launch(["bazel", "build", "//:slow"], name+"-again", env, ws)
-                assert again.wait(timeout=120) == 0, contents(name+"-again", "err")
+                assert again.wait(timeout=300) == 0, contents(name+"-again", "err")
                 assert "remote cache hit" in contents(name+"-again", "err"), contents(name+"-again", "err")
                 worker.send_signal(signal.SIGTERM)
                 assert worker.wait(timeout=30) == 0
