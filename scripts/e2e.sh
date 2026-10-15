@@ -71,7 +71,7 @@ if command -v bazel >/dev/null; then
   tun sessions | grep -q '"commands":4'
   # A new session (another name: its own output base) gets the action from tun's remote cache.
   tun bazel --session other build //:g 2> "$tmp/other"
-  grep -Eq "[0-9]+ (remote|disk) cache hit" "$tmp/other"
+  grep -Eq "[0-9]+ remote cache hit" "$tmp/other"
   cd "$tmp"
 fi
 echo 'e2e: passed'

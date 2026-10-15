@@ -401,9 +401,9 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   --max_idle_secs=<session-idle + 5m> <args...>` in `<work>/<cwd>`, with env PATH, LANG,
   TERM=dumb, USER, HOME, TMPDIR, BAZELISK_HOME, TUN_SESSION (constant per session, so Bazel's
   client env doesn't change between commands). `tun.bazelrc` (rewritten before each command)
-  has `common --repository_cache=...`, `common --disk_cache=...`, `common
-  --experimental_disk_cache_gc_max_size=5G`, and with a remote cache `common
-  --remote_cache=grpc://tun`, `common --remote_proxy=unix:/tun/sock/cache.sock`, `common
+  has `common --repository_cache=...` and either (no remote cache) `common --disk_cache=...`,
+  `common --experimental_disk_cache_gc_max_size=5G`, or (remote cache, no disk cache: it would
+  be a second copy on the same host) `common --remote_cache=grpc://tun`, `common --remote_proxy=unix:/tun/sock/cache.sock`, `common
   --experimental_build_event_upload_strategy=local` (BEP keeps local file URIs) and, if the
   server denies action writes, `common --noremote_upload_local_results`; it is the "user" rc,
   so the workspace's own `.bazelrc` still applies, and an agent's flags (e.g.

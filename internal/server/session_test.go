@@ -83,7 +83,7 @@ func TestBazelrc(t *testing.T) {
 	}
 	cache := s.bazelrc("default", in, remoteSetup{socket: "/tun/sock/cache.sock"})
 	if !strings.Contains(cache, "common --remote_cache=grpc://tun\ncommon --remote_proxy=unix:/tun/sock/cache.sock\n") ||
-		strings.Contains(cache, "--remote_executor") || strings.Contains(cache, "--jobs") || strings.Contains(cache, "--noremote_upload_local_results") {
+		strings.Contains(cache, "--disk_cache") || strings.Contains(cache, "--remote_executor") || strings.Contains(cache, "--jobs") || strings.Contains(cache, "--noremote_upload_local_results") {
 		t.Fatalf("remote cache:\n%s", cache)
 	}
 	if ro := s.bazelrc("default", in, remoteSetup{socket: "/s", readOnly: true}); !strings.Contains(ro, "common --noremote_upload_local_results\n") {
