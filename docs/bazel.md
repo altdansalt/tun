@@ -529,8 +529,8 @@ and the next command creates a session elsewhere. A pure hub accepts Bazel comma
 waits for a session-capable runner. Old runners do not advertise this capability and receive
 only v0 jobs.
 
-The hub applies `--max-sessions` per host. Placement prefers hosts with spare session
-capacity, then available memory, one-minute load and assigned jobs; hosts below their disk
+The hub applies `--max-sessions` per host. Placement first prefers hosts with a free command slot, then spare session
+capacity, available memory, CPU-normalized one-minute load and assigned jobs; hosts below their disk
 reserve receive no new sessions. New JVMs reserve 1.5GiB against the memory sample so
 pending assignments cannot all consume the same reported headroom. Memory can reduce a
 host's effective capacity; at least one session remains possible. If all eligible hosts
@@ -639,3 +639,47 @@ sandbox. Hub authentication uses the session map and constant-time credential co
 The runner's inner engine applies retention, hub upload/workspace/disk-cache limits, and
 deferred job cleanup. CAS fetches use tar batches of up to 256 digests and four workers;
 local placement samples read OS resources at most once per second. No milestone deviation.
+
+Review validation observations (2026-10-15):
+
+- Job `20261015T120757257515-bac7cc45`: seven placement/security/transport regressions
+  passed with the race detector. The batch sync test fetched and verified 600 distinct
+  file contents in **3 HTTP requests**; this is a request-count measurement, not a
+  throughput benchmark.
+- Job `20261015T121551049772-8db4517b`: runner Bazel configuration honored the hub's
+  `123M` disk-cache limit (20.605s including compilation; test 0.21s).
+- Job `20261015T121905346536-989b2095`: disk reclamation and REAPI deadline tests passed
+  three times with the race detector (18.114s). Enabling runner retention exposed an old
+  disk test's global sampler race; that test now stops the unused engine before mocking
+  the sampler. The old 100ms REAPI idle-timeout test passed all three repeats but failed in two
+  full loaded-host runs. Its timing relationships now use a one-second idle window;
+  opaque HTTP/2 timeout errors now map to DEADLINE_EXCEEDED even after a timer refresh.
+  This small cache transport correction was needed to complete full CI.
+- Gazelle refresh `20261015T121357860351-1a132462` made no BUILD changes; 608.887s job
+  time, 606.303s Bazel time, 427.35s critical path, 64 linux-sandbox actions. This direct
+  cold invocation used a TMPDIR output root without the disk-cache setup in bazel-ci.sh.
+  The cold Go toolchain/stdlib build made this substantially slower than the warm recipe.
+
+Final validation switched to the documented BuildBuddy fallback after the shared hub
+returned retryable submission errors: healthz showed 1,216,679,936 free bytes against a
+2,630,909,542-byte reserve, while runners had roughly 17–19GB free. No shared server
+configuration or storage was changed. The fallback exposed two test environment assumptions:
+the direct cache fixture now ignores external Bazel rc files, and the CLI smoke assertion
+accepts the host socket path used with sandbox none as well as bwrap's fixed socket path.
+These do not change the milestone direction.
+
+Final full CI passed with native Bazelisk 9.3.0 on the fallback runner:
+[invocation ab621729-91f9-4502-8045-2a6f0165bb07](https://app.buildbuddy.dev/invocation/ab621729-91f9-4502-8045-2a6f0165bb07),
+125.697s for scripts/ci.sh (12:41:23.401–12:43:29.098 UTC). Vet/build and all race-tested
+Go packages passed (client 37.583s, REAPI 32.132s, server 3.709s), then both CLI smoke
+suites passed (23.982s and 16.611s), including real Bazel cache reuse, warm runner affinity,
+cache forwarding, and hub/runner restart draining. The fallback host uses sandbox none;
+its bwrap-only Go tests skip. Real bwrap cross-host cache checks had already passed in
+tun job `20261015T120940467899-f2b95807` (that run exposed the subsequently fixed double
+eviction). A final full rerun on tun remained blocked by hub disk pressure.
+
+Fallback friction: BuildBuddy's PATH wrapper dropped the Unix-proxy behavior and dialed
+`grpc://tun` directly (diagnosed in invocation `a602ef15-85a8-4885-9d02-8950164ad1da`).
+bb-ci.sh now selects the runner's installed Bazelisk directly and pins 9.3.0, preserving
+Bazel's native remote_proxy transport. Failed smoke assertions now print their captured
+Bazel diagnostics instead of deleting the only useful error log.
