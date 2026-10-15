@@ -246,6 +246,14 @@ func (s *Server) runnerCASBatch(w http.ResponseWriter, r *http.Request) {
 // Do not long-poll while a reported sandbox needs revocation: its removal frees
 // capacity only on a later poll, after the runner has finished stopping it.
 func (s *Server) runnerNeedsRevocation(rn *runnerState, reported []string) bool {
+	// A command can finish and trigger eviction while this poll waits, after
+	// the runner took its session snapshot. Send the revocation immediately.
+	for _, sess := range s.sessions {
+		if sess.runner == rn && sess.stopping {
+			return true
+		}
+	}
+
 	for _, id := range reported {
 		sess := s.sessions[id]
 		if sess == nil || sess.runner != rn || sess.stopping {

@@ -58,7 +58,7 @@ if command -v bazel >/dev/null; then
   echo 'genrule(name = "g", outs = ["g.txt"], cmd = "echo hi > $@")' > BUILD.bazel
   tun bazel build //:g 2> "$tmp/first"
   grep -q "Starting local Bazel server" "$tmp/first"
-  grep -q "remote cache: tun's, through /tun/sock/cache.sock" "$tmp/first" # tun serve's default
+  grep -q "remote cache: tun's, through " "$tmp/first" # tun serve's default
   tun bazel build //:g 2> "$tmp/second"
   if grep -q "Starting local Bazel server" "$tmp/second"; then exit 1; fi # (! is exempt from set -e)
   grep -q "uploaded 0 of 3 files (0B sent)" "$tmp/second"

@@ -194,6 +194,9 @@ func TestRemoteEvictionWaitsForAcknowledgment(t *testing.T) {
 	if s.claimSessionOn(j, "r") || !old.stopping {
 		t.Fatal("did not initiate eviction")
 	}
+	if !s.runnerNeedsRevocation(rn, nil) {
+		t.Fatal("revocation would wait for an old poll snapshot")
+	}
 	other := s.register("other", api.RunnerPoll{Instance: "other", Slots: 1, SessionSupport: true, MemoryAvailable: 100 << 30}, "", time.Now())
 	if host := s.sessionHost(j); host != rn.name {
 		t.Fatalf("eviction switched to %s", host)
