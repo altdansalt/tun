@@ -61,8 +61,10 @@ e2e() {
     time DEV_TUN_SERVE_ARGS='--local-slots 0 --runner-timeout 3s' scripts/dev-tun.sh ./scripts/e2e-runners.sh
   fi
 }
+# 20m: internal/client's real nested Bazel tests (TestBazelReal, TestRunnerSessionCacheAcrossHosts:
+# three cold Bazel servers) under -race took the package to 10m on loaded 2-CPU runners.
 if [ "$run" = 0 ] || [ "$check" = 0 ]; then
-  go test -timeout=10m -race -count=1 "${flags[@]}" "${pkgs[@]}"
+  go test -timeout=20m -race -count=1 "${flags[@]}" "${pkgs[@]}"
   e2e
   exit 0
 fi
@@ -70,7 +72,7 @@ fi
 out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 status=0
-go test -timeout=10m -race -count=1 "${flags[@]}" "${pkgs[@]}" 2>&1 | tee "$out" || status=$?
+go test -timeout=20m -race -count=1 "${flags[@]}" "${pkgs[@]}" 2>&1 | tee "$out" || status=$?
 # A package whose tests ran prints "ok  pkg  1.2s" without "[no tests to run]" (or FAIL lines).
 if [ "$status" = 0 ] && ! awk '/^(ok[[:space:]]|--- |FAIL)/ && !/\[no tests to run\]/ {f=1} END {exit !f}' "$out"; then
   echo "ci.sh: FAIL: TEST_FLAGS=${TEST_FLAGS} matched no tests in any package" >&2

@@ -38,7 +38,7 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     `tun bazel` step) use the pinned `@bazel_binary` (MODULE.bazel) and reach the Bazel Central
     Registry through tun's egress proxy (`--test_env` in .bazelrc; tagged `requires-network`).
 - **Fallback: `tun run -- ./scripts/ci.sh`** (when `tun bazel` is down, you suspect the session
-  machinery, or you want Go's newer host toolchain): vet, build, `go test -race -timeout=10m` of
+  machinery, or you want Go's newer host toolchain): vet, build, `go test -race -timeout=20m` of
   everything in a fresh sandboxed copy of your tree, plus the smoke suites. It reruns everything
   every time (~2-4 min).
   - Subsets: `tun run -e TEST_FLAGS='-run TestX -v' -- ./scripts/ci.sh` (env is NOT forwarded unless `-e`).
