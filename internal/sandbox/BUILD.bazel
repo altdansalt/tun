@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sandbox",
+    srcs = [
+        "net.go",
+        "sandbox.go",
+    ],
+    importpath = "github.com/altdansalt/tun/internal/sandbox",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "sandbox_test",
+    srcs = ["net_test.go"],
+    embed = [":sandbox"],
+)

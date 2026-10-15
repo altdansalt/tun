@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "workspace",
+    srcs = ["workspace.go"],
+    importpath = "github.com/altdansalt/tun/internal/workspace",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "workspace_test",
+    srcs = [
+        "review_test.go",
+        "workspace_test.go",
+    ],
+    embed = [":workspace"],
+)
