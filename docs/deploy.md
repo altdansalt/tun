@@ -16,8 +16,10 @@ for up to 16m per request, with backoff and
 `tun: server unavailable, retrying`. Log streams resume at their byte offset on
 connection errors. POST transport errors are replayed only when the connection
 failed during dialing, to avoid duplicating a job with an ambiguous submission.
-A proxy 502 after forwarding a submission is still ambiguous; tun does not yet
-provide submission idempotency keys.
+Job creation sends a random `X-Tun-Request-Id`, reused on retries, so a proxy 502
+after forwarding a submission cannot duplicate it. The server persists the key
+with the job and returns that job for the same client/key for 24 hours (while the
+job is retained), including after restart. Failed admissions do not consume keys.
 
 Build and test through tun, then install with an atomic rename on each target:
 
