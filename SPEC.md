@@ -100,7 +100,11 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
   `os.Root` on the work dir: symlinks are never followed out of it; links inside the tree are sent as
   links only if relative and lexically inside; special files are left out. Paths that matched nothing
   come back as repeated `X-Tun-Missing` headers, left-out entries as `X-Tun-Skipped: path: reason`
-  (values `url.PathEscape`d).
+  (values `url.PathEscape`d). The work dir is opened from the server-owned `jobs/` dir down through
+  `<id>/sandbox/work` without following a symlink at any level; 410 if it no longer exists.
+  Unreadable files are listed as skipped up front; regular files are opened `O_NONBLOCK` and
+  re-checked. At most 200k entries (else 413). The trailer `X-Tun-Complete: ok` is set only after
+  the whole archive is written (a mid-stream failure aborts the connection); clients require it.
 - `GET /v1/healthz` (no auth).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
 `offset` must be plain decimal integers, `follow` a boolean) are a 400.

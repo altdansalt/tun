@@ -12,12 +12,20 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/altdansalt/tun/internal/api"
 )
 
 // DefaultMaxDownload is the default limit on the total file bytes of one files request.
 const DefaultMaxDownload = 1 << 30
+
+// maxFileEntries caps the entries of one files request, bounding the server's memory.
+var maxFileEntries = 200_000
+
+// completeTrailer is an HTTP trailer the server sets only after the whole tar was written,
+// so a client can tell a complete archive from one cut short at an entry boundary.
+const completeTrailer = "X-Tun-Complete"
 
 // fileEntry is one tar entry to send, collected before streaming so the size limit and the
 // missing/skipped lists can be reported up front.
@@ -52,14 +60,22 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, fmt.Sprintf("job %s is %s; files can be fetched once it has ended", snap.ID, snap.State))
 		return
 	}
-	root, err := os.OpenRoot(filepath.Join(s.jobDir(j.ID), "work"))
+	root, err := s.openWork(j.ID)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeErr(w, 410, fmt.Sprintf("job %s's work dir no longer exists (work dirs are deleted some time after a job ends; see tun serve --keep-work)", j.ID))
+		return
+	}
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 500, fmt.Sprintf("opening job %s's work dir: %v", j.ID, unwrapPathErr(err)))
 		return
 	}
 	defer root.Close()
 
-	entries, missing, skipped := collect(root, paths)
+	entries, missing, skipped, err := collect(root, paths)
+	if err != nil {
+		writeErr(w, 413, err.Error())
+		return
+	}
 	var total int64
 	for _, e := range entries {
 		if e.info.Mode().IsRegular() {
@@ -81,19 +97,66 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add(api.HeaderSkipped, url.PathEscape(sk))
 	}
 	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("Trailer", completeTrailer)
 	w.WriteHeader(200)
 	tw := tar.NewWriter(w)
 	for _, e := range entries {
 		if err := writeEntry(tw, root, e); err != nil {
-			return // headers are gone; a truncated tar tells the client
+			// The status line is gone; break the connection so the client can't mistake a
+			// short archive for a complete one.
+			panic(http.ErrAbortHandler)
 		}
 	}
-	tw.Close()
+	if err := tw.Close(); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	w.Header().Set(completeTrailer, "ok")
+}
+
+// openWork opens the job's sandbox/work dir as a Root without following symlinks at any
+// level: the job can replace sandbox/work (or, under sandbox none, anything) with a link.
+func (s *Server) openWork(id string) (*os.Root, error) {
+	r, err := os.OpenRoot(filepath.Join(s.cfg.DataDir, "jobs"))
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{id, "sandbox", "work"} {
+		next, err := openDirNoFollow(r, name)
+		r.Close()
+		if err != nil {
+			return nil, err
+		}
+		r = next
+	}
+	return r, nil
+}
+
+// openDirNoFollow opens parent/name as a Root only if name is a real directory, not a
+// symlink. Root.OpenRoot follows links (within parent), so the Lstat before and the
+// identity check after make sure the Root is the directory entry itself, with no window
+// for a swap.
+func openDirNoFollow(parent *os.Root, name string) (*os.Root, error) {
+	fi, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory (%v)", name, fi.Mode().Type())
+	}
+	r, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := r.Stat("."); err != nil || !os.SameFile(fi, st) {
+		r.Close()
+		return nil, fmt.Errorf("%s changed while being opened", name)
+	}
+	return r, nil
 }
 
 // collect expands the requested paths into tar entries (parents before children, no
 // duplicates), plus the patterns that matched nothing and the entries skipped as unsafe.
-func collect(root *os.Root, patterns []string) (entries []fileEntry, missing, skipped []string) {
+func collect(root *os.Root, patterns []string) (entries []fileEntry, missing, skipped []string, err error) {
 	fsys := root.FS()
 	seen := map[string]bool{}
 	skip := func(name, why string) {
@@ -109,7 +172,16 @@ func collect(root *os.Root, patterns []string) (entries []fileEntry, missing, sk
 		seen[name] = true
 		e := fileEntry{name: name, info: info}
 		switch m := info.Mode(); {
-		case m.IsRegular(), m.IsDir():
+		case m.IsRegular():
+			// Check it can be read now, so an unreadable file is reported up front rather
+			// than breaking the stream.
+			f, err := openRegular(root, name)
+			if err != nil {
+				skipped = append(skipped, name+": "+unwrapPathErr(err))
+				return
+			}
+			f.Close()
+		case m.IsDir():
 		case m&fs.ModeSymlink != 0:
 			target, err := root.Readlink(name)
 			if err != nil {
@@ -135,6 +207,9 @@ func collect(root *os.Root, patterns []string) (entries []fileEntry, missing, sk
 		}
 		found := false
 		for _, m := range matches {
+			if len(entries) > maxFileEntries {
+				break
+			}
 			// Lstat so that a requested symlink is sent as a link; a symlinked parent dir
 			// inside the work dir is followed by the Root, one pointing outside is refused.
 			info, err := root.Lstat(m)
@@ -152,6 +227,9 @@ func collect(root *os.Root, patterns []string) (entries []fileEntry, missing, sk
 				continue
 			}
 			fs.WalkDir(fsys, m, func(p string, d fs.DirEntry, err error) error {
+				if len(entries) > maxFileEntries {
+					return fs.SkipAll
+				}
 				if err != nil {
 					skip(p, unwrapPathErr(err))
 					return nil
@@ -168,8 +246,25 @@ func collect(root *os.Root, patterns []string) (entries []fileEntry, missing, sk
 		if !found {
 			missing = append(missing, pat)
 		}
+		if len(entries) > maxFileEntries {
+			return nil, nil, nil, fmt.Errorf("requested paths have more than %d entries; fetch fewer or narrower paths", maxFileEntries)
+		}
 	}
-	return entries, missing, skipped
+	return entries, missing, skipped, nil
+}
+
+// openRegular opens a file for reading without blocking (a FIFO swapped in for a listed
+// file must not hang the handler) and checks it is still a regular file.
+func openRegular(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s is no longer a regular file", name)
+	}
+	return f, nil
 }
 
 func unwrapPathErr(err error) string {
@@ -199,7 +294,7 @@ func writeEntry(tw *tar.Writer, root *os.Root, e fileEntry) error {
 		hdr.Typeflag, hdr.Name = tar.TypeDir, e.name+"/"
 		return tw.WriteHeader(hdr)
 	}
-	f, err := root.Open(e.name)
+	f, err := openRegular(root, e.name)
 	if err != nil {
 		return err
 	}

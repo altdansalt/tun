@@ -148,10 +148,14 @@ func (ts *testServer) detach(cwd string, args ...string) string {
 	return strings.TrimSpace(r.stdout)
 }
 
-// cmdStderr strips tun's own "tun: job <id>" line.
+// cmdStderr strips tun's own leading "tun: job <id>" and "tun: workspace <root>" lines.
 func cmdStderr(s string) string {
-	_, rest, _ := strings.Cut(s, "\n")
-	return rest
+	for _, p := range []string{"tun: job ", "tun: workspace "} {
+		if strings.HasPrefix(s, p) {
+			_, s, _ = strings.Cut(s, "\n")
+		}
+	}
+	return s
 }
 
 func TestExitCodes(t *testing.T) {

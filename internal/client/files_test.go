@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,5 +225,30 @@ func TestFilesSizeLimit(t *testing.T) {
 	}
 	if r := ts.tun(ws, "run", "--out", "small", "-c", "head -c 2000 /dev/zero > big; echo s > small"); r.code != 0 {
 		t.Errorf("under limit: %+v", r)
+	}
+}
+
+// The client requires the server's completion trailer: a tar that ends cleanly at an entry
+// boundary without it is an error, not success.
+func TestFilesRequiresCompleteTrailer(t *testing.T) {
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tw := tar.NewWriter(w)
+		tw.WriteHeader(&tar.Header{Name: "a", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644})
+		tw.Write([]byte("a"))
+		tw.Close() // a well-formed archive, but no X-Tun-Complete trailer
+	}))
+	defer hs.Close()
+	_, err := (&Client{URL: hs.URL}).GetFiles(context.Background(), "x", []string{"a"}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "cut short") {
+		t.Errorf("err = %v, want cut short", err)
+	}
+}
+
+func TestRunPrintsWorkspace(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	ws := gitRepo(t)
+	r := ts.tun(filepath.Join(ws, "sub"), "run", "--", "true")
+	if real, _ := filepath.EvalSymlinks(ws); !strings.Contains(r.stderr, "\ntun: workspace "+real+"\n") {
+		t.Errorf("stderr %q lacks the workspace root %s", r.stderr, real)
 	}
 }

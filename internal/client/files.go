@@ -62,8 +62,16 @@ func (c *Client) GetFiles(ctx context.Context, id string, paths []string, dir st
 			*h.dst = append(*h.dst, v)
 		}
 	}
-	err = extract(resp.Body, dir, &res)
-	return res, err
+	if err := extract(resp.Body, dir, &res); err != nil {
+		return res, err
+	}
+	// The tar may end cleanly at an entry boundary even if the server gave up; it sets
+	// this trailer only after writing everything.
+	io.Copy(io.Discard, resp.Body)
+	if resp.Trailer.Get("X-Tun-Complete") != "ok" {
+		return res, fmt.Errorf("download from job %s was cut short (server did not confirm the archive was complete); %d files written", id, res.Files)
+	}
+	return res, nil
 }
 
 // extract writes a tar stream into dir, replacing existing files. Every write goes through

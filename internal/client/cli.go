@@ -66,7 +66,9 @@ the job), GOCACHE/GOMODCACHE/XDG_CACHE_HOME (caches shared across jobs), TUN_JOB
 
 --out PATH (repeatable) gets build outputs back: after the job ends, in any state, PATH
 (relative to the workspace root; file, directory or glob) is copied from the job's work dir
-to the same path in the local workspace, replacing existing files. A PATH that matched
+to the same path in the local workspace, replacing existing files. It copies whatever the
+job left there: '--out .' also pulls job-created files such as .git/hooks into your checkout,
+so name the outputs you want. A PATH that matched
 nothing is a "tun: warning:" on stderr and the exit status stays the command's; if the
 download itself fails (e.g. over the server's size limit), a 0 exit becomes 125.
 Later, or for other paths: tun get <id> PATH...
@@ -243,6 +245,11 @@ func runCmd(args []string, e Env) int {
 	}
 	if !*jsonOut {
 		fmt.Fprintf(e.Stderr, "tun: job %s\n", j.ID)
+		if !*noWS {
+			if root, err := localRoot(e.Cwd); err == nil {
+				fmt.Fprintf(e.Stderr, "tun: workspace %s\n", root)
+			}
+		}
 	}
 	code := wait(ctx, cancel, c, j, *jsonOut, e)
 	if len(outs) > 0 {
