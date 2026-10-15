@@ -413,7 +413,6 @@ func (s *Server) ensureSandbox(sess *session, spec sandbox.Spec) (bool, error) {
 		default:
 			return false, nil
 		}
-		sess.sb = nil
 	}
 	dir := s.sessionDir(sess.ID)
 	if s.cfg.Sandbox == sandbox.Bwrap {
