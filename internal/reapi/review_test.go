@@ -78,23 +78,38 @@ func TestEvictionFailureContinues(t *testing.T) {
 	}
 }
 
+// HTTP/2 reports an expired read deadline as fmt.Errorf("%w", os.ErrDeadlineExceeded); when it
+// fires before the handler's own record of the deadline (SetReadDeadline is applied
+// asynchronously), the stream used to end with INVALID_ARGUMENT instead of DEADLINE_EXCEEDED.
+func TestGRPCCodeWrappedTimeout(t *testing.T) {
+	if c := grpcCode(3, fmt.Errorf("%w", os.ErrDeadlineExceeded)); c != 4 {
+		t.Errorf("wrapped deadline: %d", c)
+	}
+	if c := grpcCode(3, io.ErrUnexpectedEOF); c != 3 {
+		t.Errorf("other error: %d", c)
+	}
+}
+
 // Real HTTP/2 streaming requests exercise trailer status after a read timeout.
 func TestStreamDeadlinesAndBearer(t *testing.T) {
 	for _, tc := range []struct {
 		name, timeout, token string
-		pause                time.Duration
+		idle, pause          time.Duration
 		chunks               int
 		want                 string
 	}{
-		{"bearer", "", "secret", 0, 1, "0"},
-		{"wrong bearer", "", "wrong", 0, 1, "16"},
-		{"client expires", "20m", "secret", 60 * time.Millisecond, 2, "4"},
-		{"idle expires", "", "secret", 180 * time.Millisecond, 2, "4"},
-		{"active beyond idle", "1S", "secret", 30 * time.Millisecond, 8, "0"},
+		{"bearer", "", "secret", 100 * time.Millisecond, 0, 1, "0"},
+		{"wrong bearer", "", "wrong", 100 * time.Millisecond, 0, 1, "16"},
+		{"client expires", "20m", "secret", 100 * time.Millisecond, 60 * time.Millisecond, 2, "4"},
+		{"idle expires", "", "secret", 100 * time.Millisecond, 180 * time.Millisecond, 2, "4"},
+		// Each gap is far below the idle limit (a loaded host stretches a 50ms sleep, never
+		// shortens it), while the whole stream outlasts it; checked below.
+		{"active beyond idle", "30S", "secret", time.Second, 50 * time.Millisecond, 25, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, addr, _ := testServer(t)
-			h.idleTimeout = 100 * time.Millisecond
+			h.idleTimeout = tc.idle
+			start := time.Now()
 			data := bytes.Repeat([]byte("x"), tc.chunks)
 			d := digest(data)
 			name := "uploads/deadline/blobs/" + string(get(d, 1).b) + fmt.Sprintf("/%d", len(data))
@@ -142,6 +157,9 @@ func TestStreamDeadlinesAndBearer(t *testing.T) {
 			}
 			if got := resp.Trailer.Get("grpc-status"); got != tc.want {
 				t.Fatalf("got %s want %s trailers=%v", got, tc.want, resp.Trailer)
+			}
+			if tc.want == "0" && tc.chunks > 1 && time.Since(start) <= tc.idle {
+				t.Fatalf("stream took %v, not beyond the %v idle limit", time.Since(start), tc.idle)
 			}
 		})
 	}

@@ -79,6 +79,16 @@ func frameWrite(w http.ResponseWriter, b []byte) error {
 	}
 	return e
 }
+
+// grpcCode is c, or DEADLINE_EXCEEDED (4) for any timeout. HTTP/2 wraps its read deadline
+// error with %w, which os.IsTimeout doesn't unwrap.
+func grpcCode(c int, e error) int {
+	if os.IsTimeout(e) || errors.Is(e, os.ErrDeadlineExceeded) {
+		return 4
+	}
+	return c
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/grpc")
 	w.Header().Set("Trailer", "grpc-status, grpc-message")
@@ -90,11 +100,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("grpc-message", url.PathEscape(message))
 	}()
 	fail := func(c int, e error) {
-		code = c
-		if os.IsTimeout(e) {
-			code = 4
-		}
-		message = e.Error()
+		code, message = grpcCode(c, e), e.Error()
 	}
 	token := r.Header.Get("X-Tun-Token")
 	if token == "" {
