@@ -472,19 +472,22 @@ func (s *Server) remoteSetup(in sessionPaths) remoteSetup {
 func (s *Server) executionSlots() int { return 0 }
 
 // bazelrc is a session's tun.bazelrc (the "user" rc: the workspace's .bazelrc still applies):
-// the client's repository and disk caches, and with r.socket tun's remote cache through the
+// the client's repository cache, and either its disk cache or (with r.socket) tun's remote cache through the
 // session's own socket (no token, no network), plus remote execution when r.executors > 0.
 func (s *Server) bazelrc(name string, in sessionPaths, r remoteSetup) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Written by tun for session %s; tun passes it with --bazelrc.\n", name)
 	fmt.Fprintf(&b, "common --repository_cache=%s\n", in.repo)
-	fmt.Fprintf(&b, "common --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n", in.disk, s.cfg.DiskCacheMax)
 	if r.note != "" {
 		fmt.Fprintf(&b, "# %s\n", r.note)
 	}
 	if r.socket == "" {
+		fmt.Fprintf(&b, "common --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n", in.disk, s.cfg.DiskCacheMax)
 		return b.String()
 	}
+	// No --disk_cache with the remote cache: it is on the same host, and a --cold session
+	// with only the remote cache was as fast as with both (docs/bazel.md), so a disk cache
+	// would only be a second copy.
 	// grpc:// with a unix proxy: plaintext HTTP/2 over the socket; the host name is unused.
 	fmt.Fprintf(&b, "common --remote_cache=grpc://tun\ncommon --remote_proxy=unix:%s\n", r.socket)
 	// Keep file:// URIs in the BEP (tun's summary and later lookups by label read local
@@ -496,7 +499,8 @@ func (s *Server) bazelrc(name string, in sessionPaths, r remoteSetup) string {
 	if r.executors > 0 {
 		// Execute goes through the same socket; results come from the shared, executor-written
 		// action cache namespace. As many actions in flight as there are slots.
-		fmt.Fprintf(&b, "common --remote_executor=grpc://tun\ncommon --jobs=%d\n", r.executors)
+		// If the executors can't be reached, Bazel runs the action itself.
+		fmt.Fprintf(&b, "common --remote_executor=grpc://tun\ncommon --jobs=%d\ncommon --remote_local_fallback\n", r.executors)
 	}
 	return b.String()
 }
@@ -512,7 +516,10 @@ type cacheSocket struct {
 
 // startCacheSocket starts sess's cache socket unless it is running. Caller holds the session.
 func (s *Server) startCacheSocket(sess *session) error {
-	if s.cache == nil || sess.cache != nil {
+	s.mu.Lock()
+	running := sess.cache != nil
+	s.mu.Unlock()
+	if s.cache == nil || running {
 		return nil
 	}
 	dir, err := os.OpenFile(filepath.Join(s.sessionDir(sess.ID), "sock"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)

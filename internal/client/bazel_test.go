@@ -613,15 +613,8 @@ func TestBazelReal(t *testing.T) {
 		sum.Targets[0].Outputs[0].Path != "bazel-bin/hello.txt" {
 		t.Fatalf("--json: %v: %+v", err, r)
 	}
-	// A new session (as on a new host) with only tun's remote cache warm: the client's disk
-	// cache is emptied first, so a hit can only come through the session's socket.
-	disks, _ := filepath.Glob(filepath.Join(ts.data, "bazel", "*", "disk"))
-	for _, d := range disks {
-		if err := os.RemoveAll(d); err != nil {
-			t.Fatal(err)
-		}
-		os.Mkdir(d, 0o700)
-	}
+	// A new session (as on a new host): with a remote cache sessions have no disk cache, so the
+	// hit comes through the session's socket.
 	r = ts.tun(ws, "bazel", "--cold", "build", "//:hello")
 	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || !strings.Contains(r.stderr, "1 remote cache hit") || out() != "two\n" {
 		t.Fatalf("--cold with a warm remote cache: %+v", r)

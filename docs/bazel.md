@@ -63,11 +63,14 @@ job. `--remote_proxy=unix:PATH` works: Bazel speaks grpcs (TLS, authority from t
 socket; a host-side forwarder to remote.buildbuddy.dev:443 gave remote cache hits. So tun binds a
 socket into the sandbox (e.g. `/tun/cache.sock`) and adds `--remote_proxy=unix:...` itself. The
 bootstrap forwarder is a fixed-destination TCP passthrough (the BuildBuddy key is then a job flag);
-tun's own cache/executor later serves h2c on that socket with auth on the host side, so jobs never
-need a network or a token for it.
+tun's own cache serves h2c on a per-session socket (`/tun/sock/cache.sock`, built: see
+"Automatic cache and execution" below), authenticated by which socket the connection came in
+on, so sessions never need a network or a token for it.
 
-Only executors (tun itself) write the action cache once remote execution exists; sessions
-upload no local results (`--noremote_upload_local_results`), so a job can't poison the cache.
+Only executors (tun itself) write the *shared* action cache namespace. (Revised 2026-10-15:
+sessions do upload their local results, but into their own client's namespace, which only that
+client reads; so no client can poison another's builds, and a client's new or moved session
+gets hits for what it built before executors exist.)
 
 **Remote execution** (M3): the hub implements the Remote Execution API (Capabilities, CAS,
 ByteStream, ActionCache, Execution); runners become executors: fetch inputs from CAS into a
@@ -253,8 +256,8 @@ The advertised API version is 2.0, SHA256, with no execution capability.
 updates disabled. Default is allow while builds execute locally. The handler's write
 policy is the future executor-only authorization seam; executor credentials and sandbox
 socket binding are not part of this change. Both TCP and Unix endpoints accept
-`x-tun-token` or `authorization: Bearer TOKEN` metadata. Thus the future token-free sandbox socket described above remains
-integration work. Use `--remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN`;
+`x-tun-token` or `authorization: Bearer TOKEN` metadata. (The token-free sandbox socket is
+built now: see "Automatic cache and execution".) Use `--remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN`;
 add `--remote_proxy=unix:PATH` to use the Unix endpoint. `--cache-socket` overrides its
 path. Startup prints a short `/proc/PID/fd/FD/name` alias usable when DATA paths exceed
 Linux's Unix socket path length limit. A stale socket is removed on restart only after
@@ -320,3 +323,59 @@ An earlier superseded full CI job (`20261015T082110926143-4d167784`) stopped
 producing package results after REAPI/sandbox; it was canceled after the final full
 run passed. Its stall cause was not established. Separate server/workspace race
 tests passed in `20261015T082410099198-c3a8b234` (4.655s job time).
+
+
+## Automatic cache and execution (feat/bazel-auto)
+
+Goal: the agent sends `tun bazel test //...`; remote caching (and later remote execution)
+happens without the agent asking.
+
+**Cache, built.** `tun serve` enables the REAPI cache by default (`--cache-dir=reapi`;
+`--cache-dir=` disables it). The server, not `main`, owns the cache handler (`Config.Cache`),
+so in-process tests get the same behavior. While a session's sandbox lives the server listens
+on `sessions/<id>/sock/cache.sock` (listened through the dir's descriptor, so long data paths
+work) and binds that dir read-only at `/tun/sock` (bind source opened like every other mount:
+no symlinks, owned by the server, passed as a descriptor; connecting needs no write access to
+the mount). tun.bazelrc adds `--remote_cache=grpc://tun --remote_proxy=unix:/tun/sock/cache.sock`
+(verified with Bazel 9.3.0: plaintext HTTP/2 over the socket) and
+`--experimental_build_event_upload_strategy=local` (otherwise the BEP names outputs as
+`bytestream://` URIs and the summary loses them; internal/bep now also derives output paths
+from bytestream files).
+
+**Auth and trust.** The socket is per session, so the connection itself authenticates: the
+handler for that listener (`reapi.Handler.ForClient`) needs no token and uses the session's
+client as the action cache namespace, whatever the request says. The sandbox never sees the
+server token. On the token-authenticated endpoints (TCP, `DATA/cache.sock`) the namespace is
+the request's client identity, as for jobs (exe.dev source VM, else `X-Tun-Client`, else the
+remote address). `instance_name` is ignored everywhere. The CAS is shared (verified on write);
+action results live in `acc-<sha256(client NUL digest)>`, the shared namespace in `ac-<digest>`
+(what reapi-exec's executors write). Lookups read the client's own result, then the shared one;
+nothing reachable over gRPC writes the shared namespace. `--cache-action-writes=false` makes
+sessions run with `--noremote_upload_local_results`.
+
+**Execution, designed.** The bazelrc is generated per command from a `remoteSetup{socket,
+executors, readOnly}`: `executors` is the number of action slots the server can run
+(`Server.executionSlots`, 0 until the Execution service is in this server: then local
+execution, as now). With executors > 0 the rc adds `--remote_executor=grpc://tun` (same socket,
+so the same per-session auth; ForClient copies the handler, including a future Execution
+field), `--jobs=<slots>` and `--remote_local_fallback`. Executor results go to the shared
+namespace, which every session reads. Since the rc is rewritten before each command, `--jobs`
+follows runners joining and leaving, and none of these are startup options, so the warm Bazel
+server survives the change. Open point for when it lands: a session command holds a hub slot
+while its actions need slots too; with only local slots and `--max-sessions` sessions busy,
+actions could starve. Sessions should not count against action slots (or actions get their
+own pool).
+
+Merging feat/reapi-exec (trial merge 2026-10-15 at db5eea0): conflicts in main.go/server.go
+(both moved the cache setup; Execution should be created in `server.New` next to the cache
+handler, so session sockets get it through `ForClient`), store.go `read` (take reapi-exec's
+verified read; `readName` is the namespaced variant) and the docs. reapi-exec makes
+`--cache-action-writes` default to false because writes went to the one shared namespace; with
+per-client namespaces client writes can't poison anyone else, so the default can stay true.
+Then `executionSlots` returns local slots plus action-capable runner slots when Execution is on.
+
+Deviations from the plan above: sessions upload local results (own namespace, see Trust);
+the per-client disk cache is kept for now (see the measurements); the socket lives under the
+session dir (not `/tun/cache.sock`, since the bind source must be a server-owned directory).
+With `--sandbox none` the rc uses the host path, and a session whose socket path is longer
+than sun_path allows gets no remote cache (and says so).
