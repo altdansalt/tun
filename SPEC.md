@@ -84,6 +84,8 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
   so it can read `$DATA/token`, other jobs' workspaces and logs, and rewrite job state. Use it only
   when every job is as trusted as the server operator.
 - `--max-jobs` (default NumCPU) jobs run at once; the rest queue FIFO (state `queued`).
+- Cancel is race-free: a job canceled after it left the queue but before its process started
+  ends `canceled` and is never started; a job reaches a terminal state exactly once.
 - Timeout and cancel kill the entire process group (SIGTERM, then SIGKILL after 10s).
 - State machine: queued -> running -> exited | failed (couldn't start) | timeout | canceled.
   On server restart, jobs left `running`/`queued` are marked `failed` with a reason.
@@ -122,6 +124,11 @@ database, test fixture):
 - Cancel and server shutdown kill services exactly like other jobs (whole process group; after
   a shutdown the next server marks them failed).
 - `--port` without `--service` is an error; at most 16 ports, each 1-65535, no duplicates.
+- **Known limitation: services are reachable by other jobs on the same host.** Jobs share the
+  host network namespace, so any job on the server (any client's) can connect to a service's
+  `host_port` directly without the bearer token, and a job could bind a just-allocated port
+  before the service does (the proxy would then reach the impostor). The bearer auth only
+  protects the proxy path. Per-job network namespaces would fix this; not done yet.
 
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
@@ -149,7 +156,8 @@ database, test fixture):
   everywhere; the token is never forwarded: `X-Tun-Token` is dropped, and `Authorization` is
   dropped only if it carries the tun token (so with `X-Tun-Token` a service gets its own
   `Authorization`). Sets `X-Forwarded-For/Host/Proto` and
-  `X-Forwarded-Prefix: /v1/jobs/{id}/ports/{N}`. Responses are flushed as they stream; protocol
+  `X-Forwarded-Prefix: /v1/jobs/{id}/ports/{N}`. (The service itself is not protected from
+  other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
 - `GET /v1/healthz` (no auth).

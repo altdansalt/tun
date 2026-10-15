@@ -340,3 +340,46 @@ func TestServiceBwrap(t *testing.T) {
 		t.Errorf("GET %s = %d %q", u, code, body)
 	}
 }
+
+// TestCancelStartRace: plain jobs canceled right as the scheduler hands them to run() (here
+// with MaxJobs 1 and a stream of quick jobs) must end canceled and never start.
+func TestCancelStartRace(t *testing.T) {
+	ts := startServer(t, server.Config{MaxJobs: 1})
+	c := ts.client()
+	ctx := context.Background()
+	for i := 0; i < 200; i++ {
+		j, err := c.Create(ctx, api.CreateJob{Argv: []string{"sleep", "30"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Cancel(ctx, j.ID); err != nil {
+			t.Fatal(err)
+		}
+		if cur := ts.waitDone(j.ID); cur.State != api.Canceled {
+			t.Fatalf("iteration %d: %+v", i, cur)
+		}
+	}
+	if r := ts.tun("", "run", "--timeout", "20s", "--", "true"); r.code != 0 {
+		t.Errorf("server unusable after cancel loop: %+v", r)
+	}
+}
+
+func TestServiceJSONFailureAndEarlyLimit(t *testing.T) {
+	ts := startServer(t, server.Config{MaxServices: 1})
+	r := ts.tun("", "run", "--service", "--json", "--port", "80", "--no-workspace", "-c", "echo out; echo err >&2; exit 4")
+	var res map[string]any
+	if r.code != 4 || json.Unmarshal([]byte(r.stdout), &res) != nil || res["stdout"] != "out\n" || res["stderr"] != "err\n" ||
+		res["tun_exit"] != 4.0 || !strings.Contains(fmt.Sprint(res["error"]), "before it was ready") {
+		t.Errorf("--json early exit: %+v", r)
+	}
+	id, _ := ts.startService()
+	defer ts.tun("", "cancel", id)
+	before, _ := os.ReadDir(ts.data + "/jobs")
+	ws := t.TempDir()
+	os.WriteFile(ws+"/f", []byte("x"), 0o644)
+	r = ts.tun(ws, "run", "--service", "--", "true")
+	after, _ := os.ReadDir(ts.data + "/jobs")
+	if r.code != 125 || !strings.Contains(r.stderr, "HTTP 429") || len(after) != len(before) {
+		t.Errorf("over max-services: %+v, job dirs %d -> %d", r, len(before), len(after))
+	}
+}

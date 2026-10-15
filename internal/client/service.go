@@ -24,6 +24,9 @@ it needs the token like the API (X-Tun-Token: <token>, or Authorization: Bearer 
 the token is not forwarded (with X-Tun-Token, the request's own Authorization is).
 If the service exits first, tun run prints its output and exits with its code (125 if 0);
 if it isn't ready within --ready-timeout it is canceled. Stop it with 'tun cancel <id>'.
+KNOWN LIMITATION: jobs share the server host's network, so other jobs on the same server
+(anyone's) can connect to a service's host_port directly, without the token, and could bind
+an allocated port before the service does. Don't treat a service as private.
 `
 
 type portFlag []int
@@ -84,9 +87,29 @@ func withURLs(c *Client, j *api.Job) {
 // its id and URLs. If it ends first, it prints the job's output and returns its exit code.
 func waitReady(ctx context.Context, c *Client, j api.Job, readyTimeout time.Duration, jsonOut bool, e Env) int {
 	deadline := time.Now().Add(readyTimeout)
-	logs := func() {
-		c.Logs(ctx, j.ID, "stdout", 0, false, e.Stdout)
-		c.Logs(ctx, j.ID, "stderr", 0, false, e.Stderr)
+	// fail prints the job's output and why it never became ready: streamed to our
+	// stdout/stderr, or with --json as one object shaped like tun run --json's.
+	fail := func(cur api.Job, code int, msg string) int {
+		if !jsonOut {
+			c.Logs(ctx, j.ID, "stdout", 0, false, e.Stdout)
+			c.Logs(ctx, j.ID, "stderr", 0, false, e.Stderr)
+			fmt.Fprintf(e.Stderr, "tun: %s\n", msg)
+			return code
+		}
+		tOut, tErr := &tail{max: 64 << 10}, &tail{max: 64 << 10}
+		c.Logs(ctx, j.ID, "stdout", 0, false, tOut)
+		c.Logs(ctx, j.ID, "stderr", 0, false, tErr)
+		if final, err := c.Get(ctx, j.ID); err == nil {
+			cur = final
+		}
+		withURLs(c, &cur)
+		printJSON(e, map[string]any{
+			"id": cur.ID, "state": cur.State, "exit_code": cur.ExitCode, "signal": cur.Signal,
+			"error": msg, "tun_exit": code, "service": true, "ports": cur.Ports,
+			"stdout": string(tOut.buf), "stderr": string(tErr.buf),
+			"stdout_truncated": tOut.n > int64(len(tOut.buf)), "stderr_truncated": tErr.n > int64(len(tErr.buf)),
+		})
+		return code
 	}
 	for {
 		cur, err := c.Get(ctx, j.ID)
@@ -103,7 +126,6 @@ func waitReady(ctx context.Context, c *Client, j api.Job, readyTimeout time.Dura
 		}
 		switch {
 		case api.Terminal(cur.State):
-			logs()
 			code, msg := exitCode(cur)
 			if code == 0 {
 				code = 125
@@ -111,8 +133,7 @@ func waitReady(ctx context.Context, c *Client, j api.Job, readyTimeout time.Dura
 			if msg == "" {
 				msg = fmt.Sprintf("exited with code %d", *cur.ExitCode)
 			}
-			fmt.Fprintf(e.Stderr, "tun: service %s %s before it was ready\n", cur.ID, msg)
-			return code
+			return fail(cur, code, fmt.Sprintf("service %s %s before it was ready", cur.ID, msg))
 		case ready:
 			withURLs(c, &cur)
 			if jsonOut {
@@ -127,8 +148,7 @@ func waitReady(ctx context.Context, c *Client, j api.Job, readyTimeout time.Dura
 			return 0
 		case time.Now().After(deadline):
 			c.Cancel(ctx, j.ID)
-			logs()
-			return errorf(e, "service %s not accepting connections on port(s) %s after %v (--ready-timeout); canceled it. It must listen on 127.0.0.1:$PORT (or $TUN_PORT_<N>)", j.ID, strings.Join(waiting, ","), readyTimeout)
+			return fail(cur, 125, fmt.Sprintf("service %s not accepting connections on port(s) %s after %v (--ready-timeout); canceled it. It must listen on 127.0.0.1:$PORT (or $TUN_PORT_<N>)", j.ID, strings.Join(waiting, ","), readyTimeout))
 		}
 		select {
 		case sig := <-e.Signals:
