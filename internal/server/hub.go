@@ -185,7 +185,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	resp.Jobs = s.takeJobs(rn, held)
 	deadline := time.NewTimer(s.cfg.RunnerPollWait)
 	defer deadline.Stop()
-	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !s.closed && rn.seq == seq {
+	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !s.runnerNeedsRevocation(rn, p.Sessions) && !s.closed && rn.seq == seq {
 		rn.waiting++
 		s.mu.Unlock()
 		timedOut := false
@@ -240,6 +240,19 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
 	rn.privateNet, rn.disk = p.NetworkIsolation, p.Disk
 	rn.sessionSupport, rn.memoryAvailable, rn.load, rn.liveSessions = p.SessionSupport, p.MemoryAvailable, p.Load, len(p.Sessions)
+	for id, sess := range s.sessions {
+		if sess.runner != rn {
+			continue
+		}
+		if sess.stopping && !slices.Contains(p.Sessions, id) {
+			delete(s.sessions, id)
+		}
+		if p.Slots == 0 && sess.job == nil {
+			delete(s.sessions, id)
+		}
+	}
+	s.schedule()
+
 	return rn
 }
 
@@ -265,6 +278,7 @@ func (s *Server) retire(rn *runnerState, now time.Time) {
 		}
 	}
 	rn.poke()
+	s.schedule()
 }
 
 // dropRunner gives up on a runner instance: it is retired, and its running jobs end (failed
@@ -284,6 +298,7 @@ func (s *Server) dropRunner(rn *runnerState, msg string) {
 		}
 	}
 	rn.jobs = map[string]*job{}
+	s.schedule()
 }
 
 // finishRunnerJob ends j as the runner reported (a kill the hub requested decides the state),
@@ -310,6 +325,14 @@ func (s *Server) finishRunnerJob(j *job, d api.RunnerDone, note string) {
 		if len(d.BEP) > 0 {
 			if err := writeOwn(filepath.Join(s.jobDir(j.ID), "bep.json"), d.BEP); err != nil {
 				msg = joinMsg(msg, err.Error())
+			}
+		}
+	}
+	if j.bz != nil && !d.SessionReady {
+		if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+			sess.stopping = true
+			if sess.runner != nil {
+				sess.runner.poke()
 			}
 		}
 	}
@@ -394,7 +417,7 @@ func (s *Server) assignment(j *job) api.RunnerJob {
 	}
 	if j.bz != nil {
 		sess := s.sessions[j.SessionID]
-		out.Bazel = &api.RunnerBazel{Command: *j.bz, Session: sess.Session, CacheReadOnly: s.cfg.CacheReadOnly, SessionIdleSec: int(s.cfg.SessionIdle.Seconds())}
+		out.Bazel = &api.RunnerBazel{MaxUpload: s.cfg.MaxUpload, DiskCacheMax: s.cfg.DiskCacheMax, Command: *j.bz, Session: sess.Session, CacheReadOnly: s.cfg.CacheReadOnly, SessionIdleSec: int(s.cfg.SessionIdle.Seconds())}
 		if s.cache != nil {
 			out.Bazel.CacheCredential = sess.credential
 		}

@@ -193,9 +193,12 @@ func (r *Runner) reclaimBlobs() {
 		used time.Time
 	}
 	var list []blob
-	for _, e := range ents {
-		if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
-			list = append(list, blob{e.Name(), fi.ModTime()})
+	for _, base := range []string{dir, filepath.Join(r.cfg.DataDir, "session-host", "cas")} {
+		ents, _ = os.ReadDir(base)
+		for _, e := range ents {
+			if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
+				list = append(list, blob{filepath.Join(base, e.Name()), fi.ModTime()})
+			}
 		}
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].used.Before(list[b].used) })
@@ -204,7 +207,7 @@ func (r *Runner) reclaimBlobs() {
 		if !low() {
 			break
 		}
-		if os.Remove(filepath.Join(dir, b.name)) == nil {
+		if os.Remove(b.name) == nil {
 			n++
 		}
 	}

@@ -227,7 +227,7 @@ func TestRunnerSessionTimeoutDuringSync(t *testing.T) {
 	ts := startServer(t, hubConfig(""))
 	original := ts.hs.Handler
 	ts.hs.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/runner/cas/") {
+		if strings.HasPrefix(r.URL.Path, "/v1/runner/cas") {
 			<-r.Context().Done()
 			return
 		}

@@ -85,21 +85,25 @@ type Server struct {
 	sessionDataDir string                            // runner parent data dir to hide in session sandboxes
 	sessionProxy   func(*session) http.Handler       // runner-side authenticated forwarding
 
-	mu       sync.Mutex
-	createMu sync.Mutex // serializes idempotent job admission
-	jobs     map[string]*job
-	queue    []*job // FIFO of queued jobs
-	running  int    // local non-service jobs
-	svc      services
-	runners  map[string]*runnerState // the current instance of each runner name
-	retired  map[string]*runnerState // by instance id: superseded or dropped instances
-	sessions map[string]*session     // tun bazel sessions by id
-	drainMu  sync.RWMutex
-	draining bool
-	closed   bool
-	quit     chan struct{} // closed by Close
-	wg       sync.WaitGroup
-	gc       gcState
+	mu             sync.Mutex
+	createMu       sync.Mutex // serializes idempotent job admission
+	jobs           map[string]*job
+	queue          []*job // FIFO of queued jobs
+	running        int    // local non-service jobs
+	svc            services
+	runners        map[string]*runnerState // the current instance of each runner name
+	retired        map[string]*runnerState // by instance id: superseded or dropped instances
+	sessions       map[string]*session     // tun bazel sessions by id
+	drainMu        sync.RWMutex
+	draining       bool
+	closed         bool
+	resourceSample time.Time
+	resourceMemory int64
+	resourceLoad   float64
+	resourceDisk   *api.Disk
+	quit           chan struct{} // closed by Close
+	wg             sync.WaitGroup
+	gc             gcState
 }
 
 type job struct {
@@ -114,15 +118,16 @@ type job struct {
 	cancelReq bool
 
 	// Runner jobs (see hub.go).
-	assignedAt   time.Time       // given to a runner, which has not started it yet (state queued)
-	killReq      string          // end state the hub asked the runner for (canceled)
-	killReqAt    time.Time       //
-	rn           *runnerState    // the runner instance it is assigned to
-	exitedAt     time.Time       // the runner reported the command ended (.../exited)
-	exited       *api.RunnerDone // what it reported then
-	logMu        sync.Mutex      // serializes log chunk writes
-	runnerMaxLog *int64
-	bz           *api.BazelJob // a tun bazel job (kept in memory only: after a restart it has failed)
+	assignedAt      time.Time       // given to a runner, which has not started it yet (state queued)
+	killReq         string          // end state the hub asked the runner for (canceled)
+	killReqAt       time.Time       //
+	rn              *runnerState    // the runner instance it is assigned to
+	exitedAt        time.Time       // the runner reported the command ended (.../exited)
+	exited          *api.RunnerDone // what it reported then
+	logMu           sync.Mutex      // serializes log chunk writes
+	runnerMaxUpload int64
+	runnerMaxLog    *int64
+	bz              *api.BazelJob // a tun bazel job (kept in memory only: after a restart it has failed)
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`
 	OutSkipped []string `json:"out_skipped,omitempty"`
@@ -418,7 +423,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/{stream}", auth(s.runnerLog))
 	mux.HandleFunc("POST /v1/cas", auth(s.putCAS))
 	mux.HandleFunc("GET /v1/runner/cas/{sha}", auth(s.runnerCAS))
-	mux.HandleFunc("/v1/session-cache/{credential}/{rpc...}", s.remoteSessionCache)
+	mux.HandleFunc("POST /v1/runner/cas", auth(s.runnerCASBatch))
+	mux.HandleFunc("/v1/session-cache/{rpc...}", s.remoteSessionCache)
 	mux.HandleFunc("GET /v1/sessions", auth(s.listSessions))
 	mux.HandleFunc("POST /v1/jobs", auth(func(w http.ResponseWriter, r *http.Request) {
 		s.drainMu.RLock()

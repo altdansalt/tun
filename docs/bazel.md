@@ -624,3 +624,18 @@ active. The cold Gazelle invocation compiled its SDK stdlib and took 444s; a dir
 flags. Two private runner processes still share their outer job's CPUs/memory, so their
 cold build times vary greatly with other work on the shared host. No shared service was
 restarted or replaced.
+
+### Placement review hardening
+
+New sessions prioritize a free command slot; load is normalized by host CPU count.
+Existing affinity remains intact. Host loss schedules queued commands after lease removal,
+and a hub restarted without local slots treats persisted local sessions as lost. Eviction
+keeps remote leases stopping until the runner confirms that the sandbox is gone; draining
+hosts revoke idle leases. Failed sandbox startup also revokes its memory reservation.
+
+Runner cache forwarding accepts only canonical two-component RPC method paths. The scoped
+credential travels in a header, never a URL; redirects lose Location before reaching the
+sandbox. Hub authentication uses the session map and constant-time credential comparison.
+The runner's inner engine applies retention, hub upload/workspace/disk-cache limits, and
+deferred job cleanup. CAS fetches use tar batches of up to 256 digests and four workers;
+local placement samples read OS resources at most once per second. No milestone deviation.

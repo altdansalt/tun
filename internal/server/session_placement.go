@@ -3,15 +3,24 @@ package server
 // Session placement and remote leases belong to the hub. The runner executes the same
 // session engine; the hub keeps its public metadata and binds it to a runner instance.
 import (
+	"crypto/subtle"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/workspace"
 )
+
+var sessionRPC = regexp.MustCompile("^/[A-Za-z0-9_.]+/[A-Za-z]+$")
 
 const sessionMemory = int64(1536 << 20)
 
@@ -28,6 +37,7 @@ func hostResources() (available int64, load float64) {
 	if f := strings.Fields(string(b)); len(f) > 0 {
 		load, _ = strconv.ParseFloat(f[0], 64)
 	}
+	load /= float64(runtime.NumCPU())
 	return
 }
 
@@ -54,6 +64,7 @@ func (s *Server) sessionHost(j *job) string {
 	}
 	best := ""
 	score := -1e30
+	bestFree := false
 	consider := func(host string, mem int64, load float64, busy, slots int, disk *api.Disk) {
 		if slots <= 0 {
 			return
@@ -78,13 +89,15 @@ func (s *Server) sessionHost(j *job) string {
 			v += 100
 		}
 		v -= float64(n) * 2
-		if v > score || (v == score && host < best) {
+		free := busy < slots
+		if best == "" || (free && !bestFree) || (free == bestFree && (v > score || (v == score && host < best))) {
+			bestFree = free
 			best, score = host, v
 		}
 	}
 	if !s.cfg.HubOnly {
-		mem, load := hostResources()
-		consider(api.LocalRunner, mem, load, s.running, s.cfg.MaxJobs, diskInfo(s.cfg.DataDir, s.cfg.MinFree))
+		mem, load, disk := s.localSessionResources()
+		consider(api.LocalRunner, mem, load, s.running, s.cfg.MaxJobs, disk)
 	}
 	for _, rn := range s.runners {
 		if rn.sessionSupport && time.Since(rn.lastSeen) <= s.cfg.RunnerDeadAfter {
@@ -115,14 +128,12 @@ func (s *Server) sessionCacheHandler(sess *session) http.Handler {
 // This credential authorizes only REAPI for one session's client namespace, never the
 // ordinary tun API. Removing the lease revokes it, including after runner loss.
 func (s *Server) remoteSessionCache(w http.ResponseWriter, r *http.Request) {
-	credential := r.PathValue("credential")
+	credential := r.Header.Get("X-Tun-Session-Credential")
 	s.mu.Lock()
 	client := ""
-	for _, sess := range s.sessions {
-		if sess.runner != nil && !sess.stopping && sess.credential == credential && credential != "" {
-			client = sess.Client
-			break
-		}
+	sess := s.sessions[r.Header.Get("X-Tun-Session")]
+	if sess != nil && sess.runner != nil && !sess.stopping && credential != "" && subtle.ConstantTimeCompare([]byte(sess.credential), []byte(credential)) == 1 {
+		client = sess.Client
 	}
 	s.mu.Unlock()
 	if client == "" || s.cache == nil {
@@ -130,6 +141,10 @@ func (s *Server) remoteSessionCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.URL.Path = "/" + r.PathValue("rpc")
+	if !sessionRPC.MatchString(r.URL.Path) {
+		writeErr(w, 400, "invalid REAPI method")
+		return
+	}
 	s.cache.ForClient(client).ServeHTTP(w, r)
 }
 
@@ -152,7 +167,7 @@ func (s *Server) runnerCAS(w http.ResponseWriter, r *http.Request) {
 // existing budget by evicting an idle session. Always allow one session so a host
 // with temporarily low memory can make progress instead of queueing forever.
 func (s *Server) sessionCapacity(host string) int {
-	mem, _ := hostResources()
+	mem, _, _ := s.localSessionResources()
 	if host != api.LocalRunner {
 		if rn := s.runners[host]; rn != nil {
 			mem = rn.memoryAvailable
@@ -186,4 +201,45 @@ func (s *Server) sessionIdle(sess *session) time.Duration {
 		return time.Duration(sess.idleSeconds) * time.Second
 	}
 	return s.cfg.SessionIdle
+}
+
+// Cache OS samples independently of queue length. Caller holds s.mu.
+func (s *Server) localSessionResources() (int64, float64, *api.Disk) {
+	if time.Since(s.resourceSample) > time.Second {
+		s.resourceMemory, s.resourceLoad = hostResources()
+		s.resourceDisk = diskInfo(s.cfg.DataDir, s.cfg.MinFree)
+		s.resourceSample = time.Now()
+	}
+	return s.resourceMemory, s.resourceLoad, s.resourceDisk
+}
+func (s *Server) runnerCASBatch(w http.ResponseWriter, r *http.Request) {
+	var digests []string
+	if err := json.NewDecoder(io.LimitReader(r.Body, 32768)).Decode(&digests); err != nil || len(digests) > 256 {
+		writeErr(w, 400, "want at most 256 digests")
+		return
+	}
+	files := make(map[string]string, len(digests))
+	for _, sha := range digests {
+		if !shaRE.MatchString(sha) {
+			writeErr(w, 400, "invalid CAS digest")
+			return
+		}
+		files[sha] = sha
+	}
+	w.Header().Set("Content-Type", "application/x-tar")
+	if err := workspace.WriteBlobs(w, filepath.Join(s.cfg.DataDir, "cas"), files); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// Do not long-poll while a reported sandbox needs revocation: its removal frees
+// capacity only on a later poll, after the runner has finished stopping it.
+func (s *Server) runnerNeedsRevocation(rn *runnerState, reported []string) bool {
+	for _, id := range reported {
+		sess := s.sessions[id]
+		if sess == nil || sess.runner != rn || sess.stopping {
+			return true
+		}
+	}
+	return false
 }

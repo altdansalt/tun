@@ -88,13 +88,14 @@ type LogAck struct {
 // as the command has ended, before the remaining logs and the outputs are shipped; the
 // outputs fields are then empty).
 type RunnerDone struct {
-	Session  *Session        `json:"session,omitempty"`
-	State    string          `json:"state"`
-	ExitCode *int            `json:"exit_code"`
-	Signal   *int            `json:"signal"`
-	Error    string          `json:"error,omitempty"`
-	Summary  string          `json:"summary,omitempty"`
-	BEP      json.RawMessage `json:"bep,omitempty"`
+	SessionReady bool            `json:"session_ready,omitempty"`
+	Session      *Session        `json:"session,omitempty"`
+	State        string          `json:"state"`
+	ExitCode     *int            `json:"exit_code"`
+	Signal       *int            `json:"signal"`
+	Error        string          `json:"error,omitempty"`
+	Summary      string          `json:"summary,omitempty"`
+	BEP          json.RawMessage `json:"bep,omitempty"`
 	// Outcome of collecting the declared outputs (uploaded before done).
 	OutputsMissing []string `json:"outputs_missing,omitempty"`
 	OutputsSkipped []string `json:"outputs_skipped,omitempty"`
@@ -118,6 +119,8 @@ type RunnerInfo struct {
 
 // RunnerBazel carries a session command. CacheCredential never enters the sandbox.
 type RunnerBazel struct {
+	MaxUpload       int64    `json:"max_upload"`
+	DiskCacheMax    string   `json:"disk_cache_max"`
 	Command         BazelJob `json:"command"`
 	Session         Session  `json:"session"`
 	CacheCredential string   `json:"cache_credential,omitempty"`

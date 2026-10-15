@@ -415,7 +415,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   sandbox ...; remote cache: tun's, through /tun/sock/cache.sock" (or why there is none).
 - **Jobs.** Each command is a job (`POST /v1/jobs` with `bazel`, see the API) in the normal
   FIFO; it needs a slot on its session host (hub or runner). New sessions are placed by
-  available memory, load, free disk and per-host session capacity; existing sessions retain
+  free job slots first, then available memory, CPU-normalized load, free disk and per-host session capacity; existing sessions retain
   affinity to one host instance, even while its slots are busy. A pure hub queues until a
   session-capable runner is available. It also needs its session: a session runs one command at a time, so the
   scheduler skips a bazel job whose session is busy (later jobs may start first) and sets
@@ -584,14 +584,27 @@ while the job remains retained. Failed admissions do not consume the key.
 Runners advertise `session_support`, `memory_available` (MemAvailable bytes), `load`
 (one-minute load average) and live `sessions` IDs in polls; `tun runners` exposes
 memory, load and session count. Assignments carry a Bazel manifest, session metadata and
-limits; runners fetch verified file contents from `GET /v1/runner/cas/{sha}`. Both hosts
+limits (including upload, workspace and disk-cache limits); runners fetch verified file contents
+in batches from `POST /v1/runner/cas` (up to 256 requested digests, tar response),
+with four concurrent requests. Both hosts
 use the same session engine, agent, manifest sync, per-client caches and BEP parser.
 Logs use the existing offset protocol; exit/done also carries the summary and BEP JSON.
 The hub's poll response carries authoritative session leases; revoked idle sessions stop.
 
 On runners `/tun/sock/cache.sock` serves an HTTP/2 reverse proxy to the hub REAPI cache.
 The server issues a random per-session credential in the assignment, kept in runner memory;
-the sandbox sees only its socket. `/v1/session-cache/{credential}/{rpc}` fixes the client
+the sandbox sees only its socket. `/v1/session-cache/{rpc}` authenticates with `X-Tun-Session` and
+`X-Tun-Session-Credential` headers, using a session map lookup and constant-time comparison,
+and fixes the client
 namespace from the lease, ignoring request identity headers. It grants no ordinary API access
 and is revoked with the lease. Hub and runner traffic must use a trusted network or HTTPS,
 as with existing runner credentials. Cache action writes follow the hub's policy.
+
+Runner session revocation retains the hub lease in a stopping state until a later poll no
+longer lists that sandbox, preventing JVM overlap during eviction. Idle leases on draining
+runners are revoked immediately; commands already running keep their leases. A failed
+command that never created a sandbox releases its reservation through the same handshake.
+Local sessions from disk are discarded when restarting with no local slots. Local
+placement resource samples are cached for one second. Runner CAS retention uses the
+runner's KeepBlobs interval (24h by default), and disk pressure also reclaims session CAS;
+abandoned inner job dirs expire after an hour.

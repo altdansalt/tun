@@ -55,6 +55,7 @@ var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 type session struct {
 	api.Session                // the persisted part
 	runner        *runnerState // remote lease owner; nil on the hub
+	diskCacheMax  string
 	idleSeconds   int
 	cacheReadOnly bool
 	credential    string              // scoped cache credential, never exposed to the sandbox
@@ -105,7 +106,7 @@ func (s *Server) loadSessions() error {
 		if sess.Host == "" {
 			sess.Host = api.LocalRunner
 		}
-		if sess.Host != api.LocalRunner {
+		if sess.Host != api.LocalRunner || s.cfg.HubOnly {
 			continue
 		}
 		s.sessions[sess.ID] = &sess
@@ -276,6 +277,10 @@ func (s *Server) queuedFor(sess *session) bool {
 // Caller holds s.mu; sess must be idle.
 func (s *Server) stopSession(sess *session, why string) {
 	sess.stopping = true
+	if sess.runner != nil {
+		sess.runner.poke()
+		return
+	}
 	log.Printf("tun: session %s (%s, client %s): %s", sess.ID, sess.Name, sess.Client, why)
 	s.wg.Add(1)
 	go func() {
@@ -390,6 +395,7 @@ func (s *Server) queueReason(j *job) string {
 
 // sessionPaths are a session's directories as the bazel command sees them.
 type sessionPaths struct {
+	diskCacheMax                                              string
 	idleSeconds                                               int
 	work, home, tmp, out, repo, disk, bazelisk, rc, exe, sock string
 	cacheDisabled, cacheReadOnly                              bool
@@ -478,6 +484,7 @@ func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 	} else if err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	in.diskCacheMax = sess.diskCacheMax
 	if err := writeOwn(host.rc, []byte(s.bazelrc(sess.Name, in, s.remoteSetup(in)))); err != nil {
 		return err
 	}
@@ -525,7 +532,11 @@ func (s *Server) bazelrc(name string, in sessionPaths, r remoteSetup) string {
 		fmt.Fprintf(&b, "# %s\n", r.note)
 	}
 	if r.socket == "" {
-		fmt.Fprintf(&b, "common --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n", in.disk, s.cfg.DiskCacheMax)
+		limit := in.diskCacheMax
+		if limit == "" {
+			limit = s.cfg.DiskCacheMax
+		}
+		fmt.Fprintf(&b, "common --disk_cache=%s\ncommon --experimental_disk_cache_gc_max_size=%s\n", in.disk, limit)
 		return b.String()
 	}
 	// No --disk_cache with the remote cache: it is on the same host, and a --cold session

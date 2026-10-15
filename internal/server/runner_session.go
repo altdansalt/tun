@@ -3,24 +3,23 @@ package server
 // Runners reuse the hub's session implementation, including workspace sync, sandbox
 // agent, cancellation and BEP parsing. Only transport and lifecycle differ here.
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/workspace"
 )
 
 func (r *Runner) newSessionHost() error {
-	s, err := New(Config{DataDir: filepath.Join(r.cfg.DataDir, "session-host"), Sandbox: r.cfg.Sandbox, PrivateNet: r.cfg.PrivateNet, MaxJobs: r.cfg.Slots, MinFree: r.cfg.MinFree, KillGrace: r.cfg.KillGrace, BazelCommand: r.cfg.BazelCommand, BazeliskSeed: r.cfg.BazeliskSeed, SessionIdle: 30 * time.Minute})
+	s, err := New(Config{DataDir: filepath.Join(r.cfg.DataDir, "session-host"), Sandbox: r.cfg.Sandbox, PrivateNet: r.cfg.PrivateNet, MaxJobs: r.cfg.Slots, MinFree: r.cfg.MinFree, KillGrace: r.cfg.KillGrace, BazelCommand: r.cfg.BazelCommand, BazeliskSeed: r.cfg.BazeliskSeed, KeepBlobs: r.cfg.KeepBlobs, KeepJobs: time.Hour, SessionIdle: 30 * time.Minute})
 	if err != nil {
 		return err
 	}
@@ -38,13 +37,24 @@ func (r *Runner) newSessionHost() error {
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	r.sessionTransport = tr
 	s.sessionProxy = func(sess *session) http.Handler {
-		return &httputil.ReverseProxy{Transport: tr, Rewrite: func(p *httputil.ProxyRequest) {
+		proxy := &httputil.ReverseProxy{Transport: tr, ModifyResponse: func(resp *http.Response) error { resp.Header.Del("Location"); return nil }, Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(target)
-			p.Out.URL.Path = target.Path + "/v1/session-cache/" + sess.credential + p.In.URL.Path
+			p.Out.URL.Path = target.Path + "/v1/session-cache" + p.In.URL.Path
+			p.Out.URL.RawPath = ""
+			p.Out.URL.RawQuery = ""
+			p.Out.Header.Set("X-Tun-Session", sess.ID)
+			p.Out.Header.Set("X-Tun-Session-Credential", sess.credential)
 			p.Out.Header.Del("X-Tun-Token")
 			p.Out.Header.Del("Authorization")
 			p.Out.Header.Del("X-Tun-Client")
 		}}
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if !sessionRPC.MatchString(req.URL.Path) || req.URL.RawPath != "" {
+				writeErr(w, 400, "invalid REAPI method")
+				return
+			}
+			proxy.ServeHTTP(w, req)
+		})
 	}
 	s.sessionSync = func(j *job, killed <-chan struct{}) error {
 		ctx, cancel := context.WithCancel(r.ctx)
@@ -56,7 +66,11 @@ func (r *Runner) newSessionHost() error {
 			case <-ctx.Done():
 			}
 		}()
-		return r.fetchSessionBlobs(ctx, j.bz)
+		limit := j.runnerMaxUpload
+		if limit <= 0 {
+			limit = s.cfg.MaxUpload
+		}
+		return r.fetchSessionBlobsLimit(ctx, j.bz, limit)
 	}
 	r.sessions = s
 	return nil
@@ -78,37 +92,69 @@ func (r *Runner) sessionLeases(ids []string) {
 }
 
 func (r *Runner) fetchSessionBlobs(ctx context.Context, b *api.BazelJob) error {
-	for _, sha := range r.sessions.missingBlobs(b.Manifest) {
-		resp, err := r.do(ctx, "GET", "/v1/runner/cas/"+sha, nil)
-		if err != nil {
-			return err
+	return r.fetchSessionBlobsLimit(ctx, b, r.sessions.cfg.MaxUpload)
+}
+func (r *Runner) fetchSessionBlobsLimit(ctx context.Context, b *api.BazelJob, limit int64) error {
+	missing := r.sessions.missingBlobs(b.Manifest)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var first error
+	var mu sync.Mutex
+	batches := make(chan []string)
+	sizes := map[string]int64{}
+	for _, e := range b.Manifest {
+		sizes[e.Sha] = e.Size
+	}
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for batch := range batches {
+				data, _ := json.Marshal(batch)
+				resp, err := r.do(ctx, "POST", "/v1/runner/cas", bytes.NewReader(data))
+				if err == nil {
+					if resp.StatusCode != 200 {
+						err = hubError(resp)
+					} else {
+						_, err = workspace.ReadBlobs(resp.Body, false, limit, filepath.Join(r.sessions.cfg.DataDir, "cas"))
+					}
+					resp.Body.Close()
+				}
+				if err != nil {
+					mu.Lock()
+					if first == nil {
+						first = err
+					}
+					mu.Unlock()
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+send:
+	for len(missing) > 0 {
+		n := 1
+		total := sizes[missing[0]]
+		for n < min(256, len(missing)) && total+sizes[missing[n]] <= limit {
+			total += sizes[missing[n]]
+			n++
 		}
-		if resp.StatusCode != 200 {
-			err = hubError(resp)
-			resp.Body.Close()
-			return err
+		select {
+		case batches <- missing[:n]:
+			missing = missing[n:]
+		case <-ctx.Done():
+			break send
 		}
-		tmp, err := os.CreateTemp(filepath.Join(r.sessions.cfg.DataDir, "cas"), ".fetch-*")
-		if err != nil {
-			resp.Body.Close()
-			return err
-		}
-		h := sha256.New()
-		_, err = io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, r.sessions.cfg.MaxUpload+1))
-		resp.Body.Close()
-		if cerr := tmp.Close(); err == nil {
-			err = cerr
-		}
-		if err == nil && hex.EncodeToString(h.Sum(nil)) != sha {
-			err = fmt.Errorf("session blob %s failed digest verification", sha)
-		}
-		if err == nil {
-			err = os.Rename(tmp.Name(), r.sessions.casPath(sha))
-		}
-		os.Remove(tmp.Name())
-		if err != nil {
-			return err
-		}
+	}
+	close(batches)
+	wg.Wait()
+	if first != nil {
+		return first
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return nil
 }
@@ -118,6 +164,17 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 	spec := rj.spec
 	b := spec.Bazel
 	s := r.sessions
+	defer func() {
+		s.mu.Lock()
+		delete(s.jobs, spec.ID)
+		s.mu.Unlock()
+		os.RemoveAll(s.jobDir(spec.ID))
+	}()
+	deadline := time.Now().Add(time.Duration(spec.TimeoutSec) * time.Second)
+	if err := workspace.CheckManifest(b.Command.Manifest, spec.MaxWorkspace); err != nil {
+		return failed("%v", err), done
+	}
+
 	if err := prepareJobDir(s.cfg.DataDir, spec.ID); err != nil {
 		return failed("%v", err), done
 	}
@@ -134,6 +191,15 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 			s.stopSession(old, "new hub lease")
 		}
 		s.mu.Unlock()
+		r.mu.Lock()
+		state := rj.killState
+		r.mu.Unlock()
+		if state != "" {
+			return procResult{State: state}, done
+		}
+		if spec.TimeoutSec > 0 && time.Now().After(deadline) {
+			return procResult{State: api.Timeout}, done
+		}
 		if r.ctx.Err() != nil {
 			return procResult{State: "crash"}, done
 		}
@@ -147,12 +213,17 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 		sess = &session{Session: v, loaded: true}
 		s.sessions[v.ID] = sess
 	}
+	sess.diskCacheMax = b.DiskCacheMax
 	if sess.credential == "" {
 		sess.credential = b.CacheCredential
 		sess.cacheReadOnly = b.CacheReadOnly
 		sess.idleSeconds = b.SessionIdleSec
 	}
-	j := &job{Job: api.Job{ID: spec.ID, Client: b.Session.Client, SessionID: b.Session.ID, Cwd: spec.Cwd, TimeoutSec: spec.TimeoutSec, State: api.Queued}, bz: &b.Command, runnerMaxLog: &spec.MaxLog, done: make(chan struct{})}
+	remaining := spec.TimeoutSec
+	if remaining > 0 {
+		remaining = max(1, int(time.Until(deadline).Seconds()+0.999))
+	}
+	j := &job{Job: api.Job{ID: spec.ID, Client: b.Session.Client, SessionID: b.Session.ID, Cwd: spec.Cwd, TimeoutSec: remaining, State: api.Queued}, bz: &b.Command, runnerMaxLog: &spec.MaxLog, runnerMaxUpload: b.MaxUpload, done: make(chan struct{})}
 	s.jobs[j.ID] = j
 	sess.job = j
 	s.mu.Unlock()
@@ -181,7 +252,7 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 	s.runBazel(j)
 	close(stop)
 	<-shipped
-	done = api.RunnerDone{State: j.State, ExitCode: j.ExitCode, Signal: j.Signal, Error: j.Error, Summary: j.Summary}
+	done = api.RunnerDone{SessionReady: sess.sb != nil, State: j.State, ExitCode: j.ExitCode, Signal: j.Signal, Error: j.Error, Summary: j.Summary}
 	v := sess.Session
 	done.Session = &v
 	data, _ := os.ReadFile(filepath.Join(s.jobDir(j.ID), "bep.json"))
@@ -192,11 +263,6 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 	if err := r.retry(time.Minute, func() error { return r.shipSessionLogs(spec.ID, &sent) }); err != nil {
 		return procResult{State: "crash"}, done
 	}
-	s.mu.Lock()
-	delete(s.jobs, j.ID)
-	s.mu.Unlock()
-	// Logs have reached the hub; the warm sandbox remains in the engine's session dir.
-	os.RemoveAll(s.jobDir(j.ID))
 	return procResult{State: j.State, Code: j.ExitCode, Sig: j.Signal, Msg: j.Error}, done
 }
 
