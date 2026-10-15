@@ -87,6 +87,9 @@ func (b *webBody) Read(p []byte) (int, error) {
 	}
 	data := make([]byte, size)
 	if _, err := io.ReadFull(b.ReadCloser, data); err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
 		return 0, err
 	}
 	headers, err := textproto.NewReader(bufio.NewReader(strings.NewReader(string(data) + "\r\n"))).ReadMIMEHeader()
