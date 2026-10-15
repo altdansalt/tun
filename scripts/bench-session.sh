@@ -26,7 +26,7 @@ step() {
   shift
   local start end code
   start=$(date +%s.%N)
-  tun bazel "$@" >"$out/$name.out" 2>"$out/$name.err"
+  tun bazel --timeout 50m "$@" >"$out/$name.out" 2>"$out/$name.err"
   code=$?
   end=$(date +%s.%N)
   printf '== %s: exit %d, wall %.2fs: tun bazel %s\n' "$name" "$code" "$(awk "BEGIN {print $end - $start}")" "$*"
