@@ -440,7 +440,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 func TestBazelSessionLimits(t *testing.T) {
 	ts := bazelServer(t, server.Config{MaxSessions: 1, SessionIdle: 2 * time.Second}, false)
 	ws := bazelWS(t, map[string]string{})
-	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "after ") || !strings.Contains(r.stderr, "; cold start: first command of a new session\n") {
+	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "(Bazel server starts with this command; cold: first command of a new session)") || strings.Contains(r.stderr, "; cold start") {
 		t.Fatalf("first command's summary: %+v", r)
 	}
 	first := ts.sessions()[0]
@@ -473,7 +473,7 @@ func TestBazelSessionLimits(t *testing.T) {
 }
 
 func TestBazelSessionStop(t *testing.T) {
-	ts := bazelServer(t, server.Config{}, false)
+	ts := bazelServer(t, server.Config{MaxSessions: 8}, false)
 	ws := bazelWS(t, map[string]string{})
 	for _, name := range []string{"default", "b", "c"} {
 		if r := ts.tun(ws, "bazel", "--session", name, "build"); r.code != 0 {

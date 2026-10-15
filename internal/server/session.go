@@ -975,22 +975,25 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		return fail("%v", err)
 	}
 	if started {
-		why := "first command of a new session"
+		why, unexpected := "first command of a new session", true
 		switch {
 		case sess.startNote != "":
 			why = sess.startNote
 		case b.Cold:
-			why = "--cold"
+			why, unexpected = "--cold", false
 		case sess.Commands == 0:
+			unexpected = false
 		case hadSandbox:
 			why = "the session's sandbox (and Bazel server) had exited; see its agent.log"
 		default:
 			why = "the tun server restarted since the session's last command"
 		}
 		sess.startNote = ""
-		s.mu.Lock()
-		j.coldNote = why
-		s.mu.Unlock()
+		if unexpected { // the summary line says it only if the client couldn't know
+			s.mu.Lock()
+			j.coldNote = why
+			s.mu.Unlock()
+		}
 		remote := "no remote cache (tun serve --cache-dir)"
 		if r := s.remoteSetup(p); r.note != "" {
 			remote = r.note

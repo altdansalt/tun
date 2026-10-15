@@ -546,10 +546,11 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   ended: evicted (naming the client, session and job it made room for), idle expiry, low
   disk, `tun sessions stop`. A command that starts a session's Bazel server says why on the
   start line ("started a new session sandbox (Bazel server starts with this command; cold:
-  WHY)") and appends `; cold start: WHY` to its summary line; WHY is "its session ended 4m0s
-  ago: evicted (least recently used of 2 sessions) for client C's session S (job J)", "first
-  command of a new session", "--cold", "the tun server restarted since the session's last
-  command", or "the session's sandbox (and Bazel server) had exited". A command whose new
+  WHY)"): "first command of a new session", "--cold", "its session ended 4m0s ago: evicted
+  (least recently used of 2 sessions) for client C's session S (job J)", "the tun server
+  restarted since the session's last command", or "the session's sandbox (and Bazel server)
+  had exited". For the last three (the client could not know) the summary line also ends
+  with `; cold start: WHY`. A command whose new
   session evicted another appends `; evicted client C's session S (idle for D) to make room`.
   (Both come before the `; logs: ...` part.)
 - `POST /v1/sessions/stop` / `tun sessions stop`: body `{id, name, root}` (all optional)

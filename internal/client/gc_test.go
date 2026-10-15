@@ -69,7 +69,6 @@ func TestRetentionJobs(t *testing.T) {
 	ts := startServer(t, server.Config{KeepWork: 100 * time.Millisecond, KeepJobs: 500 * time.Millisecond, GCInterval: 50 * time.Millisecond})
 	id := ts.detach("", "-c", "echo hi")
 	long := ts.detach("", "-c", "sleep 2; echo still here")
-	ts.waitDone(id)
 	eventually(t, "job record deleted", func() bool { return !exists(filepath.Join(ts.data, "jobs", id)) })
 	r := ts.tun("", "status", id)
 	if r.code != 125 || !strings.Contains(r.stderr, "no such job") || !strings.Contains(r.stderr, "--keep-jobs") {

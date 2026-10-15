@@ -90,7 +90,8 @@ go_library(
             "netns_test.go",
             "sandbox_test.go",
         ],
-        "medium",
+        # TestBwrapGoBuild builds with a cold GOCACHE: over a minute on a loaded 2-CPU host.
+        "large",
         [
             "@go_sdk//:bin/go",
             "@go_sdk//:files",

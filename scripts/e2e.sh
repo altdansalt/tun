@@ -73,7 +73,7 @@ if command -v bazel >/dev/null; then
   # A new session (another name: its own output base) gets the action from tun's remote cache.
   tun bazel --session other build //:g 2> "$tmp/other"
   grep -Eq "[0-9]+ remote cache hit" "$tmp/other"
-  grep -q "; cold start: first command of a new session" "$tmp/other"
+  grep -q "cold: first command of a new session" "$tmp/other"
   # tun sessions stop frees it; its next command says why it starts cold.
   tun sessions stop other | grep -q '"state":"stopping"'
   until [ "$(tun sessions | grep -c '"name":"other"')" = 0 ]; do sleep 0.2; done
