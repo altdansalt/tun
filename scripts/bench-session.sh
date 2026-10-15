@@ -11,6 +11,13 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 [ -f MODULE.bazel ] && [ -f internal/server/BUILD.bazel ] || { echo "bench-session.sh: no BUILD files here" >&2; exit 2; }
 [ $# -gt 0 ] || set -- //...
+# Output bases, caches and the Go SDK take several GB: refuse a host without room (exit 3; tun
+# can't place a job on a given host, so resubmit).
+free=$(df -Pk "${TMPDIR:-/tmp}" | awk 'NR==2 {print int($4 / 1048576)}')
+if [ "$free" -lt "${BENCH_MIN_FREE_GB:-8}" ]; then
+  echo "bench-session.sh: only ${free}GB free in ${TMPDIR:-/tmp} (BENCH_MIN_FREE_GB=${BENCH_MIN_FREE_GB:-8})" >&2
+  exit 3
+fi
 data=$(ls -d "${TMPDIR:-/tmp}"/tun-ephemeral-* 2>/dev/null | head -1)
 [ -n "$data" ] || { echo "bench-session.sh: run inside scripts/dev-tun.sh" >&2; exit 2; }
 out=$(mktemp -d)
