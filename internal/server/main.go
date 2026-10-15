@@ -194,9 +194,23 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *runnerTimeout < time.Second {
 		return fail("--runner-timeout must be at least 1s")
 	}
+	var store *reapi.Store
+	if *cacheDir != "" {
+		dir := *cacheDir
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(*data, dir)
+		}
+		limit, err := parseSize(*cacheMax)
+		if err != nil {
+			return fail("--cache-max-size: %v", err)
+		}
+		if store, err = reapi.Open(dir, limit); err != nil {
+			return fail("cache: %v", err)
+		}
+	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf,
-		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed})
+		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed, Cache: store, CacheReadOnly: !*cacheWrites})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
@@ -206,31 +220,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail("listen: %v", err)
 	}
 	handler := s.Handler()
-	if *cacheDir != "" {
-		dir := *cacheDir
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(s.cfg.DataDir, dir)
-		}
-		limit, err := parseSize(*cacheMax)
-		if err != nil {
-			ln.Close()
-			return fail("--cache-max-size: %v", err)
-		}
-		store, err := reapi.Open(dir, limit)
-		if err != nil {
-			ln.Close()
-			return fail("cache: %v", err)
-		}
-		cache := &reapi.Handler{Store: store, Token: s.Token(), AllowActionWrites: *cacheWrites}
-		apiHandler := handler
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") &&
-				(strings.HasPrefix(r.URL.Path, "/build.bazel.remote.execution.v2.") || strings.HasPrefix(r.URL.Path, "/google.bytestream.ByteStream/")) {
-				cache.ServeHTTP(w, r)
-			} else {
-				apiHandler.ServeHTTP(w, r)
-			}
-		})
+	if store != nil {
+		cache := s.CacheHandler()
 		socket := *cacheSocket
 		if socket == "" {
 			socket = filepath.Join(s.cfg.DataDir, "cache.sock")

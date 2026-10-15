@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 )
 
@@ -66,12 +67,20 @@ type Config struct {
 	// new bazelisk home, so new clients don't download Bazel again; "" for none.
 	BazeliskSeed string
 	DiskCacheMax string // --experimental_disk_cache_gc_max_size of each client's disk cache; default 5G
+
+	// Cache is the REAPI cache (tun serve --cache-dir), or nil. Handler serves it as gRPC
+	// (token auth, the action cache namespace of the request's client), and every Bazel
+	// session reaches it through its own unix socket (see session.go) without a token.
+	Cache *reapi.Store
+	// CacheReadOnly: clients can't write action results (only executors can).
+	CacheReadOnly bool
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
 type Server struct {
 	cfg   Config
 	token string
+	cache *reapi.Handler // nil without Config.Cache
 
 	mu       sync.Mutex
 	jobs     map[string]*job
@@ -188,6 +197,9 @@ func New(cfg Config) (*Server, error) {
 	s.gc.fails = map[string]int{}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
+	}
+	if cfg.Cache != nil {
+		s.cache = &reapi.Handler{Store: cfg.Cache, Token: s.token, AllowActionWrites: !cfg.CacheReadOnly, Client: cacheClient}
 	}
 	if err := s.recover(); err != nil {
 		return nil, err
@@ -378,7 +390,34 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, fmt.Sprintf("no such endpoint: %s %s", r.Method, r.URL.Path))
 	})
-	return mux
+	if s.cache == nil {
+		return mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") &&
+			(strings.HasPrefix(r.URL.Path, "/build.bazel.remote.execution.v2.") || strings.HasPrefix(r.URL.Path, "/google.bytestream.ByteStream/")) {
+			s.cache.ServeHTTP(w, r)
+		} else {
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+// CacheHandler serves the REAPI cache as gRPC with token auth (nil without Config.Cache).
+func (s *Server) CacheHandler() http.Handler {
+	if s.cache == nil {
+		return nil
+	}
+	return s.cache
+}
+
+// cacheClient is the action cache namespace of a token-authenticated gRPC request: its
+// client identity (see clientOf), as for jobs and sessions.
+func cacheClient(r *http.Request) string {
+	if c := clientOf(r); c != "" && c != "@" {
+		return c
+	}
+	return "unknown"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

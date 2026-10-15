@@ -171,3 +171,20 @@ func TestProcessResultOverridesBEP(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+// TestRemoteOutputURI: with a remote cache Bazel may report an output as bytestream://; its
+// workspace path still comes from the prefix and name. Test logs need a local file.
+func TestRemoteOutputURI(t *testing.T) {
+	p := New("test")
+	_, err := p.Write([]byte(`{"id":{"targetCompleted":{"label":"//:x"}},"completed":{"success":true,"outputGroup":[{"name":"default","fileSets":[{"id":"a"}]}]}}
+{"id":{"namedSet":{"id":"a"}},"namedSetOfFiles":{"files":[{"name":"x","pathPrefix":["bazel-out","k8-fastbuild","bin"],"uri":"bytestream://tun/blobs/abc/1"}]}}
+{"id":{"testResult":{"label":"//:x","run":1,"shard":1,"attempt":1}},"testResult":{"status":"PASSED","testActionOutput":[{"name":"test.log","uri":"bytestream://tun/blobs/def/2"}]}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := p.Snapshot()
+	if len(s.Targets[0].Outputs) != 1 || s.Targets[0].Outputs[0].Path != "bazel-bin/x" || len(s.Tests) != 1 || len(s.Tests[0].Attempts) != 1 || len(s.Tests[0].Attempts[0].Logs) != 0 {
+		t.Fatalf("%+v", s)
+	}
+}

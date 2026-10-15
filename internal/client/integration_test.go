@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/server"
 	"github.com/altdansalt/tun/internal/workspace"
@@ -51,7 +52,9 @@ func startServer(t *testing.T, cfg server.Config) *testServer {
 	if cfg.MaxUpload == 0 {
 		cfg.MaxUpload = 64 << 20
 	}
-	cfg.KillGrace = 50 * time.Millisecond
+	if cfg.KillGrace == 0 {
+		cfg.KillGrace = 50 * time.Millisecond
+	}
 	s, err := server.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +70,7 @@ func startServer(t *testing.T, cfg server.Config) *testServer {
 			ts.puts.Add(1)
 		}
 		h.ServeHTTP(w, r)
-	})}
+	}), Protocols: reapi.Protocols()} // h2c: the REAPI cache's gRPC with Config.Cache
 	go ts.hs.Serve(ln)
 	t.Cleanup(ts.stop)
 	return ts
