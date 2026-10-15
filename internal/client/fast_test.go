@@ -163,8 +163,12 @@ esac
 	if r := ci2(`-run=TestA`, ran, "-e", "CI_FULL=1"); r.code != 0 || !strings.Contains(r.stdout, "step:vet\nstep:build\n") {
 		t.Errorf("CI_FULL=1 should vet and build: %+v", r)
 	}
-	if r := ci2("", ran); r.code != 0 || !strings.Contains(r.stdout, "step:vet\nstep:build\n") {
+	if r := ci2("", ran); r.code != 0 || !strings.Contains(r.stdout, "step:vet\nstep:build\n") || strings.Contains(r.stdout, "arg:\n") {
 		t.Errorf("no TEST_FLAGS: %+v", r)
+	}
+	// TEST_FLAGS is only unquoted, never evaluated: no globbing, substitution or pipes.
+	if r := ci2(`-run $(echo\ X)|* -v`, ran); r.code != 0 || !strings.Contains(r.stdout, "arg:-run\narg:$(echo X)|*\narg:-v\n") {
+		t.Errorf("TEST_FLAGS evaluated: %+v", r)
 	}
 
 	// A -run pattern matching nothing anywhere fails loudly.

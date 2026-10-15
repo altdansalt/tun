@@ -33,7 +33,8 @@ tun run [flags] -c '<shell script>' run via bash -c
                     stdout) and stderr (to stderr), then one "tun: job <id>: showed the last a of b
                     stdout lines and c of d stderr lines; full logs: tun logs <id>, tun logs --stderr
                     <id>" line. The opening "tun: job <id> (--tail N: ...)" line says the same.
-                    Exit status as without it. Not with --json, --detach or --service.
+                    Exit status as without it. Not with --json, --detach or --service. N must be
+                    >= 0 (a negative N is a usage error, exit 125; also for tun logs --tail).
 tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>       tun cancel <id>
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
@@ -57,7 +58,8 @@ creates `$DATA/token` on first start (0600) if absent; clients read `$TUN_TOKEN`
 client works with zero config.
 
 For testing, `tun serve --ephemeral` uses a random loopback port and a fresh temporary
-data directory, removed on shutdown. It rejects explicit `--addr` or `--data`. Once ready,
+data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
+it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
 stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
 diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
@@ -65,7 +67,10 @@ diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
 (with extra `tun serve` flags from `$DEV_TUN_SERVE_ARGS`, word-split),
 exports its credentials and prepends the binary directory to PATH, runs COMMAND, and cleans up.
 For example: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
-CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable explicitly.
+CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable explicitly
+(also with `-run` in `TEST_FLAGS`, where it is otherwise skipped). `scripts/ci.sh` splits
+`TEST_FLAGS` like xargs: whitespace separates words, `'...'`/`"..."` group and are removed
+(`-run TestA|TestB` and `-run "A|B"` both work); nothing is globbed or evaluated.
 
 Exit status of `tun run`: the command's exit code; 128+signal if killed by a signal; 124 on timeout;
 125 for tun's own errors (can't reach server, upload failed, bad flags) with a one-line message on

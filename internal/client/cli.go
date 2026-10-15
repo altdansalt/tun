@@ -109,7 +109,7 @@ a runner, only paths within the --out paths given here exist).
 --tail N streams nothing while the job runs; when it ends, tun prints the last N lines of its
 stdout (to stdout) and of its stderr (to stderr), then a "tun: job <id>: showed the last ..."
 line with line counts and the commands for the full logs (tun logs <id>; tun logs --stderr <id>).
-The exit status is the same as without --tail.
+The exit status is the same as without --tail. N must be 0 or more.
 
 flags:
 `
@@ -233,6 +233,9 @@ func runCmd(args []string, e Env) int {
 	}
 	if err := checkPaths(outs); err != nil {
 		return errorf(e, "run: --out: %v", err)
+	}
+	if negativeTail(fs, *tailN) {
+		return errorf(e, "run: --tail must not be negative")
 	}
 	if *tailN >= 0 && (*jsonOut || *detach) {
 		return errorf(e, "run: --tail can't be combined with --json or --detach")
@@ -422,13 +425,21 @@ func (t *lineTail) Write(p []byte) (int, error) {
 
 // counts returns the number of lines kept and seen; a final unterminated line counts.
 func (t *lineTail) counts() (kept, total int64) {
-	kept = int64(bytes.Count(t.buf, []byte("\n")))
+	kept, total = int64(bytes.Count(t.buf, []byte("\n"))), t.lines
 	if t.partial {
-		kept, total = kept+1, t.lines+1
-	} else {
-		total = t.lines
+		total++
+		if len(t.buf) > 0 { // with --tail 0 the partial line wasn't kept
+			kept++
+		}
 	}
 	return kept, total
+}
+
+// negativeTail reports whether --tail was given a negative value (-1, the default, means unset).
+func negativeTail(fs *flag.FlagSet, n int) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == "tail" })
+	return set && n < 0
 }
 
 // lastLines returns the index in b where its last n lines start.
@@ -662,6 +673,9 @@ func logsCmd(args []string, e Env) int {
 	pos, err := parse(fs, args)
 	if err != nil {
 		return flagErr(e, err)
+	}
+	if negativeTail(fs, *tailN) {
+		return errorf(e, "logs: --tail must not be negative")
 	}
 	id, ok := oneID("logs", pos, e)
 	if !ok {

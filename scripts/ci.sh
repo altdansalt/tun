@@ -2,11 +2,13 @@
 # ci.sh: build + test tun. Runs anywhere (bb remote runner, tun itself, a laptop).
 # Installs Go into ~/.cache/tun-go if no suitable go is on PATH.
 #
-# TEST_FLAGS: extra `go test` flags, parsed with shell quoting rules (so
-#   TEST_FLAGS='-run "TestA|TestB" -v' works). With -run, the separate vet and build steps are
-#   skipped (go test compiles everything it tests) unless CI_FULL=1, and the run fails if the
-#   pattern matched no test in any package.
-# E2E=0: skip the end-to-end smoke suite (scripts/e2e.sh) that full runs do at the end.
+# TEST_FLAGS: extra `go test` flags, split on whitespace with xargs quoting rules: '...' and "..."
+#   group words and are removed, so TEST_FLAGS='-run "TestA|TestB" -v' and '-run TestA|TestB'
+#   both work. Nothing is evaluated: no globbing, variables, command substitution or pipes.
+#   With -run, the separate vet and build steps are skipped (go test compiles everything it
+#   tests) unless CI_FULL=1, and the run fails if the pattern matched no test in any package.
+# E2E=0: skip the end-to-end smoke suite (scripts/e2e.sh) that full runs do at the end;
+#   E2E=1: run it even with -run.
 set -euo pipefail
 GOVER=${GOVER:-1.27.2}
 if ! command -v go >/dev/null || ! go version | grep -q "go1.2[5-9]"; then
@@ -19,12 +21,15 @@ if ! command -v go >/dev/null || ! go version | grep -q "go1.2[5-9]"; then
 fi
 cd "$(dirname "$0")/.."
 
-# Plain ${TEST_FLAGS} would split on spaces and keep quote characters literally:
-# '-run "A|B"' became the regexp `"A|B"`, which matches nothing. Let the shell parse it.
+# Plain ${TEST_FLAGS} would keep quote characters literally ('-run "A|B"' became the regexp
+# `"A|B"`, matching nothing) and glob; eval would run | ( $(...) as shell. xargs only unquotes.
 flags=()
-if ! eval "flags=(${TEST_FLAGS:-})"; then
-  echo "ci.sh: cannot parse TEST_FLAGS=${TEST_FLAGS:-} (shell quoting)" >&2
-  exit 2
+if [ -n "${TEST_FLAGS:-}" ]; then
+  if ! xargs printf '%s\0' <<<"$TEST_FLAGS" >/dev/null; then
+    echo "ci.sh: cannot parse TEST_FLAGS=$TEST_FLAGS (unmatched quote?)" >&2
+    exit 2
+  fi
+  mapfile -d '' flags < <(xargs printf '%s\0' <<<"$TEST_FLAGS")
 fi
 run=0 check=1
 for f in "${flags[@]}"; do
@@ -39,13 +44,17 @@ if [ "$run" = 0 ] || [ "${CI_FULL:-}" = 1 ]; then
   go vet ./...
   go build ./...
 fi
-if [ "$run" = 0 ] || [ "$check" = 0 ]; then
-  go test -race -count=1 "${flags[@]}" ./...
-  # End-to-end smoke suite of the real binary (scripts/e2e.sh) on full runs; -e E2E=0 skips it.
-  if [ "$run" = 0 ] && [ "${E2E:-1}" = 1 ]; then
+# End-to-end smoke suite of the real binary (scripts/e2e.sh): on full runs unless E2E=0, and
+# with -run only if E2E=1.
+e2e() {
+  if [ "${E2E:-$((1 - run))}" = 1 ]; then
     time scripts/dev-tun.sh ./scripts/e2e.sh
     time DEV_TUN_SERVE_ARGS='--local-slots 0 --runner-timeout 3s' scripts/dev-tun.sh ./scripts/e2e-runners.sh
   fi
+}
+if [ "$run" = 0 ] || [ "$check" = 0 ]; then
+  go test -race -count=1 "${flags[@]}" ./...
+  e2e
   exit 0
 fi
 
@@ -59,4 +68,5 @@ if [ "$status" = 0 ] && ! awk '/^(ok[[:space:]]|--- |FAIL)/ && !/\[no tests to r
   echo "ci.sh: (go test -list '.*' ./... lists the test names; quote alternations: -run 'A|B')" >&2
   exit 1
 fi
+[ "$status" = 0 ] && e2e
 exit "$status"
