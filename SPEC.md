@@ -14,7 +14,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 ## CLI
 ```
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
-          [--net auto|private|host]
+          [--net auto|private|host] [--local-slots N] [--runner-timeout 30s]
           [--ephemeral] [--exit-on-eof]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
 tun run [flags] -- <argv...>        run argv (no shell)
@@ -37,12 +37,15 @@ tun run [flags] -c '<shell script>' run via bash -c
 tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>       tun cancel <id>
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
+tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
+tun runners                       (JSON lines: the server's live runners)
 ```
 `tun logs --tail N`: only the last N lines (a final line without a newline counts); with `-f`,
 start at the last N lines present when it connects, then follow until the job ends.
 `tun run --out PATH` (repeatable): after the job ends (any state), download PATH (relative to the
 workspace root; file, dir, or `path.Match` glob) from the job's work dir into the same relative path
 of the local workspace root (`tun get`: or under `-o DIR`), replacing existing files (temp + rename),
+(the paths are also sent with the job as `outputs`: a job that runs on a runner keeps only those),
 keeping modes/mtimes. A PATH matching nothing is a `tun: warning:` on stderr; the exit status stays
 the command's. A failed download (size limit, network) turns exit 0 into 125. `tun get` exits 1 if
 any PATH matched nothing or was refused, 125 on errors. Local writes go through an `os.Root`, so
@@ -57,7 +60,8 @@ data directory, removed on shutdown. It rejects explicit `--addr` or `--data`. O
 stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
 diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
-`scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server,
+`scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server
+(with extra `tun serve` flags from `$DEV_TUN_SERVE_ARGS`, word-split),
 exports its credentials and prepends the binary directory to PATH, runs COMMAND, and cleans up.
 For example: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
 CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable explicitly.
@@ -84,6 +88,9 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
   started) and `run_sec` (start to end; to now while running; 0 if never started), in seconds
   with millisecond resolution, computed when served. While queued in the FIFO it also has
   `queue_position` (1 = next to start); omitted otherwise.
+- `runner`: where the job runs or ran, set when it leaves the queue: `local` (the server
+  itself; always for services) or a runner's name (see Runners). `outputs`: the `--out`
+  paths the client declared.
 - `client`: who submitted the job, recorded at creation: the `X-Exedev-Source-Vm` request header
   (set by the exe.dev proxy, which callers can't forge through it), else the client-sent
   `X-Tun-Client` (the CLI sends its hostname on every request), else the remote IP. Values are
@@ -156,7 +163,8 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
   but **no isolation at all**: the job runs as the server user with the server's filesystem access,
   so it can read `$DATA/token`, other jobs' workspaces and logs, and rewrite job state. Use it only
   when every job is as trusted as the server operator.
-- `--max-jobs` (default NumCPU) jobs run at once; the rest queue FIFO (state `queued`).
+- `--max-jobs` (default NumCPU) jobs run at once on the server (`--local-slots` overrides it;
+  runners add their slots, see Runners); the rest queue FIFO (state `queued`).
 - Cancel is race-free: a job canceled after it left the queue but before its process started
   ends `canceled` and is never started; a job reaches a terminal state exactly once.
 - Timeout and cancel kill the entire process group (SIGTERM, then SIGKILL after 10s).
@@ -208,13 +216,90 @@ database, test fixture):
   before the service does (the proxy would then reach the impostor). The bearer auth only
   protects the proxy path there.
 
+## Runners
+The server scales out to other machines with `tun runner`: a runner pulls jobs from the
+server (the *hub*), which never opens a connection to it. Clients talk only to the hub; the
+client API is unchanged. Job state, logs and outputs live on the hub.
+- `tun runner --hub URL` (default `$TUN_URL`): `--slots N` (default NumCPU) jobs at once,
+  `--name` (default hostname; unique per hub, it becomes the job's `runner`), `--data DIR`
+  (default `~/.local/share/tun-runner`: blob cache, job dirs, shared build caches; a tun serve
+  data dir is refused; job dirs left by a previous runner process are deleted at start),
+  `--sandbox` as for serve. Token: `--token-file`, else `$TUN_TOKEN`, else
+  `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
+  (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
+  work, kills its jobs and reports them `failed` ("runner N shut down"); a second signal quits
+  at once.
+- Scheduling: one FIFO; the head job goes to whichever free slot asks first: one of the hub's
+  `--local-slots` (default `--max-jobs`; `0` = pure hub that only dispatches) or a runner's.
+  Services always run on the hub (not counted in either). healthz `max_jobs` = local slots +
+  live runners' slots, `running` counts jobs on both. With `--local-slots 0` the hub doesn't
+  unpack workspaces at all; the runner enforces `--max-workspace` (the job then fails instead
+  of a 413 at creation). With local slots the hub unpacks at creation as before (and deletes
+  its copy once a runner starts the job).
+- Protocol (all runner-initiated, bearer auth, `X-Tun-Runner: <name>` on job requests):
+  - `POST /v1/runner/poll` `{name, instance, slots, running: [ids], sandbox}` long-polls (up
+    to 25s) and is the heartbeat. `instance` is random per runner process. The answer
+    `{jobs: [assignment], cancel: [ids]}`: assignments carry the full spec (argv/script, cwd,
+    env, timeout_sec, workspace sha, outputs) and the hub's max_log/max_workspace/max_download;
+    `cancel` lists held ids the runner must kill and drop (canceled, ended or unknown on the
+    hub, or no longer its). A job assigned while a poll waits is sent at once.
+  - An assigned job stays `queued` (with `runner` set, no `queue_position`) until
+    `POST /v1/runner/jobs/{id}/started` (idempotent), sent after the workspace is fetched and
+    unpacked and right before the command starts. This is the commit point: a job canceled
+    before it ends `canceled` and the call is a 410, so the runner never starts it. If a poll
+    that arrived after the assignment doesn't list the job, the answer was lost and the job
+    goes back to the queue in creation order.
+  - `GET /v1/blobs/{sha}` fetches the workspace; the runner verifies the hash and caches it by
+    sha (unused for 24h: deleted).
+  - `POST /v1/runner/jobs/{id}/stdout?offset=N` (and `/stderr`): a chunk (at most 8MB) that
+    starts at byte N of the runner's log. Bytes the hub has are skipped, so retries and
+    overlaps are harmless; a chunk past the hub's end is a 409; both answer `{offset}` = the
+    hub's size, where the runner resumes. The runner caps logs at the hub's `--max-log` (same
+    marker); the hub stops writing a little past it as a backstop.
+  - `PUT /v1/runner/jobs/{id}/outputs`: a tar of the declared outputs, then
+    `POST /v1/runner/jobs/{id}/done` `{state, exit_code, signal, error, outputs_missing,
+    outputs_skipped, outputs_error}` (exited|failed|timeout|canceled; a kill the hub asked for
+    decides the state). Logs are all shipped before done. 410 on any job endpoint means the
+    hub no longer wants the job: the runner kills and drops it.
+- Liveness: a runner that hasn't polled for `--runner-timeout` (default 30s) is lost: its
+  running jobs fail ("runner N lost: no poll for Xs"), unstarted assignments are requeued.
+  A poll from a new instance under a known name is a restart if it comes from the same source
+  (exe.dev source VM, else the hostname the runner sends) or the old instance is overdue: the
+  old instance's jobs fail. From another source while the old one is live it is a 409 (name
+  clash). A running job that the runner's poll no longer lists fails.
+- Timeouts are enforced by the runner (same semantics as local); the hub backstops: a runner
+  job still running `timeout + kill grace + --runner-timeout` after it started ends `timeout`
+  ("enforced by the hub"), and a cancel not confirmed within `kill grace + --runner-timeout`
+  ends as requested. Cancel of a running runner job is delivered via the poll answer
+  (the waiting poll is woken).
+- Hub restart: jobs a previous hub left `running` on a runner are kept running and adopted
+  when that runner polls and lists them (logs resume at the hub's offsets); if no runner
+  claims them within `--runner-timeout` they fail as lost. Queued and hub-local jobs fail on
+  restart as before.
+- Outputs: the hub can't fetch files from a runner later, so `tun run --out` sends its paths
+  as `outputs` in the job spec, and when the job ends (any state) the runner collects them from
+  the work dir with the files endpoint's rules (os.Root, symlink and special-file rules,
+  `--max-download`, entry limit) and uploads one tar. `GET /v1/jobs/{id}/files` for a runner
+  job serves from that tar: a requested path must be one of the outputs or inside one (else
+  409, naming the declared paths and suggesting `--out PATH`); missing/skipped headers and the
+  complete trailer work as for local jobs; a size-limit failure is a 413 with the same
+  message. Retention deletes the tar with the work dir (`--keep-work`, then 410). Hub-local
+  jobs keep serving any path from the work dir.
+- `GET /v1/healthz` adds `local_slots` and `runners: [{name, slots, running, last_seen,
+  sandbox, source}]`; `tun runners` prints them as JSON lines.
+- Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
+  workspace; a runner-only credential (any token holder can act as a runner, and read any
+  blob by sha with `GET /v1/blobs/{sha}`, though every token holder is already fully trusted).
+
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
-- `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace, service, ports}` -> job object (201).
+- `GET /v1/blobs/{sha256}` — the blob's bytes (runners fetch workspaces with it).
+- `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace, service, ports, outputs}` -> job object (201).
+  `outputs`: at most 256 paths valid for the files endpoint (see Runners).
   `timeout_sec` <= 0 means the default (1800), except for services where 0 (or less) means none; over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, queue_sec, run_sec, queue_position}`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position}`.
 - `GET /v1/jobs?limit=N&state=S[,S...]&client=NAME&mine=1` -> list, newest first, filtered
   before the limit (`mine=1`: client = this request's client identity; with `client` it's a 400;
   unknown states are a 400). `POST /v1/jobs/{id}/cancel`.
@@ -242,15 +327,16 @@ database, test fixture):
   is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
+- `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
 `offset`, `tail` must be plain decimal integers, `follow` a boolean; `offset` with `tail`) are a 400.
 
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).
 - Integration tests that start a real server in-process on a random port with a temp data dir and
-  exercise the client: exit codes, stdout/stderr separation, env, cwd, timeout, cancel, concurrency
+  exercise the client (and in-process runners against a hub without local slots): exit codes, stdout/stderr separation, env, cwd, timeout, cancel, concurrency
   (N jobs run in parallel, isolated dirs), queueing beyond max-jobs, reattach logs, restart recovery.
 - Sandbox tests skip (t.Skip) when bwrap is unusable, so the suite passes on hosts without it;
   network isolation tests likewise when `bwrap --unshare-net` with the helper is unusable.
@@ -259,5 +345,5 @@ Errors: JSON `{"error": "..."}` with proper status codes; malformed query parame
 ## Non-goals for v0 (later, driven by usage)
 Service-to-service networking (with isolation, jobs can't reach each other at all),
 raw TCP/UDP egress and DNS from isolated jobs, unauthenticated/public URLs, TLS
-termination, multi-host scheduling, persistent
+termination, multi-host scheduling beyond runners (labels, affinity, services on runners), persistent
 workspaces, snapshots, incremental (per-file) upload.

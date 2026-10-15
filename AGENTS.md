@@ -17,7 +17,9 @@ Read SPEC.md first. tun is a Go (stdlib-only) remote execution service for codin
     The wrapper builds the working tree, adds the new binary to PATH, exports TUN_URL/TUN_TOKEN,
     runs the command, and cleans up the server and temporary files. Never replace the shared server.
     Use any command, e.g. `scripts/dev-tun.sh tun run -- echo hi`.
-  - CI runs the real CLI smoke suite once at the end by default; `-e E2E=0` disables it.
+  - CI runs the real CLI smoke suites once at the end by default (scripts/e2e.sh, and
+    scripts/e2e-runners.sh: a hub without local slots plus two `tun runner` processes);
+    `-e E2E=0` disables them.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
 - Fallback if tun is down or you suspect tun itself: `scripts/bb-ci.sh` (same CI on a BuildBuddy runner).
 - If tun gets in your way (missing feature, confusing error, slow), note it in your final report under
