@@ -554,5 +554,9 @@ hub-local slot and was much slower than the previous branch validation; no CPU
 or memory trace was collected to attribute that difference. Normal go test output
 was silent while packages ran; TEST_FLAGS='-json -run TestBazel' exposed live
 test progress for the diagnostic. A precautionary BuildBuddy fallback invocation
-(ca7d054a-9f74-4210-a41a-44ddc56e6783) was canceled after tun CI passed.
+(ca7d054a-9f74-4210-a41a-44ddc56e6783) completed before cancellation: its
+vet/build/race packages passed, but the first CLI smoke suite exited 1 under
+sandbox none (bwrap unavailable). The cleanup also reported a Bazel invocation
+referencing a deleted temporary tun.bazelrc. This fallback smoke failure was not
+investigated further; the complete tun run passed both suites with bwrap.
 Superseded local iterations were canceled as well.
