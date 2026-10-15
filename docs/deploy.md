@@ -58,3 +58,10 @@ signals a hub mid-job, checks queued work and a new submission during draining,
 restarts on the same data directory, and asserts exact stdout and exit 7. It also
 restarts a runner mid-job with a 1s hub heartbeat timeout, verifying the runner
 keeps heartbeating and delivers both streams and the original exit status.
+
+Validation on 2026-10-15: remote tun job
+`20261015T102812686051-bf3c8046` ran the real-process regression in 9.747s.
+With three-second commands, SIGTERM-to-exit measured 2.855s for the hub and
+2.723s for the runner (the signal arrives after the first output). Both retained
+exact stdout/stderr and exit 7; queued work and a submission retry during the
+hub drain also completed.
