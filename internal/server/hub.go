@@ -43,6 +43,7 @@ type runnerState struct {
 	privateNet                      bool
 	slots                           int
 	lastSeen                        time.Time
+	retiredAt                       time.Time       // when a newer instance took the name (or it was dropped)
 	jobs                            map[string]*job // assigned to it and not ended
 	seq                             int             // polls received; only the latest may assign
 	pollSeq                         int64           // highest RunnerPoll.Seq seen from this instance
@@ -103,7 +104,7 @@ func (s *Server) takeJobs(rn *runnerState, held map[string]bool) []api.RunnerJob
 
 // runnerJobEnded is called by finish (s.mu held): the runner's slot is free again.
 func (s *Server) runnerJobEnded(j *job) {
-	if rn := s.runners[j.Runner]; rn != nil && rn.jobs[j.ID] == j {
+	if rn := j.rn; rn != nil && rn.jobs[j.ID] == j {
 		delete(rn.jobs, j.ID)
 		rn.poke()
 	}
@@ -120,6 +121,7 @@ func (s *Server) adopt(j *job) {
 		s.runners[j.Runner] = rn
 	}
 	rn.jobs[j.ID] = j
+	j.rn = rn
 }
 
 func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
@@ -143,17 +145,26 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	arrival := time.Now()
 	s.mu.Lock()
-	rn, err := s.register(name, p, clientOf(r), arrival)
-	if err != nil {
+	// A retired instance (superseded by a newer one, or dropped) only heartbeats for the
+	// jobs it still holds; nothing it says touches the current instance.
+	if old := s.retired[p.Instance]; old != nil && p.Instance != "" {
+		resp := api.RunnerPollResponse{Jobs: []api.RunnerJob{}, Cancel: []string{}, Superseded: fmt.Sprintf(
+			"runner %s: this instance was superseded by a newer one with the same name (another tun runner --name %s, or a restart); it gets no more work",
+			old.name, old.name)}
+		if old.name == name && (p.Seq == 0 || p.Seq > old.pollSeq) {
+			old.pollSeq, old.lastSeen = max(old.pollSeq, p.Seq), arrival
+			resp.Cancel = s.reconcile(old, held, arrival)
+		}
 		s.mu.Unlock()
-		writeErr(w, 409, err.Error())
+		writeJSON(w, 200, resp)
 		return
 	}
-	if p.Seq > 0 && p.Seq <= rn.pollSeq {
+	if rn := s.runners[name]; rn != nil && rn.instance == p.Instance && p.Seq > 0 && p.Seq <= rn.pollSeq {
 		s.mu.Unlock()
 		writeJSON(w, 200, api.RunnerPollResponse{Jobs: []api.RunnerJob{}, Cancel: []string{}})
-		return // stale: a newer poll has been handled
+		return // stale: a newer poll of this instance has been handled
 	}
+	rn := s.register(name, p, clientOf(r), arrival)
 	rn.pollSeq = max(rn.pollSeq, p.Seq)
 	rn.seq++
 	seq := rn.seq
@@ -193,18 +204,21 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
-// register records a poll from runner name. A different instance under a known name is the
-// same runner restarted if it comes from the same source (or the old one is dead); its old
-// jobs are then lost. Otherwise two live runners share a name, which is refused. Caller
-// holds s.mu.
-func (s *Server) register(name string, p api.RunnerPoll, source string, now time.Time) (*runnerState, error) {
+// register records a poll from runner name. A new instance under a known name takes it
+// over (newest wins): if the old instance is gone (overdue, or the new one says it replaces
+// it) its jobs fail now; if it may still be alive it is retired: it gets no more work but
+// can finish (and report) the jobs it holds. Caller holds s.mu.
+func (s *Server) register(name string, p api.RunnerPoll, source string, now time.Time) *runnerState {
+	if prev := s.retired[p.Previous]; prev != nil && p.Previous != "" && prev.name == name && len(prev.jobs) > 0 {
+		s.dropRunner(prev, fmt.Sprintf("runner %s restarted while the job was running", name))
+	}
 	rn := s.runners[name]
 	if rn != nil && rn.instance != "" && rn.instance != p.Instance {
-		if rn.source != source && now.Sub(rn.lastSeen) < s.cfg.RunnerDeadAfter {
-			return nil, fmt.Errorf("runner name %q is in use by a live runner at %s (last poll %.0fs ago); give each runner its own --name",
-				name, rn.source, now.Sub(rn.lastSeen).Seconds())
+		if p.Previous == rn.instance || now.Sub(rn.lastSeen) > s.cfg.RunnerDeadAfter {
+			s.dropRunner(rn, fmt.Sprintf("runner %s restarted while the job was running", name))
+		} else {
+			s.retire(rn, now)
 		}
-		s.dropRunner(rn, fmt.Sprintf("runner %s restarted while the job was running", name))
 		rn = nil
 	}
 	if rn == nil {
@@ -213,22 +227,53 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
 	rn.privateNet = p.NetworkIsolation
-	return rn, nil
+	return rn
 }
 
-// dropRunner forgets a runner: its running jobs fail with msg, unstarted ones are requeued.
-// Caller holds s.mu.
-func (s *Server) dropRunner(rn *runnerState, msg string) {
-	delete(s.runners, rn.name)
+// retire moves rn out of the way of a newer instance: its unstarted jobs are requeued, its
+// running ones stay with it, and its later polls are told it was superseded. Caller holds
+// s.mu.
+func (s *Server) retire(rn *runnerState, now time.Time) {
+	if s.runners[rn.name] == rn {
+		delete(s.runners, rn.name)
+	}
+	if rn.instance != "" {
+		s.retired[rn.instance] = rn
+	}
+	rn.retiredAt = now
 	for _, j := range rn.jobs {
 		if j.State == api.Queued {
 			s.requeue(j)
+		}
+	}
+	rn.poke()
+}
+
+// dropRunner gives up on a runner instance: it is retired, and its running jobs end (failed
+// with msg, or with the result it already reported via .../exited). Caller holds s.mu.
+func (s *Server) dropRunner(rn *runnerState, msg string) {
+	s.retire(rn, time.Now())
+	for _, j := range rn.jobs {
+		if d := j.exited; d != nil {
+			s.finishRunnerJob(j, *d, msg+" before it finished shipping the job's logs and outputs")
 		} else {
 			s.finish(j, api.Failed, nil, nil, msg)
 		}
 	}
 	rn.jobs = map[string]*job{}
-	rn.poke()
+}
+
+// finishRunnerJob ends j as the runner reported (a kill the hub requested decides the state),
+// with note appended to the message. Caller holds s.mu.
+func (s *Server) finishRunnerJob(j *job, d api.RunnerDone, note string) {
+	state, msg := d.State, d.Error
+	if j.killReq != "" && state != j.killReq {
+		state, msg = j.killReq, j.killReq
+	}
+	if note != "" {
+		msg = strings.TrimPrefix(msg+"; "+note, "; ")
+	}
+	s.finish(j, state, d.ExitCode, d.Signal, msg)
 }
 
 // reconcile compares what runner rn holds (held, as of a poll that arrived at arrival) with
@@ -249,7 +294,7 @@ func (s *Server) reconcile(rn *runnerState, held map[string]bool, arrival time.T
 	cancel := []string{}
 	for id := range held {
 		j := s.jobs[id]
-		if j == nil || api.Terminal(j.State) || j.Runner != rn.name || j.killReq != "" {
+		if j == nil || api.Terminal(j.State) || j.rn != rn || j.killReq != "" {
 			cancel = append(cancel, id)
 		}
 	}
@@ -260,10 +305,10 @@ func (s *Server) reconcile(rn *runnerState, held map[string]bool, arrival time.T
 // requeue puts an assigned but unstarted job back in the queue, in creation order. Caller
 // holds s.mu.
 func (s *Server) requeue(j *job) {
-	if rn := s.runners[j.Runner]; rn != nil {
-		delete(rn.jobs, j.ID)
+	if j.rn != nil {
+		delete(j.rn.jobs, j.ID)
 	}
-	j.Runner, j.assignedAt = "", time.Time{}
+	j.Runner, j.rn, j.assignedAt = "", nil, time.Time{}
 	i := sort.Search(len(s.queue), func(i int) bool { return s.queue[i].ID > j.ID })
 	s.queue = slices.Insert(s.queue, i, j)
 	s.schedule()
@@ -281,7 +326,7 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 	for free := rn.slots - busy; free > 0 && len(s.queue) > 0 && !s.closed; free-- {
 		j := s.queue[0]
 		s.queue = s.queue[1:]
-		j.Runner, j.assignedAt = rn.name, time.Now()
+		j.Runner, j.rn, j.assignedAt = rn.name, rn, time.Now()
 		rn.jobs[j.ID] = j
 		out = append(out, j)
 	}
@@ -305,18 +350,19 @@ func (s *Server) maxDownload() int64 {
 }
 
 // runnerJob looks up the job of a /v1/runner/jobs/{id}/... request and checks it is
-// assigned to the requesting runner (and, with running, started). It writes 410 Gone
-// otherwise: the runner should kill and drop the job.
+// assigned to the requesting runner instance (and, with running, started). It writes 410
+// Gone otherwise: the runner should kill and drop the job. Caller holds s.mu, and keeps
+// holding it across whatever state change the check is for.
 func (s *Server) runnerJob(w http.ResponseWriter, r *http.Request, running bool) *job {
-	name := r.Header.Get(api.HeaderRunner)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	name, inst := r.Header.Get(api.HeaderRunner), r.Header.Get(api.HeaderRunnerInstance)
 	j := s.jobs[r.PathValue("id")]
 	switch {
 	case j == nil:
 		writeErr(w, 410, fmt.Sprintf("no such job %q", r.PathValue("id")))
-	case j.Runner != name:
+	case j.Runner != name || j.rn == nil:
 		writeErr(w, 410, fmt.Sprintf("job %s is not assigned to runner %q", j.ID, name))
+	case inst != "" && j.rn.instance != "" && j.rn.instance != inst:
+		writeErr(w, 410, fmt.Sprintf("job %s belongs to another instance of runner %q", j.ID, name))
 	case api.Terminal(j.State):
 		writeErr(w, 410, fmt.Sprintf("job %s has already ended (%s)", j.ID, j.State))
 	case running && j.State != api.Running:
@@ -327,26 +373,36 @@ func (s *Server) runnerJob(w http.ResponseWriter, r *http.Request, running bool)
 	return nil
 }
 
+// lockedRunnerJob is runnerJob for handlers that then work without the lock (log chunks and
+// outputs: if the job ends meanwhile, the bytes are just not looked at).
+func (s *Server) lockedRunnerJob(w http.ResponseWriter, r *http.Request, running bool) *job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runnerJob(w, r, running)
+}
+
 // runnerStarted serves POST /v1/runner/jobs/{id}/started: the runner is about to start the
-// command. Idempotent; 410 if the job was canceled or reassigned meanwhile.
+// command. Idempotent; 410 if the job was canceled or reassigned meanwhile. The check and
+// the transition happen under one lock, so a cancel lands either before (410: never started)
+// or after (the job is running and the cancel is delivered as a kill).
 func (s *Server) runnerStarted(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	j := s.runnerJob(w, r, false)
 	if j == nil {
 		return
 	}
-	s.mu.Lock()
 	if j.State == api.Queued {
 		now := time.Now().UTC()
 		j.State, j.StartedAt = api.Running, &now
-		if rn := s.runners[j.Runner]; rn != nil && rn.sandbox != "" {
-			j.Sandbox = rn.sandbox
+		if j.rn.sandbox != "" {
+			j.Sandbox = j.rn.sandbox
 		}
 		s.persist(j)
 		// The hub's unpacked copy of the workspace (if any) is no longer needed.
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); workspace.RemoveAll(filepath.Join(s.sandboxDir(j.ID), "work")) }()
 	}
-	s.mu.Unlock()
 	writeJSON(w, 200, struct{}{})
 }
 
@@ -367,7 +423,7 @@ func (s *Server) runnerLog(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "offset must be a non-negative integer")
 		return
 	}
-	j := s.runnerJob(w, r, true)
+	j := s.lockedRunnerJob(w, r, true)
 	if j == nil {
 		return
 	}
@@ -422,7 +478,7 @@ func (s *Server) runnerLog(w http.ResponseWriter, r *http.Request) {
 // runnerOutputs serves PUT /v1/runner/jobs/{id}/outputs: a tar of the job's declared outputs,
 // built by the runner with the same rules as the files endpoint.
 func (s *Server) runnerOutputs(w http.ResponseWriter, r *http.Request) {
-	j := s.runnerJob(w, r, true)
+	j := s.lockedRunnerJob(w, r, true)
 	if j == nil {
 		return
 	}
@@ -451,30 +507,73 @@ func (s *Server) runnerOutputs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runnerDone serves POST /v1/runner/jobs/{id}/done: the job's end state. A kill the hub
-// requested decides the state. Repeating it is harmless.
-func (s *Server) runnerDone(w http.ResponseWriter, r *http.Request) {
+func decodeDone(w http.ResponseWriter, r *http.Request) (api.RunnerDone, bool) {
 	var d api.RunnerDone
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&d); err != nil {
 		writeErr(w, 400, "bad done JSON: "+err.Error())
-		return
+		return d, false
 	}
 	if !slices.Contains([]string{api.Exited, api.Failed, api.Timeout, api.Canceled}, d.State) {
 		writeErr(w, 400, fmt.Sprintf("state %q must be exited, failed, timeout or canceled", d.State))
+		return d, false
+	}
+	return d, true
+}
+
+// runnerExited serves POST /v1/runner/jobs/{id}/exited: the command has ended with this
+// result; the runner now ships the rest of the logs and the outputs, then sends done. From
+// here the hub's timeout backstop no longer applies, and if the runner is lost before done
+// the job ends with this result.
+func (s *Server) runnerExited(w http.ResponseWriter, r *http.Request) {
+	d, ok := decodeDone(w, r)
+	if !ok {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j := s.runnerJob(w, r, true)
+	if j == nil {
+		return
+	}
+	if j.exited == nil {
+		j.exited, j.exitedAt = &d, time.Now()
+	}
+	writeJSON(w, 200, struct{}{})
+}
+
+// runnerDone serves POST /v1/runner/jobs/{id}/done: the job's end state. A kill the hub
+// requested decides the state. Repeating it is harmless (410 once ended).
+func (s *Server) runnerDone(w http.ResponseWriter, r *http.Request) {
+	d, ok := decodeDone(w, r)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	j := s.runnerJob(w, r, false)
 	if j == nil {
 		return
 	}
-	s.mu.Lock()
-	state, msg := d.State, d.Error
-	if j.killReq != "" && state != j.killReq {
-		state, msg = j.killReq, j.killReq
-	}
 	j.OutMissing, j.OutSkipped, j.OutError = d.OutputsMissing, d.OutputsSkipped, d.OutputsError
-	s.finish(j, state, d.ExitCode, d.Signal, msg)
-	s.mu.Unlock()
+	s.finishRunnerJob(j, d, "")
+	writeJSON(w, 200, struct{}{})
+}
+
+// runnerLeave serves POST /v1/runner/leave: a runner shutting down. Its slots go away at
+// once; jobs it still has (it reports them before leaving) end as failed.
+func (s *Server) runnerLeave(w http.ResponseWriter, r *http.Request) {
+	var l api.RunnerLeave
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&l); err != nil || l.Instance == "" {
+		writeErr(w, 400, "bad leave JSON: want {name, instance}")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rn := range []*runnerState{s.runners[l.Name], s.retired[l.Instance]} {
+		if rn != nil && rn.instance == l.Instance && rn.name == l.Name {
+			s.dropRunner(rn, fmt.Sprintf("runner %s left while the job was running", rn.name))
+		}
+	}
 	writeJSON(w, 200, struct{}{})
 }
 
@@ -518,25 +617,43 @@ func (s *Server) startReaper() {
 	}()
 }
 
-// reap drops runners that stopped polling and ends runner jobs the runner should have ended
-// by now (a timeout or kill it never confirmed).
+// reap drops runner instances that stopped polling, ends runner jobs the runner should have
+// ended long ago (a timeout or kill it never confirmed), requeues assignments that were never
+// started, and forgets retired instances an hour after their last job.
 func (s *Server) reap(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	slack := s.cfg.KillGrace + s.cfg.RunnerDeadAfter
 	for _, rn := range s.runners {
-		if gone := now.Sub(rn.lastSeen); gone > s.cfg.RunnerDeadAfter {
-			s.dropRunner(rn, fmt.Sprintf("runner %s lost: no poll for %.0fs (tun serve --runner-timeout)", rn.name, gone.Seconds()))
-			continue
+		s.reapRunner(rn, now)
+	}
+	for id, rn := range s.retired {
+		if len(rn.jobs) > 0 {
+			s.reapRunner(rn, now)
+		} else if now.Sub(rn.lastSeen) > time.Hour && now.Sub(rn.retiredAt) > time.Hour {
+			delete(s.retired, id)
 		}
-		for _, j := range rn.jobs {
-			switch {
-			case j.State != api.Running:
-			case j.killReq != "" && now.Sub(j.killReqAt) > slack:
-				s.finish(j, j.killReq, nil, nil, fmt.Sprintf("%s; runner %s did not confirm the kill", j.killReq, rn.name))
-			case j.TimeoutSec > 0 && j.StartedAt != nil && now.Sub(*j.StartedAt) > time.Duration(j.TimeoutSec)*time.Second+slack:
-				s.finish(j, api.Timeout, nil, nil, fmt.Sprintf("timed out after %ds (enforced by the hub: runner %s did not report the end)", j.TimeoutSec, rn.name))
+	}
+}
+
+func (s *Server) reapRunner(rn *runnerState, now time.Time) {
+	if gone := now.Sub(rn.lastSeen); gone > s.cfg.RunnerDeadAfter {
+		s.dropRunner(rn, fmt.Sprintf("runner %s lost: no poll for %.0fs (tun serve --runner-timeout)", rn.name, gone.Seconds()))
+		return
+	}
+	// The backstop only covers the time the command may still be running: until the runner
+	// reports it exited. Shipping logs and outputs afterwards is bounded by liveness alone.
+	grace := s.cfg.KillGrace + s.cfg.RunnerBackstop
+	for _, j := range rn.jobs {
+		switch {
+		case j.State == api.Queued:
+			if now.Sub(j.assignedAt) > s.cfg.RunnerStartTimeout {
+				s.requeue(j) // the runner hasn't managed to fetch and unpack it
 			}
+		case j.exited != nil:
+		case j.killReq != "" && now.Sub(j.killReqAt) > grace:
+			s.finish(j, j.killReq, nil, nil, fmt.Sprintf("%s; runner %s did not confirm the kill", j.killReq, rn.name))
+		case j.TimeoutSec > 0 && j.StartedAt != nil && now.Sub(*j.StartedAt) > time.Duration(j.TimeoutSec)*time.Second+grace:
+			s.finish(j, api.Timeout, nil, nil, fmt.Sprintf("timed out after %ds (enforced by the hub: runner %s did not report the end)", j.TimeoutSec, rn.name))
 		}
 	}
 }
@@ -549,6 +666,9 @@ func (s *Server) runnerInfo() (slots, running int, list []api.RunnerInfo) {
 		running += len(rn.jobs)
 		list = append(list, api.RunnerInfo{Name: rn.name, Slots: rn.slots, Running: len(rn.jobs),
 			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet})
+	}
+	for _, rn := range s.retired {
+		running += len(rn.jobs) // still finishing on a superseded instance
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].Name < list[b].Name })
 	return slots, running, list
@@ -591,8 +711,8 @@ func (s *Server) runnerFiles(w http.ResponseWriter, j *job, paths []string) {
 			if len(outputs) > 0 {
 				declared = strings.Join(outputs, " ")
 			}
-			writeErr(w, 409, fmt.Sprintf("job %s ran on runner %s, which keeps only the paths declared up front with tun run --out (declared: %s); %q is not among them: rerun with --out %s",
-				j.ID, runner, declared, p, p))
+			writeErr(w, 409, fmt.Sprintf("job %s ran on runner %s, which keeps only the paths declared up front with tun run --out (declared: %s); %q is not among them: rerun with tun run --out %s (with --detach too: tun run --detach --out %s ..., then tun get <id> %s)",
+				j.ID, runner, declared, p, p, p, p))
 			return
 		}
 	}

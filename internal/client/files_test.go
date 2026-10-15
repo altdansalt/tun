@@ -78,7 +78,7 @@ func TestRunOut(t *testing.T) {
 	if r.code != 0 || !strings.HasPrefix(r.stdout, "{") || readFile(t, filepath.Join(ws, "j")) != "j\n" {
 		t.Errorf("--json: %+v", r)
 	}
-	for _, bad := range [][]string{{"--out", "../x"}, {"--out", "/etc/passwd"}, {"--out", "a/../../x"}, {"--detach", "--out", "x"}} {
+	for _, bad := range [][]string{{"--out", "../x"}, {"--out", "/etc/passwd"}, {"--out", "a/../../x"}, {"--detach", "--out", "../x"}} {
 		r := ts.tun(ws, append(append([]string{"run"}, bad...), "--", "true")...)
 		if r.code != 125 || !strings.HasPrefix(r.stderr, "tun: run:") {
 			t.Errorf("%q: %+v", bad, r)

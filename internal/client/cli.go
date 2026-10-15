@@ -104,7 +104,9 @@ so name the outputs you want. A PATH that matched
 nothing is a "tun: warning:" on stderr and the exit status stays the command's; if the
 download itself fails (e.g. over the server's size limit), a 0 exit becomes 125.
 Later: tun get <id> PATH... (for any path if the job ran on the server itself; if it ran on
-a runner, only paths within the --out paths given here exist).
+a runner, only paths within the --out paths given here exist). With --detach, --out only
+declares the paths (nothing is downloaded): tun run --detach --out dist -- make, then
+tun get <id> dist once it has ended.
 
 --tail N streams nothing while the job runs; when it ends, tun prints the last N lines of its
 stdout (to stdout) and of its stderr (to stderr), then a "tun: job <id>: showed the last ..."
@@ -214,7 +216,7 @@ func runCmd(args []string, e Env) int {
 	tailN := fs.Int("tail", -1, "don't stream; when the job ends print only the last `N` lines of its stdout and of its\nstderr (full logs: tun logs <id> [--stderr])")
 	script := fs.String("c", "", "run this `script` with bash -c instead of argv")
 	var outs envFlag
-	fs.Var(&outs, "out", "after the job ends, copy `PATH` (file, dir or glob, relative to the workspace root)\nfrom its work dir into the local workspace (repeatable)")
+	fs.Var(&outs, "out", "after the job ends, copy `PATH` (file, dir or glob, relative to the workspace root)\nfrom its work dir into the local workspace (repeatable; with --detach: only declare it, for tun get)")
 	svc := serviceFlags(fs)
 	fs.Usage = func() { fmt.Fprint(e.Stderr, runUsage); fs.PrintDefaults(); fmt.Fprint(e.Stderr, serviceUsage) }
 	if err := fs.Parse(args); err != nil {
@@ -237,11 +239,8 @@ func runCmd(args []string, e Env) int {
 	if *tailN >= 0 && (*jsonOut || *detach) {
 		return errorf(e, "run: --tail can't be combined with --json or --detach")
 	}
-	if *detach && len(outs) > 0 {
-		return errorf(e, "run: --out does not work with --detach; fetch later with tun get <id> PATH...")
-	}
 	var outDir string
-	if len(outs) > 0 {
+	if len(outs) > 0 && !*detach { // with --detach, --out only declares the outputs
 		var err error
 		if outDir, err = localRoot(e.Cwd); err != nil {
 			return errorf(e, "run: --out: %v", err)

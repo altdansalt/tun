@@ -27,7 +27,11 @@ tun get). tun runners (or the hub's /v1/healthz) lists live runners.
 
 If the hub hears nothing from a runner for its --runner-timeout (default 30s), the runner's
 running jobs fail and unstarted ones are requeued. On SIGINT/SIGTERM the runner stops taking
-work, kills its jobs and reports them failed.
+work, kills its jobs, reports them failed and tells the hub it left.
+
+Names: the newest runner with a given --name wins. When another runner process starts with
+the same name, the hub stops giving this one work; it finishes the jobs it has and exits
+with status 1. A runner holds a lock on its --data dir, so two can't share one.
 
 The token is the hub's client token (for now; a separate runner credential is future work):
 --token-file, else $TUN_TOKEN, else ~/.config/tun/token. With --sandbox none a job can read
@@ -169,5 +173,9 @@ func RunnerMain(args []string, stderr io.Writer) int {
 		r.Shutdown(30 * time.Second)
 	}()
 	r.Run()
+	if msg := r.Superseded(); msg != "" {
+		fmt.Fprintf(stderr, "tun: runner: %s; exiting\n", msg)
+		return 1
+	}
 	return 0
 }
