@@ -88,8 +88,10 @@ func TestStreamDeadlinesAndBearer(t *testing.T) {
 	}{
 		{"bearer", "", "secret", 0, 1, "0"},
 		{"wrong bearer", "", "wrong", 0, 1, "16"},
-		{"client expires", "20m", "secret", 60 * time.Millisecond, 2, "4"},
-		{"idle expires", "", "secret", 500 * time.Millisecond, 2, "4"},
+		// The pauses are long: a handler that starts late (loaded host) finds both chunks
+		// already buffered, and its deadlines only start then.
+		{"client expires", "20m", "secret", 400 * time.Millisecond, 2, "4"},
+		{"idle expires", "", "secret", time.Second, 2, "4"},
 		{"active beyond idle", "2S", "secret", 30 * time.Millisecond, 16, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
