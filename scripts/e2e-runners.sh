@@ -113,7 +113,7 @@ if command -v python3 >/dev/null; then
  sid=$(head -n1 <<<"$service")
  surl=$(awk 'NR==2 {print $2}' <<<"$service")
  [[ "$(field "$sid" runner)" =~ ^r[12]$ ]] || fail "service ran on hub"
- [ "$(curl -fsS -H "X-Tun-Token: $TUN_TOKEN" "$surl/input")" = data ] || fail "runner service proxy"
+ [ "$(curl -fsS -H "X-Tun-Token: $TUN_TOKEN" "${surl}input")" = data ] || fail "runner service proxy"
  tun cancel "$sid" >/dev/null
  wait_for "$sid" canceled
  echo 'e2e-runners: service placement, readiness and proxy checked'
