@@ -431,7 +431,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   --experimental_build_event_upload_strategy=local` (BEP keeps local file URIs) and, if the
   server denies action writes, `common --noremote_upload_local_results`, and when the
   server executes actions (see Remote execution) `common --remote_executor=grpc://tun` (the
-  same socket), `common --jobs=<2 x executor slots>`, `common --remote_local_fallback`; it is the "user" rc,
+  same socket), `common --jobs=<executor slots>`, `common --remote_local_fallback`; it is the "user" rc,
   so the workspace's own `.bazelrc` still applies, and an agent's flags (e.g.
   `--remote_cache=`) override it. The first command of a sandbox says "started a new session
   sandbox ...; remote cache: tun's, through /tun/sock/cache.sock[; remote execution on N

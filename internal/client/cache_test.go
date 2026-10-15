@@ -86,7 +86,7 @@ func TestBazelSessionRemoteCache(t *testing.T) {
 	r := ts.tun(ws, "bazel", "sh", `cat /tun/tun.bazelrc; test -S /tun/sock/cache.sock && echo sock-ok; touch /tun/sock/x || echo sock-ro`)
 	if r.code != 0 || !strings.Contains(r.stdout, "common --remote_cache=grpc://tun\ncommon --remote_proxy=unix:/tun/sock/cache.sock\n") ||
 		!strings.Contains(r.stdout, "sock-ok") || !strings.Contains(r.stdout, "sock-ro") ||
-		!strings.Contains(r.stdout, "common --remote_executor=grpc://tun\ncommon --jobs=8\ncommon --remote_local_fallback\n") ||
+		!strings.Contains(r.stdout, "common --remote_executor=grpc://tun\ncommon --jobs=4\ncommon --remote_local_fallback\n") ||
 		!strings.Contains(r.stderr, "remote cache: tun's, through /tun/sock/cache.sock; remote execution on 4 slots") {
 		t.Fatalf("session: %+v", r)
 	}

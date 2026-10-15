@@ -38,7 +38,7 @@ session's first line says "remote cache: tun's, ..." when it is on. To build wit
 one command, pass --remote_cache= (empty) like any Bazel flag.
 
 Remote execution: when the server executes actions (it does whenever it has the remote
-cache), the rc file also sets --remote_executor (the same socket), --jobs (twice the
+cache), the rc file also sets --remote_executor (the same socket), --jobs (the
 server's executor slots: its own job slots plus its runners') and --remote_local_fallback.
 Actions then run in the server's job slots and on its runners, in the same FIFO as tun run
 jobs, and their results are shared by every client; the session's Bazel server only

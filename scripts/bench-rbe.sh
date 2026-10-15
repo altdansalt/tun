@@ -4,9 +4,9 @@
 # with one slot each (like the shared deployment's runners):
 #   tun run --timeout 60m -e DEV_TUN_SERVE_ARGS='--local-slots 1' -c 'scripts/dev-tun.sh ./scripts/bench-rbe.sh genrules|tree [targets...]'
 # genrules: N (default 200) independent genrules that sleep 1s, in a scratch workspace:
-#   (g1) new session; (g2) again with new action keys (warm session, pure remote execution,
-#   --jobs from tun: twice the slots); (g3) remote with --jobs = slots; (g4) local with --jobs =
-#   slots; (g5) local with Bazel's default --jobs.
+#   (g1) new session; (g2) again with new action keys (warm session, pure remote execution)
+#   with twice as many jobs as slots; (g3) the same with --jobs = slots (tun's); (g4) local with
+#   --jobs = slots; (g5) local with Bazel's default --jobs.
 # tree: tun bazel test on this tree (default: the targets that pass in a session):
 #   (a) new session, empty caches; (b) --cold, warm remote cache; (c) no-op; (d) one-line
 #   change; (e) --cold, every action again (--noremote_accept_cached), remote; (f) the same,
@@ -73,7 +73,7 @@ genrules)
   cd "$ws"
   # A new --action_env value gives every action a new key: all of them execute again.
   step g1 build //...
-  step g2 build --action_env=BENCH=2 //...
+  step g2 build --action_env=BENCH=2 --jobs="$((2 * n))" //...
   step g3 build --action_env=BENCH=3 --jobs="$n" //...
   step g4 build --action_env=BENCH=4 --remote_executor= --jobs="$n" //...
   step g5 build --action_env=BENCH=5 --remote_executor= --jobs=auto //...
