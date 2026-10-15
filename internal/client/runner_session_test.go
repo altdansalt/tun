@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,5 +220,24 @@ func TestRunnerSessionStreamingAndSerialization(t *testing.T) {
 	end := ts.waitDone(queued.ID)
 	if end.State != api.Exited || end.Runner != ts.status(a.ID).Runner {
 		t.Fatalf("queued affinity: %+v", end)
+	}
+}
+
+func TestRunnerSessionTimeoutDuringSync(t *testing.T) {
+	ts := startServer(t, hubConfig(""))
+	original := ts.hs.Handler
+	ts.hs.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/runner/cas/") {
+			<-r.Context().Done()
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	sessionRunner(t, ts, "r")
+	ts.waitRunners(1)
+	ws := bazelWS(t, map[string]string{"input": "data"})
+	r := ts.tun(ws, "bazel", "--timeout", "1s", "build")
+	if r.code != 124 {
+		t.Fatalf("sync must be inside the command timeout: %+v", r)
 	}
 }

@@ -3,6 +3,7 @@ package server
 // Runners reuse the hub's session implementation, including workspace sync, sandbox
 // agent, cancellation and BEP parsing. Only transport and lifecycle differ here.
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,6 +46,18 @@ func (r *Runner) newSessionHost() error {
 			p.Out.Header.Del("X-Tun-Client")
 		}}
 	}
+	s.sessionSync = func(j *job, killed <-chan struct{}) error {
+		ctx, cancel := context.WithCancel(r.ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-killed:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		return r.fetchSessionBlobs(ctx, j.bz)
+	}
 	r.sessions = s
 	return nil
 }
@@ -64,9 +77,9 @@ func (r *Runner) sessionLeases(ids []string) {
 	}
 }
 
-func (r *Runner) fetchSessionBlobs(b *api.BazelJob) error {
+func (r *Runner) fetchSessionBlobs(ctx context.Context, b *api.BazelJob) error {
 	for _, sha := range r.sessions.missingBlobs(b.Manifest) {
-		resp, err := r.do(r.ctx, "GET", "/v1/runner/cas/"+sha, nil)
+		resp, err := r.do(ctx, "GET", "/v1/runner/cas/"+sha, nil)
 		if err != nil {
 			return err
 		}
@@ -105,9 +118,6 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 	spec := rj.spec
 	b := spec.Bazel
 	s := r.sessions
-	if err := r.fetchSessionBlobs(&b.Command); err != nil {
-		return failed("session sync: %v", err), done
-	}
 	if err := prepareJobDir(s.cfg.DataDir, spec.ID); err != nil {
 		return failed("%v", err), done
 	}

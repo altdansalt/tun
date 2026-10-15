@@ -80,9 +80,10 @@ type Config struct {
 type Server struct {
 	cfg            Config
 	token          string
-	cache          *reapi.Handler              // nil without Config.Cache
-	sessionDataDir string                      // runner parent data dir to hide in session sandboxes
-	sessionProxy   func(*session) http.Handler // runner-side authenticated forwarding
+	cache          *reapi.Handler                    // nil without Config.Cache
+	sessionSync    func(*job, <-chan struct{}) error // runner transport, inside the command deadline
+	sessionDataDir string                            // runner parent data dir to hide in session sandboxes
+	sessionProxy   func(*session) http.Handler       // runner-side authenticated forwarding
 
 	mu       sync.Mutex
 	createMu sync.Mutex // serializes idempotent job admission

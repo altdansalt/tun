@@ -885,6 +885,11 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	if err := s.prepareSession(sess, p, hp); err != nil {
 		return fail("preparing session %s: %v", sess.Name, err)
 	}
+	if s.sessionSync != nil {
+		if err := s.sessionSync(j, br.killed); err != nil {
+			return fail("fetching session blobs: %v", err)
+		}
+	}
 	if !sess.loaded {
 		if b, err := os.ReadFile(filepath.Join(s.sessionDir(sess.ID), "sync.json")); err == nil {
 			json.Unmarshal(b, &sess.state)
