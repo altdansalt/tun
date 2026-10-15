@@ -38,7 +38,7 @@ usage:
   tun ls [--limit N] [--state S] [--client NAME | --mine]
                                      recent jobs as JSON lines, newest first
   tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
-  tun serve [flags]                  run the server (tun serve -h)
+  tun serve [flags]                  run the server (tun serve -h; --ephemeral for testing)
   tun help                           this text; 'tun <cmd> -h' for per-command flags
 
 tun run ships the workspace (the git toplevel of the cwd, else the cwd; tracked + untracked

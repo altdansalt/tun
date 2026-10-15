@@ -6,6 +6,7 @@
 #   TEST_FLAGS='-run "TestA|TestB" -v' works). With -run, the separate vet and build steps are
 #   skipped (go test compiles everything it tests) unless CI_FULL=1, and the run fails if the
 #   pattern matched no test in any package.
+# E2E=0: skip the end-to-end smoke suite (scripts/e2e.sh) that full runs do at the end.
 set -euo pipefail
 GOVER=${GOVER:-1.27.2}
 if ! command -v go >/dev/null || ! go version | grep -q "go1.2[5-9]"; then
@@ -39,7 +40,12 @@ if [ "$run" = 0 ] || [ "${CI_FULL:-}" = 1 ]; then
   go build ./...
 fi
 if [ "$run" = 0 ] || [ "$check" = 0 ]; then
-  exec go test -race -count=1 "${flags[@]}" ./...
+  go test -race -count=1 "${flags[@]}" ./...
+  # End-to-end smoke suite of the real binary (scripts/e2e.sh) on full runs; -e E2E=0 skips it.
+  if [ "$run" = 0 ] && [ "${E2E:-1}" = 1 ]; then
+    time scripts/dev-tun.sh ./scripts/e2e.sh
+  fi
+  exit 0
 fi
 
 out=$(mktemp)

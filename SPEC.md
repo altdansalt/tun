@@ -14,6 +14,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 ## CLI
 ```
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
+          [--ephemeral] [--exit-on-eof]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
@@ -49,6 +50,16 @@ Server address: `$TUN_URL` (default `http://127.0.0.1:7070`). Auth: bearer token
 creates `$DATA/token` on first start (0600) if absent; clients read `$TUN_TOKEN`, else
 `~/.config/tun/token`, else `$DATA/token` for the default data dir (`~/.local/share/tun`), so a local
 client works with zero config.
+
+For testing, `tun serve --ephemeral` uses a random loopback port and a fresh temporary
+data directory, removed on shutdown. It rejects explicit `--addr` or `--data`. Once ready,
+stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
+diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
+`--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
+`scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server,
+exports its credentials and prepends the binary directory to PATH, runs COMMAND, and cleans up.
+For example: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
+CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable explicitly.
 
 Exit status of `tun run`: the command's exit code; 128+signal if killed by a signal; 124 on timeout;
 125 for tun's own errors (can't reach server, upload failed, bad flags) with a one-line message on

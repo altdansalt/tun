@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/altdansalt/tun/internal/api"
@@ -41,11 +42,15 @@ func TestLogsTail(t *testing.T) {
 		ts.client().Logs(context.Background(), id, "stdout", 0, false, &b)
 		return b.String() == "1\n2\n3\n"
 	})
-	done := make(chan result)
-	go func() { done <- ts.tun("", "logs", "-f", "--tail", "1", id) }()
+	// Let the job continue only once the follower has printed its tail, else it may connect
+	// after 4 and 5 were written and (correctly) show just "5".
+	fw := &firstWrite{ch: make(chan struct{})}
+	done := make(chan error)
+	go func() { done <- ts.client().LogsTail(context.Background(), id, "stdout", 1, true, fw) }()
+	<-fw.ch
 	os.WriteFile(filepath.Join(ts.data, "jobs", id, "sandbox", "work", "go"), nil, 0o644)
-	if r := <-done; r.code != 0 || r.stdout != "3\n4\n5\n" {
-		t.Errorf("logs -f --tail 1: %+v", r)
+	if err := <-done; err != nil || fw.String() != "3\n4\n5\n" {
+		t.Errorf("logs -f --tail 1: %q, %v", fw.String(), err)
 	}
 
 	for _, q := range []string{"tail=-1", "tail=x", "tail=1&offset=0"} {
@@ -132,7 +137,7 @@ test) for a in "$@"; do echo "arg:$a"; done; printf "$FAKE_OUT"; exit ${FAKE_COD
 *) echo "step:$1" ;;
 esac
 `), 0o755)
-	const script = `PATH=$PWD/bin:$PATH exec ./scripts/ci.sh`
+	const script = `E2E=0 PATH=$PWD/bin:$PATH exec ./scripts/ci.sh`
 	ci2 := func(flags, out string, extra ...string) result {
 		args := []string{"run", "-e", "TEST_FLAGS=" + flags, "-e", "FAKE_OUT=" + out}
 		return ts.tun(ws, append(append(args, extra...), "-c", script)...)
@@ -173,4 +178,16 @@ esac
 	if r := ci2(`-run "unterminated`, ran); r.code != 2 || !strings.Contains(r.stderr, "cannot parse TEST_FLAGS") {
 		t.Errorf("bad quoting: %+v", r)
 	}
+}
+
+// firstWrite is a writer that closes ch on the first write.
+type firstWrite struct {
+	strings.Builder
+	ch   chan struct{}
+	once sync.Once
+}
+
+func (w *firstWrite) Write(p []byte) (int, error) {
+	defer w.once.Do(func() { close(w.ch) })
+	return w.Builder.Write(p)
 }

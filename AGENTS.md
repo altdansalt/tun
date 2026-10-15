@@ -3,7 +3,7 @@
 Read SPEC.md first. tun is a Go (stdlib-only) remote execution service for coding agents.
 
 ## Building and testing
-- **Build and test with tun itself** (a tun server runs on this host at the default address; the
+- **Build and test with tun itself** (a shared tun server is at $TUN_URL, or the default local address; the
   `tun` binary is on PATH, built from main):
   - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race`, in a sandboxed copy of your working tree.
   - Subsets: `tun run -e TEST_FLAGS='-run TestX -v' -- ./scripts/ci.sh` (env is NOT forwarded unless `-e`).
@@ -13,9 +13,11 @@ Read SPEC.md first. tun is a Go (stdlib-only) remote execution service for codin
     `-e CI_FULL=1` to keep them) and exits 1 if the pattern matched no test in any package.
   - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
     stderr once the job ends (same exit code); `tun logs --tail N [--stderr] <id>` for more.
-  - To test your *changed* tun binary end-to-end, start it inside the job (tests do this already:
-    integration tests run an in-process server), or run `go run ./cmd/tun serve --addr 127.0.0.1:<random>
-    --data $(mktemp -d)` inside a `tun run -c` script. Never restart or replace the shared server.
+  - Test the changed binary with a private server: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
+    The wrapper builds the working tree, adds the new binary to PATH, exports TUN_URL/TUN_TOKEN,
+    runs the command, and cleans up the server and temporary files. Never replace the shared server.
+    Use any command, e.g. `scripts/dev-tun.sh tun run -- echo hi`.
+  - CI runs the real CLI smoke suite once at the end by default; `-e E2E=0` disables it.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
 - Fallback if tun is down or you suspect tun itself: `scripts/bb-ci.sh` (same CI on a BuildBuddy runner).
 - If tun gets in your way (missing feature, confusing error, slow), note it in your final report under
