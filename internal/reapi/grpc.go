@@ -17,7 +17,8 @@ import (
 
 const maxMessage = 4 << 20
 
-// Handler serves uncompressed protobuf gRPC. AllowActionWrites is the policy seam
+// Handler serves uncompressed protobuf gRPC and binary gRPC-Web.
+// AllowActionWrites is the policy seam
 // for restricting ActionCache updates to executor credentials in M3.
 //
 // The CAS is shared (content is verified). The action cache has namespaces: results a client

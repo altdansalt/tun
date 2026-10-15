@@ -475,7 +475,7 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// CacheHandler serves the REAPI cache as gRPC with token auth (nil without Config.Cache).
+// CacheHandler serves REAPI gRPC/gRPC-Web with token auth (nil without Config.Cache).
 func (s *Server) CacheHandler() http.Handler {
 	if s.cache == nil {
 		return nil
