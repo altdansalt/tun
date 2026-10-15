@@ -90,8 +90,7 @@ long-lived. `tun bazel run --service --port 8080 //svc` reuses v0's port proxy.
 - **M1 — warm sessions, one host.** `tun bazel` with sessions, manifest sync, BEP summary, shared
   repository/disk caches, optional BuildBuddy remote cache. Measure on tun and one outside repo:
   no-op, one-line change, cold session; vs `bb remote` and vs the same Bazel run locally.
-- **M2 — tun's cache, many hosts.** Hub serves the remote cache (HTTP cache protocol first: it is
-  stdlib-only), BuildBuddy flag removed, sessions placed across runners with affinity.
+- **M2 — tun's cache, many hosts.** Hub serves the remote cache (REAPI gRPC over h2c, stdlib-only), BuildBuddy flag removed, sessions placed across runners with affinity.
   Measure: cold session on a fresh runner with a warm cache.
 - **M3 — remote execution.** REAPI on the hub, runners as executors, build without the bytes.
   Measure: clean build and full `test //...` time vs number of runners (1, 2, 4); several agents
@@ -102,9 +101,11 @@ Targets to beat, set at M1 from real numbers: warm one-line-change `test` faster
 no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms.
 
 ## Open questions / risks
-- **Stdlib only vs gRPC.** Bazel speaks gRPC only for remote execution. M2's HTTP cache needs
-  nothing new; M3 needs HTTP/2 + protobuf. Plan: allow `google.golang.org/grpc`, `protobuf` and the
-  remote-apis protos for M3 (built with Bazel by then), rather than hand-rolling gRPC.
+- **Stdlib only vs gRPC — decision revised 2026-10-15.** No HTTP cache detour and no
+  third-party gRPC/protobuf dependencies. Go 1.25 `http.Server.Protocols` with
+  `SetUnencryptedHTTP2` supplies h2c; HTTP trailers supply gRPC status. `internal/reapi`
+  implements framing and the protobuf wire subset for cache services, citing the official
+  remote-apis and ByteStream protos. Execution remains M3 work.
 - **Nested sandboxing:** Bazel's linux-sandbox inside tun's bwrap needs nested user namespaces;
   verify in M0, else run Bazel with `processwrapper-sandbox` and rely on tun's boundary.
 - **Memory:** 4 GB runners, JVM servers. Tune `--host_jvm_args`, cap sessions per host, evict LRU.
@@ -159,3 +160,52 @@ job-local marker and standalone test execution so its second attempt reliably
 passes; the other test fixtures exercise linux-sandbox. The compile-error fixture
 uses a genrule invoking the host C compiler solely to provoke a real failed action
 (it is not a recommended hermetic project toolchain).
+
+## M2 cache implementation
+
+`tun serve --cache-dir=reapi` enables the REAPI cache on the existing listener and
+`DATA/cache.sock`. Relative cache dirs resolve under DATA. `--cache-max-size` defaults
+to 10GB; committed CAS, action results and interrupted uploads share an on-disk LRU
+budget. Reads touch mtimes; writes verify SHA256 before atomic publication. Instances
+share the same content and action namespace. GetTree streams all reachable directories
+(no pagination); batch RPCs are limited to 2MiB of payload. Identity compression only.
+The advertised API version is 2.0, SHA256, with no execution capability.
+
+`--cache-action-writes=false` rejects action updates with PERMISSION_DENIED and advertises
+updates disabled. Default is allow while builds execute locally. The handler's write
+policy is the future executor-only authorization seam; executor credentials and sandbox
+socket binding are not part of this change. Both TCP and Unix endpoints currently require
+`x-tun-token` metadata. Thus the future token-free sandbox socket described above remains
+integration work. Use `--remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN`;
+add `--remote_proxy=unix:PATH` to use the Unix endpoint. `--cache-socket` overrides its
+path. Startup prints a short `/proc/PID/fd/FD/name` alias usable when DATA paths exceed
+Linux's Unix socket path length limit. A stale socket is removed on restart only after
+connection refusal; a live listener is never replaced.
+
+ByteStream uploads persist partial files under the cache directory, can resume at the
+reported offset, and are evictable (NOT_FOUND means restart). Reads pin open files through
+concurrent eviction and stream 64KiB messages. Requests honor `grpc-timeout` with a two
+minute server cap. ActionResult lookups check referenced CAS data so eviction produces cache misses.
+Opaque ActionResult protobuf is retained, preserving fields unknown
+to this cache. This is a cache milestone, not the complete remote execution protocol.
+
+`scripts/bench-reapi.sh` generates 200 independent genrules, seeds the remote cache, then
+rebuilds twice with fresh output roots under TMPDIR. Run via `scripts/dev-tun.sh` with
+`DEV_TUN_SERVE_ARGS='--cache-dir=reapi'` in a tun job, or on the VM host with
+`CACHE_URL=grpcs://remote.buildbuddy.dev` and `BUILDBUDDY_API_KEY`. Wall times include
+Bazel installation extraction and cold JVM/analysis; Bazel's elapsed time is printed too.
+
+Measured 2026-10-15 with Bazel 9.3.0 (fresh output root for each invocation):
+
+| Cache / location | Seed wall | Rebuild 1 wall (Bazel elapsed) | Rebuild 2 wall (Bazel elapsed) |
+| --- | --- | --- | --- |
+| tun in-job server, job `20261015T080145924447-8ebe8f69` | 13.560s | 6.611s (4.457s) | 7.061s (4.893s) |
+| BuildBuddy from VM host | 22.924s | 26.754s (24.008s) | 27.949s (25.317s) |
+
+Every rebuild reported **200 remote cache hits**, with no local action execution.
+BuildBuddy ran directly on the VM host as requested (no tun job ID); tun ran inside
+an isolated job with its own cache server. Different hosts/network paths and concurrent
+shared-server load mean these are end-to-end observations, not a controlled cache
+implementation throughput comparison. A failed first tun benchmark
+(`20261015T080037454959-c1928e5c`) exposed the Unix socket path length issue, now fixed
+by binding through a directory FD alias. Tun's rebuild mean was 6.836s versus 27.352s.

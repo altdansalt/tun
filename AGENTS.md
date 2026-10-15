@@ -27,6 +27,10 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 - Run long commands in the foreground and let the tool call wait; don't background + poll.
 - Don't run `go test` directly on the host; `go build`/`go vet`/`gofmt` are fine.
 
+- REAPI integration tests run real Bazel when installed (skip otherwise). Keep every
+  Bazel output root under TMPDIR, never the shared XDG cache. `scripts/bench-reapi.sh`
+  measures 200 actions; BuildBuddy measurements run on the VM host because jobs lack DNS.
+
 ## Conventions
 - Keep it small and readable. Stdlib only. `gofmt` everything.
 - Tests are required for behavior you add. Prefer integration tests through the real HTTP server.

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/altdansalt/tun/internal/reapi"
 	"io"
 	"net"
 	"net/http"
@@ -82,6 +84,10 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
+	cacheDir := fs.String("cache-dir", "", "enable REAPI gRPC cache in this directory (relative to data dir); disabled if empty")
+	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
+	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
+	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
 	maxWorkspace := fs.String("max-workspace", "2GB", "max total size of a job's unpacked workspace files (bytes, or with KB/MB/GB suffix)")
@@ -99,6 +105,9 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fail := func(format string, a ...any) int {
 		fmt.Fprintf(stderr, "tun: "+format+"\n", a...)
 		return 125
+	}
+	if *cacheSocket != "" && *cacheDir == "" {
+		return fail("--cache-socket requires --cache-dir")
 	}
 	if fs.NArg() > 0 {
 		return fail("serve takes no arguments, got %q", fs.Args())
@@ -173,7 +182,77 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail("listen: %v", err)
 	}
-	hs := &http.Server{Handler: s.Handler()}
+	handler := s.Handler()
+	if *cacheDir != "" {
+		dir := *cacheDir
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(s.cfg.DataDir, dir)
+		}
+		limit, err := parseSize(*cacheMax)
+		if err != nil {
+			ln.Close()
+			return fail("--cache-max-size: %v", err)
+		}
+		store, err := reapi.Open(dir, limit)
+		if err != nil {
+			ln.Close()
+			return fail("cache: %v", err)
+		}
+		cache := &reapi.Handler{Store: store, Token: s.Token(), AllowActionWrites: *cacheWrites}
+		apiHandler := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+				cache.ServeHTTP(w, r)
+			} else {
+				apiHandler.ServeHTTP(w, r)
+			}
+		})
+		socket := *cacheSocket
+		if socket == "" {
+			socket = filepath.Join(s.cfg.DataDir, "cache.sock")
+		}
+		// Bind through a short directory descriptor path: job TMPDIRs can exceed
+		// Linux's 108-byte sockaddr_un limit even for ephemeral servers.
+		socketDir, err := os.Open(filepath.Dir(socket))
+		if err != nil {
+			ln.Close()
+			return fail("cache socket directory: %v", err)
+		}
+		defer socketDir.Close()
+		bindPath := fmt.Sprintf("/proc/%d/fd/%d/%s", os.Getpid(), socketDir.Fd(), filepath.Base(socket))
+		if info, err := os.Lstat(socket); err == nil && info.Mode()&os.ModeSocket != 0 {
+			conn, dialErr := net.DialTimeout("unix", bindPath, time.Second)
+			if dialErr == nil {
+				conn.Close()
+				ln.Close()
+				return fail("cache socket already in use: %s", socket)
+			}
+			if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+				ln.Close()
+				return fail("cache socket probe: %v", dialErr)
+			}
+			if err := os.Remove(socket); err != nil {
+				ln.Close()
+				return fail("remove stale cache socket: %v", err)
+			}
+		}
+		ul, err := net.Listen("unix", bindPath)
+		if err != nil {
+			ln.Close()
+			return fail("cache socket: %v", err)
+		}
+		if err := os.Chmod(socket, 0600); err != nil {
+			ul.Close()
+			ln.Close()
+			return fail("cache socket permissions: %v", err)
+		}
+		us := &http.Server{Handler: cache, Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
+		defer os.Remove(socket)
+		defer us.Close()
+		fmt.Fprintf(stderr, "tun: REAPI cache unix socket %s (alias %s)\n", socket, bindPath)
+		go us.Serve(ul)
+	}
+	hs := &http.Server{Handler: handler, Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
 	netDesc := "host"
 	if private {
 		netDesc = "private"
