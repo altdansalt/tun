@@ -483,3 +483,37 @@ func TestRunnerClientCacheTrimming(t *testing.T) {
 	s.trimSharedCaches()
 	f.want(false, rel)
 }
+
+func TestRunnerTunnelUsesHTTP1OverTLS(t *testing.T) {
+	h := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.ProtoMajor != 1 || req.Header.Get("Upgrade") != "tun-service" {
+			t.Errorf("upgrade transport: %s %v", req.Proto, req.Header)
+			w.WriteHeader(400)
+			return
+		}
+		c, b, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		b.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tun-service\r\n\r\n")
+		b.Flush()
+	}))
+	h.EnableHTTP2 = true
+	h.StartTLS()
+	defer h.Close()
+	r := &Runner{cfg: RunnerConfig{DataDir: t.TempDir(), Sandbox: "none", Hub: h.URL, HTTP: h.Client()}}
+	if err := r.newSessionHost(); err != nil {
+		t.Fatal(err)
+	}
+	defer r.sessions.Close()
+	defer r.serviceTransport.CloseIdleConnections()
+	resp, err := r.do(context.Background(), "GET", "/v1/runner/jobs/job/tunnels/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 101 {
+		t.Fatal(resp.StatusCode)
+	}
+}

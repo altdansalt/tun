@@ -55,6 +55,8 @@ type RunnerConfig struct {
 // (graceful: running jobs finish within a deadline) or Kill (like a crash).
 type Runner struct {
 	sessionTransport *http.Transport
+	serviceHTTP      *http.Client
+	serviceTransport *http.Transport
 	sessions         *Server
 	cfg              RunnerConfig
 	instance         string
@@ -215,6 +217,7 @@ func (r *Runner) Run() {
 	r.wg.Wait()
 	r.sessions.Close()
 	r.sessionTransport.CloseIdleConnections()
+	r.serviceTransport.CloseIdleConnections()
 	r.lock.Close()
 }
 
@@ -287,6 +290,9 @@ func (r *Runner) do(ctx context.Context, method, p string, body io.Reader) (*htt
 	if strings.Contains(p, "/tunnels/") {
 		req.Header.Set("Connection", "Upgrade")
 		req.Header.Set("Upgrade", "tun-service")
+	}
+	if strings.Contains(p, "/tunnels/") {
+		return r.serviceHTTP.Do(req)
 	}
 	return r.cfg.HTTP.Do(req)
 }

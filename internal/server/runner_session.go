@@ -36,6 +36,19 @@ func (r *Runner) newSessionHost() error {
 	tr.Protocols.SetHTTP2(true)
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	r.sessionTransport = tr
+	// HTTP upgrades require HTTP/1.1, including when the hub advertises h2 over TLS.
+	base := http.DefaultTransport.(*http.Transport)
+	if r.cfg.HTTP != nil {
+		if t, ok := r.cfg.HTTP.Transport.(*http.Transport); ok {
+			base = t
+		}
+	}
+	st := base.Clone()
+	st.Protocols = new(http.Protocols)
+	st.Protocols.SetHTTP1(true)
+	r.serviceTransport = st
+	r.serviceHTTP = &http.Client{Transport: st}
+
 	s.sessionProxy = func(sess *session) http.Handler {
 		proxy := &httputil.ReverseProxy{Transport: tr, ModifyResponse: func(resp *http.Response) error { resp.Header.Del("Location"); return nil }, Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(target)
