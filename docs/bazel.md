@@ -616,6 +616,88 @@ slots), which turns a warm edit into a cold one; and free disk went down to 0.6-
 (`--min-free` warnings) with several sessions' output bases and the remote cache on one
 25GB disk.
 
+### Splitting //internal/client:client_test (2026-10-15)
+
+client_test (107 tests in one binary) was the whole critical path of a warm edit in the
+profile above. It is now seven targets, one per area, each a go_test with only its files and
+data deps: `run_test` (run/logs/files/retention/visibility), `sandbox_test` (bwrap, netns,
+hardening), `service_test`, `runner_test` (runners, runner sessions), `bazel_test` (sessions
+with a fake bazel, remote cache), `bazel_real_test` (real nested Bazel: TestBazelReal,
+TestRunnerSessionCacheAcrossHosts) and `review_test`. Shared helpers moved verbatim into
+`lib_*_test.go`, the testonly `:testlib` go_library that every target embeds: the tests use
+the client's unexported internals, so the library has to be the same package, which means
+each target compiles it with its own files (a few seconds per target, in parallel).
+**Deviation from M0's "gazelle owns BUILD files":** gazelle would merge the tests into one
+target again, so `# gazelle:exclude *_test.go` in internal/client and the test targets are
+written by hand (bazel-ci.sh still checks that every Go file is in a BUILD file).
+
+Which test targets a change reruns (from the BUILD deps; the benchmark's per-target lines
+below confirm the first, fourth and fifth rows):
+
+| change in | test targets rerun (of 14) |
+| --- | --- |
+| one `internal/client/*_test.go` | its target only |
+| `internal/client/lib_*_test.go` | the 7 client targets |
+| `internal/client` (library) | the 7 client targets, `e2e_test`, `e2e_runners_test` (9) |
+| `internal/server` | those and `server_test` (10) |
+| `internal/workspace`, `internal/api` | those and `workspace_test` (11) |
+| `internal/reapi`, `internal/bep`, `internal/sandbox` | their own test and everything above `server` (11) |
+
+So for a library edit the split does not reduce the work: every client target starts an
+in-process server. What it buys is (a) a test-file edit reruns one area and (b) the client
+tests can run in parallel, which matters once remote execution spreads them over runners.
+
+**Measurements** (`scripts/bench-selfhost.sh 1` with `BENCH_TESTS=1`, both trees at the same
+commit except internal/client/BUILD.bazel, run concurrently from this VM against the shared
+server; sessions `bench-split` on tun-r2 and `bench-pre` (one client_test) on tun-r3, each a
+dedicated 2-CPU runner with one slot; healthz load 1-3). The edits are bench-selfhost.sh's:
+a log string in internal/server/gc.go, an error string in internal/workspace/sync.go, and a
+failure message in internal/client/runner_test.go.
+
+| step | split: wall (job) | one client_test: wall (job) |
+| --- | --- | --- |
+| cold (new session, empty per-runner caches) | 1760.9s (20261015T162423555424-bdbe2dbf) | 1708.5s (20261015T162425256649-763ee92b) |
+| edit internal/server | 691.6s (20261015T165732269529-64ca7880) | 711.1s (20261015T165745270547-f79b11cf) |
+| edit internal/workspace | 481.4s (20261015T170903765301-1115415c) | 464.2s (20261015T170936650670-bd1da8b1) |
+| edit internal/client/runner_test.go | 51.2s (20261015T171705279806-93e0c8fc) | 135.2s (20261015T171721001981-793f1f97) |
+
+Per target in the server edit: the single client_test took 529.8s; split, the same tests
+took 536s in total, the longest being bazel_real_test 315.5s, then sandbox_test 103.4s,
+bazel_test 52.9s, runner_test 29.3s, run_test 18.8s, service_test 14.4s, review_test 1.8s.
+`//scripts:e2e_test` (621-625s) was the critical path in both, so on one 2-CPU host the wall
+time doesn't change. The test-file edit reran only runner_test (16.4s) plus bazel_test, which
+failed in every split run here (49.6s, rerun because failed tests aren't cached): the
+memory-based session capacity that main's placement added left a fake-bazel test waiting
+for its first session on a loaded host (fixed since: `Config.SessionMemory = -1` for
+fake-bazel servers). Without it, that edit is ~20s against 135s.
+
+**What changed since the morning's profile:** e2e_test went from 48.7s to 390-860s and the
+client tests from 78s to ~530s. Main's newer tests start cold real Bazel servers nested in
+the test: e2e-drain.py's two session cases (a hub-hosted and a runner-hosted session, each
+cold, plus a cache-hit rerun after the restart), TestRunnerSessionCacheAcrossHosts (three
+cold Bazel servers) and TestBazelReal; plus cold-GOCACHE `go build`s (TestBwrapGoBuild,
+e2e.sh's HTTP fixture) that take 1-4 min on a loaded host. Several tests hit 5-minute
+(medium) timeouts on the shared hosts, so e2e_test, e2e_runners_test, sandbox_test and
+bazel_real_test are `size = "large"` now, ci.sh's `go test -timeout` is 20m, and
+e2e-drain.py gives its nested session command 300s. **The next lever is not more
+splitting:** the cold nested Bazel servers dominate. Test drain, placement and eviction
+mechanics against a fake bazel (as bazel_test does), keep one real-Bazel smoke target, and
+let remote execution run that one in parallel with the rest; then a warm edit is bounded by
+max(e2e_test without nested Bazel, bazel_real_test) rather than their sum over two CPUs.
+
+### Session friction fixes (2026-10-15)
+
+From using sessions on the shared hub: `tun sessions stop [NAME]` (POST /v1/sessions/stop)
+frees one's own idle sessions, so an agent that is done gives the host's few session slots
+back instead of holding one for 30 minutes. And a cold start now says why: the hub remembers
+why each session ended (evicted: for which client's session and job, on which host; idle
+expiry; low disk; stopped; its runner restarted, was lost or has no slots), the start line
+says it ("cold: its session ended 4m0s ago: evicted (least recently used of 2 sessions on
+tun-r3) for client C's session S (job J)"), and when the client couldn't know, so does the
+summary line (`; cold start: ...`), as does the line of a command whose new session evicted
+another (`; evicted client C's session S (idle for 3m0s) to make room`). Runner sessions get
+the hub's note with their assignment (`start_note`, `evicted`). See SPEC.md, Bazel sessions.
+
 ## External customer exercise (2026-10-15)
 
 [External Bazel report](external-bazel.md) measures deployed shared tun against
