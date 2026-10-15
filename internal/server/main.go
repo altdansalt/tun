@@ -32,6 +32,14 @@ other jobs, its own logs/state) and the server user's home. none runs jobs as pl
 subprocesses of this server user: NO ISOLATION - a job can read the token and every other
 job's files. Use none only if every job is as trusted as whoever runs tun serve.
 
+Network (--net): private (used by auto with bwrap when it works) gives each job its own
+network namespace with only loopback: jobs can't reach each other, services, or the host's
+ports. Outbound access goes through an HTTP proxy run by this server (HTTP_PROXY/HTTPS_PROXY
+are set in the job, which most tools honor: go, git, curl, pip, npm), so HTTP(S) works but raw
+TCP/UDP and DNS lookups from the job don't. Services are reached only through the server's
+authenticated proxy. host: jobs share this host's network (any job can connect to any
+service's port without the token). healthz reports "network_isolation".
+
 Retention: a sweep at startup and periodically deletes finished jobs' sandbox dir (work,
 home, tmp) after --keep-work (the job then shows "work_deleted": true; status and logs still
 work), whole job records (job.json + logs) after --keep-jobs, and workspace blobs not used by
@@ -64,6 +72,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
+	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
@@ -140,7 +149,31 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *mode == sandbox.None {
 		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, MaxServices: *maxServices, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit,
+	private := false
+	switch *netMode {
+	case "auto", "private":
+		if *mode != sandbox.Bwrap {
+			if *netMode == "private" {
+				return fail("--net private needs --sandbox bwrap")
+			}
+			break
+		}
+		err := sandbox.NetUsable()
+		if err != nil && *netMode == "private" {
+			return fail("--net private: cannot give jobs a private network namespace: %v (try --net host)", err)
+		}
+		private = err == nil
+		if err != nil {
+			fmt.Fprintf(stderr, "tun: warning: no network isolation (bwrap --unshare-net with the tun helper failed: %v): jobs share the host network, so any job can reach services' ports without the token (healthz: \"network_isolation\": false)\n", err)
+		}
+	case "host":
+		if *mode == sandbox.Bwrap {
+			fmt.Fprintln(stderr, "tun: warning: --net host: jobs share the host network, so any job can reach services' ports without the token")
+		}
+	default:
+		return fail("--net must be auto, private or host, got %q", *netMode)
+	}
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
@@ -151,7 +184,11 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail("listen: %v", err)
 	}
 	hs := &http.Server{Handler: s.Handler()}
-	fmt.Fprintf(stderr, "tun: serving on http://%s (data %s, sandbox %s, max-jobs %d)\n", ln.Addr(), s.cfg.DataDir, *mode, *maxJobs)
+	netDesc := "host"
+	if private {
+		netDesc = "private"
+	}
+	fmt.Fprintf(stderr, "tun: serving on http://%s (data %s, sandbox %s, net %s, max-jobs %d)\n", ln.Addr(), s.cfg.DataDir, *mode, netDesc, *maxJobs)
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)

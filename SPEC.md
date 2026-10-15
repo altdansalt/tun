@@ -14,6 +14,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 ## CLI
 ```
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
+          [--net auto|private|host]
           [--ephemeral] [--exit-on-eof]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
 tun run [flags] -- <argv...>        run argv (no shell)
@@ -111,12 +112,39 @@ Queueing is visible: if the created job is waiting in the FIFO (`queue_position`
   Also `TUN_JOB_ID`.
 - Sandbox `bwrap` (default when `bwrap` works, `auto`): root filesystem read-only, the job's
   `sandbox/` dir and shared cache dirs read-write, the job's home/tmp mounted at the same paths as in
-  env, `/dev` `/proc` fresh, new pid namespace, `--die-with-parent`; network allowed (builds fetch
-  modules). Jobs cannot see or write each other's directories, their own job.json/logs, or the
+  env, `/dev` `/proc` fresh, new pid namespace, `--die-with-parent`; network: see Network isolation
+  below. Jobs cannot see or write each other's directories, their own job.json/logs, or the
   server's data dir/token. The job env is set inside the sandbox (`--clearenv`/`--setenv`, passed
   via `--args <fd>`): bwrap itself runs with an empty env, so `-e LD_PRELOAD=...` can't affect the
   unsandboxed bwrap process, and env values don't appear in host `ps`. Shared caches are writable by
   every job, so a job can poison them for later jobs.
+- Network isolation (`--net`, default `auto`): `private` gives each bwrap job its own network
+  namespace (`bwrap --unshare-net`: only loopback). `auto` uses it when a self-test at startup
+  (a real sandboxed helper, see below) works; otherwise it falls back to `host` with a
+  `tun: warning:` line naming the error. `private` fails startup if unusable; `host` (and
+  sandbox `none`) leave jobs on the host network. The startup line says `net private|host` and
+  healthz has `network_isolation`. No runtime dependency beyond bwrap (no slirp4netns/pasta):
+  - bwrap's command is a helper: the server's own executable (bound read-only into the
+    sandbox from an fd opened at startup, so a replaced binary on disk doesn't matter),
+    re-executed as `tun __tun-netns-helper <argv...>`. It reads the job env from a pipe (so
+    `LD_PRELOAD` etc. don't act on it), listens on `127.0.0.1:<random>` in the namespace, sets
+    `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy` to it and `NO_PROXY`/`no_proxy` to
+    `localhost,127.0.0.1,::1` unless the job env has them, runs argv as its child (same
+    process group, stdio, cwd), and exits with the child's status (dying of the same signal).
+  - Over a socketpair it answers the server with file descriptors (SCM_RIGHTS): the egress
+    listener, and TCP connections it dials to `127.0.0.1:<port>` inside the namespace. The
+    server never enters the namespace (it can't, unprivileged and multithreaded).
+  - Egress: the server accepts on that listener and serves an HTTP proxy: `CONNECT host:port`
+    tunnels and absolute-URI requests, dialed from the host network (through the server's own
+    `HTTPS_PROXY` if its environment has one, so a tun server inside a tun job works). So
+    HTTP(S) works for tools that honor the proxy variables (go, git, curl, pip, npm); raw
+    TCP/UDP and DNS lookups from the job don't leave it. The proxy itself doesn't restrict
+    destinations (as before, a job can reach anything the server host can, including the
+    host's loopback services, but not other jobs: they aren't on the host network).
+  - Cost (2-CPU exe.dev VM, `scripts/bench-net.sh`): job startup +4-5ms (`true`: run_sec
+    median 2ms host vs 7ms private; client wall time 6ms vs 10ms); a Go build that downloads
+    github.com/google/uuid and golang.org/x/text into an empty module cache: 0.95-0.97s either
+    way (the proxy hop is noise next to the download).
 - `none`: plain subprocess in its own process group (for hosts without bwrap); still per-job dirs,
   but **no isolation at all**: the job runs as the server user with the server's filesystem access,
   so it can read `$DATA/token`, other jobs' workspaces and logs, and rewrite job state. Use it only
@@ -149,9 +177,10 @@ database, test fixture):
 - Each requested port N is a name: the server allocates a free host port H (kernel-chosen, not
   held by another live service) and sets `TUN_PORT_<N>=H` in the job env, plus `PORT=H` when
   exactly one port was requested (these override `-e`). The service must listen on
-  `127.0.0.1:H` (or all interfaces; the bwrap sandbox shares the host network).
-- The server probes each host port (TCP connect, every 100ms) until it accepts and marks the port
-  `ready`. The job object has `service: true` and `ports: [{port, host_port, ready, path}]`; the
+  `127.0.0.1:H` (or all interfaces). With network isolation H exists only in the service's
+  namespace (the name `host_port` is historical).
+- The server probes each port (TCP connect, every 100ms; with isolation through the helper) until
+  it accepts and marks the port `ready`. The job object has `service: true` and `ports: [{port, host_port, ready, path}]`; the
   CLI adds `url` (= `$TUN_URL` + path) in `tun run --service`, `tun status` and `tun ls`.
 - `tun run --service` waits until the job is running and every port is ready, then prints the job
   id and one `N URL` line per port to stdout (`--json`: the job object) and exits 0. If the job
@@ -162,11 +191,15 @@ database, test fixture):
 - Cancel and server shutdown kill services exactly like other jobs (whole process group; after
   a shutdown the next server marks them failed).
 - `--port` without `--service` is an error; at most 16 ports, each 1-65535, no duplicates.
-- **Known limitation: services are reachable by other jobs on the same host.** Jobs share the
-  host network namespace, so any job on the server (any client's) can connect to a service's
+- With network isolation (healthz `network_isolation: true`) the authenticated proxy is the
+  only way to a service: other jobs can't connect to its port (it is only in its namespace)
+  and a job binding the same port number gets its own port, not the service's traffic.
+- **Known limitation without network isolation** (`--net host`, sandbox `none`, or `auto` on a
+  host where `bwrap --unshare-net` fails, which `tun serve` warns about): jobs share the host
+  network namespace, so any job on the server (any client's) can connect to a service's
   `host_port` directly without the bearer token, and a job could bind a just-allocated port
   before the service does (the proxy would then reach the impostor). The bearer auth only
-  protects the proxy path. Per-job network namespaces would fix this; not done yet.
+  protects the proxy path there.
 
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
@@ -198,11 +231,11 @@ database, test fixture):
   everywhere; the token is never forwarded: `X-Tun-Token` is dropped, and `Authorization` is
   dropped only if it carries the tun token (so with `X-Tun-Token` a service gets its own
   `Authorization`). Sets `X-Forwarded-For/Host/Proto` and
-  `X-Forwarded-Prefix: /v1/jobs/{id}/ports/{N}`. (The service itself is not protected from
-  other jobs on the host; see Services.) Responses are flushed as they stream; protocol
+  `X-Forwarded-Prefix: /v1/jobs/{id}/ports/{N}`. (Without network isolation the service itself
+  is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, max_jobs, max_services, running, queued, services}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
 `offset`, `tail` must be plain decimal integers, `follow` a boolean; `offset` with `tail`) are a 400.
@@ -212,10 +245,12 @@ Errors: JSON `{"error": "..."}` with proper status codes; malformed query parame
 - Integration tests that start a real server in-process on a random port with a temp data dir and
   exercise the client: exit codes, stdout/stderr separation, env, cwd, timeout, cancel, concurrency
   (N jobs run in parallel, isolated dirs), queueing beyond max-jobs, reattach logs, restart recovery.
-- Sandbox tests skip (t.Skip) when bwrap is unusable, so the suite passes on hosts without it.
+- Sandbox tests skip (t.Skip) when bwrap is unusable, so the suite passes on hosts without it;
+  network isolation tests likewise when `bwrap --unshare-net` with the helper is unusable.
 - `scripts/ci.sh` (vet, build, test -race) must pass.
 
 ## Non-goals for v0 (later, driven by usage)
-Service-to-service networking beyond the shared host network, unauthenticated/public URLs, TLS
+Service-to-service networking (with isolation, jobs can't reach each other at all),
+raw TCP/UDP egress and DNS from isolated jobs, unauthenticated/public URLs, TLS
 termination, multi-host scheduling, persistent
 workspaces, snapshots, incremental (per-file) upload.

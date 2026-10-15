@@ -6,6 +6,7 @@ package server
 // /v1/jobs/{id}/ports/{port}/... behind the normal bearer auth.
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net"
@@ -137,7 +138,7 @@ func (s *Server) probe(j *job) {
 			if p.Ready {
 				continue
 			}
-			c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(p.HostPort), time.Second)
+			c, err := s.dialService(j, p.HostPort)
 			if err != nil {
 				pending = true
 				continue
@@ -162,6 +163,21 @@ func (s *Server) probe(j *job) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// dialService connects to a running service's port: inside its network namespace, or on the
+// host's loopback when jobs share the host network.
+func (s *Server) dialService(j *job, port int) (net.Conn, error) {
+	if !s.cfg.PrivateNet {
+		return net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second)
+	}
+	s.mu.Lock()
+	n := j.net
+	s.mu.Unlock()
+	if n == nil {
+		return nil, fmt.Errorf("job is not running")
+	}
+	return n.Dial(port)
 }
 
 // proxy serves /v1/jobs/{id}/ports/{port}/... by reverse-proxying to the service's host port.
@@ -192,7 +208,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	prefix := fmt.Sprintf("/v1/jobs/%s/ports/%s", r.PathValue("id"), r.PathValue("port"))
 	target := "127.0.0.1:" + strconv.Itoa(port.HostPort)
+	tr := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return s.dialService(j, port.HostPort)
+	}}
+	defer tr.CloseIdleConnections()
 	rp := &httputil.ReverseProxy{
+		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme, pr.Out.URL.Host, pr.Out.Host = "http", target, ""
 			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, prefix)
