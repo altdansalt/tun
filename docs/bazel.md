@@ -806,3 +806,38 @@ This creates only private hub/runner/proxy processes. Each step uses
 `tun bazel --cold test //internal/workspace:workspace_test`: seed, warm remote cache,
 then both remote and disk caches disabled. The runner reaches the private hub through
 an HTTP/1-only httputil.ReverseProxy. All Bazel output roots remain under job TMPDIR.
+
+### Real proxy and validation observations (2026-10-15)
+
+The VM's authenticated HTTP/1.1 chunked upload to the deployed
+`PUT /v1/blobs/{sha}` returned 201 for 10,485,760 bytes in 1.103s. A rejected
+session-cache request alone was insufficient evidence: its credential error arrived
+before the upload finished.
+
+For a complete gRPC-Web check, service job `20261015T150815263913-e0bb28a2` on tun-r4
+ran this branch's private REAPI handler with an HTTP/1-only listener. Requests from
+the VM went through `https://tun.int.exe.xyz/v1/jobs/ID/ports/7071/`, including the real
+exe.dev proxy and the hub→runner service tunnel. A private service header supplied
+the inner handler's token (the outer tun token was stripped by the service proxy).
+A 10MiB random ByteStream Write used chunked HTTP/1 requests with 64KiB protobuf
+messages. After sending only the first message, the client paused and made a separate
+QueryWriteStatus request: the backend reported 65,536 committed bytes **before the
+remaining upload was sent**. This verifies request-body streaming across the real
+proxy, rather than merely accepting a buffered request.
+
+Write completed in **2.001s**, Read in **2.698s** (160 response messages); both returned
+body-framed grpc-status=0, and the downloaded bytes matched the original SHA256.
+The private service was canceled immediately afterward. The shared server was never
+replaced or restarted. This exercises the real proxy against a private handler; it
+does not claim a shared-deployment rollout of the new hub/runner binaries.
+
+The real-Bazel cross-host cache/isolation test now puts runner→hub traffic behind
+an HTTP/1-only ReverseProxy. It passed with race detection in outer job
+`20261015T150519578915-7aba2f44` on tun-r4 (244.101s job, 338.793s queued):
+seed, cache hit after runner loss, and a different client's cache miss. The 10MiB
+in-process streaming upload/download and path/redirect security tests passed there too.
+The upload test gates the remaining request on the backend ingesting the first chunk.
+
+Gazelle ran in `20261015T150636471159-24c1fcb9` on tun-r3: 110.504s execution,
+377.997s queued, 64 disk cache hits; only BUILD source ordering changed.
+RBE audit above is against branch tip `20c1a73`.
