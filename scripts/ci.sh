@@ -12,6 +12,8 @@
 #   end-to-end suites are skipped unless E2E=1.
 # E2E=0: skip the end-to-end smoke suite (scripts/e2e.sh) that full runs do at the end;
 #   E2E=1: run it even with -run.
+# LOAD=N: N busy-loop processes compete for the CPUs while everything runs, to shake out
+#   timing assumptions: LOAD=3 TEST_FLAGS='-run TestX -count=20 -cpu 1,4'.
 set -euo pipefail
 GOVER=${GOVER:-1.27.2}
 if ! command -v go >/dev/null || ! go version | grep -q "go1.2[5-9]"; then
@@ -48,6 +50,18 @@ for f in "${flags[@]}"; do
   esac
 done
 
+if [[ ! "${LOAD:-0}" =~ ^[0-9]+$ ]]; then
+  echo "ci.sh: LOAD=$LOAD is not a number" >&2
+  exit 2
+fi
+hogs=()
+stop_hogs() { [ "${#hogs[@]}" = 0 ] || kill "${hogs[@]}" 2>/dev/null || true; }
+trap stop_hogs EXIT
+for _ in $(seq "${LOAD:-0}"); do
+  (exec -a tun-ci-load bash -c 'while :; do :; done') &
+  hogs+=($!)
+done
+[ "${LOAD:-0}" = 0 ] || echo "ci.sh: LOAD=$LOAD: $LOAD busy loops running alongside"
 go version
 if [ "$run" = 0 ] || [ "${CI_FULL:-}" = 1 ]; then
   go vet "${pkgs[@]}"
@@ -68,7 +82,7 @@ if [ "$run" = 0 ] || [ "$check" = 0 ]; then
 fi
 
 out=$(mktemp)
-trap 'rm -f "$out"' EXIT
+trap 'rm -f "$out"; stop_hogs' EXIT
 status=0
 go test -timeout=10m -race -count=1 "${flags[@]}" "${pkgs[@]}" 2>&1 | tee "$out" || status=$?
 # A package whose tests ran prints "ok  pkg  1.2s" without "[no tests to run]" (or FAIL lines).

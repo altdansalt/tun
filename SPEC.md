@@ -90,7 +90,8 @@ CI runs this smoke suite by default; set `E2E=0` to skip or `E2E=1` to enable ex
 `TEST_FLAGS` like xargs: whitespace separates words, `'...'`/`"..."` group and are removed
 (`-run TestA|TestB` and `-run "A|B"` both work); nothing is globbed or evaluated. `PKGS`
 (whitespace-separated, default `./...`) selects the packages to vet, build and test; with it
-the smoke suites run only with `E2E=1`.
+the smoke suites run only with `E2E=1`. `LOAD=N` runs N busy loops alongside (for flakiness
+hunting under CPU contention).
 
 Exit status of `tun run`: the command's exit code; 128+signal if killed by a signal; 124 on timeout;
 125 for tun's own errors (can't reach server, upload failed, bad flags) with a one-line message on

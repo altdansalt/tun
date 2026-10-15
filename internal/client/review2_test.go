@@ -125,3 +125,22 @@ exit 99
 		t.Errorf("bb-ci.sh should pass TEST_FLAGS through unchanged (%q): %+v", want, r)
 	}
 }
+
+// LOAD=N runs N busy loops next to the tests and stops them when ci.sh exits.
+func TestCIScriptLoad(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	ws := ciWorkspace(t)
+	os.WriteFile(filepath.Join(ws, "bin/go"), []byte(`#!/bin/bash
+case $1 in
+version) echo "go version go1.27.2 linux/amd64" ;;
+test) echo "loops:$(pgrep -c -f ^tun-ci-load)"; printf 'ok  \tpkg/a\t0.5s\n' ;;
+esac
+`), 0o755)
+	r := ts.tun(ws, "run", "-e", "LOAD=2", "-e", "TEST_FLAGS=-run TestA", "-c", `PATH=$PWD/bin:$PATH ./scripts/ci.sh; s=$?; sleep 0.2; echo "left:$(pgrep -c -f ^tun-ci-load)"; exit $s`)
+	if r.code != 0 || !strings.Contains(r.stdout, "LOAD=2: 2 busy loops") || !strings.Contains(r.stdout, "loops:2") || !strings.Contains(r.stdout, "left:0") {
+		t.Errorf("LOAD=2: %+v", r)
+	}
+	if r := ts.tun(ws, "run", "-e", "LOAD=x", "-c", `PATH=$PWD/bin:$PATH exec ./scripts/ci.sh`); r.code != 2 {
+		t.Errorf("LOAD=x: %+v", r)
+	}
+}

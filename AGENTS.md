@@ -12,6 +12,9 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     With `-run`, ci.sh skips the separate vet/build (go test compiles what it tests; add
     `-e CI_FULL=1` to keep them) and exits 1 if the pattern matched no test in any package.
     Packages: `-e PKGS='./internal/reapi ./internal/client'` (default `./...`).
+    Flaky under load? `-e LOAD=3` runs 3 busy loops alongside, e.g.
+    `tun run -e LOAD=3 -e PKGS=./internal/reapi -e TEST_FLAGS='-run TestX -count=20 -cpu 1,4' -- ./scripts/ci.sh`.
+    Test timing margins should survive that (a sleep under load only gets longer).
     `tun run` says where the job runs: `tun: running on hub` or `tun: running on runner NAME`.
   - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
     stderr once the job ends (same exit code), with a progress heartbeat every 30s;
