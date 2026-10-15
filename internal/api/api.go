@@ -119,6 +119,12 @@ type Execution struct {
 	// SessionCommands: running tun bazel commands that execute remotely; they hold no job
 	// slot (at most max_sessions).
 	SessionCommands int `json:"session_commands"`
+	// Seconds summed over the executed actions: waiting in the FIFO, and on the executor
+	// fetching inputs (into a fresh exec root), executing, uploading outputs.
+	QueueSec        float64 `json:"queue_sec"`
+	InputFetchSec   float64 `json:"input_fetch_sec"`
+	ExecutionSec    float64 `json:"execution_sec"`
+	OutputUploadSec float64 `json:"output_upload_sec"`
 }
 
 // Disk is the state of a data dir's filesystem (healthz; runners report theirs in polls).

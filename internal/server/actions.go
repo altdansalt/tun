@@ -190,9 +190,24 @@ func actionStatus(err error) int {
 	return 13
 }
 
+// actionTimes adds completed action j's times to the totals. Caller holds s.mu.
+func (s *Server) actionTimes(j *job) {
+	t := &s.execTimes
+	if j.StartedAt != nil {
+		t.QueueSec += j.StartedAt.Sub(j.CreatedAt).Seconds()
+	}
+	if fetch, exec, upload, ok := reapi.ExecutionTimes(j.ActionResult); ok {
+		t.InputFetchSec += fetch.Seconds()
+		t.ExecutionSec += exec.Seconds()
+		t.OutputUploadSec += upload.Seconds()
+	}
+}
+
 // executionInfo is healthz's execution object. Caller holds s.mu.
 func (s *Server) executionInfo() *api.Execution {
-	e := &api.Execution{Slots: s.executionSlots(), Executed: maps.Clone(s.executed), SessionCommands: s.orchestrating}
+	e := &api.Execution{Slots: s.executionSlots(), Executed: maps.Clone(s.executed), SessionCommands: s.orchestrating,
+		QueueSec: s.execTimes.QueueSec, InputFetchSec: s.execTimes.InputFetchSec, ExecutionSec: s.execTimes.ExecutionSec,
+		OutputUploadSec: s.execTimes.OutputUploadSec}
 	for _, j := range s.queue {
 		if j.Action != nil {
 			e.Queued++

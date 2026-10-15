@@ -1,8 +1,9 @@
 # tun v1 direction: Bazel-native remote execution
 
 Status: direction agreed 2026-10-15. Built: M0 (tun builds and tests with Bazel; see "M0 results"),
-the M1 core (`tun bazel` sessions, manifest sync, BEP summary on the hub; see "M1 status") and
-tun's REAPI cache. SPEC.md stays the contract for what exists; this file is the target and the order.
+the M1 core (`tun bazel` sessions, manifest sync, BEP summary on the hub; see "M1 status"),
+tun's REAPI cache, the M3 execution core, and remote execution from sessions without asking
+(see "Remote execution in sessions"). SPEC.md stays the contract for what exists; this file is the target and the order.
 
 ## Goal
 An agent sends a Bazel command; tun makes it fast. Caching, warm servers and remote execution
@@ -439,7 +440,7 @@ follows runners joining and leaving, and none of these are startup options, so t
 server survives the change. Open point for when it lands: a session command holds a hub slot
 while its actions need slots too; with only local slots and `--max-sessions` sessions busy,
 actions could starve. Sessions should not count against action slots (or actions get their
-own pool).
+own pool). (Built: see "Remote execution in sessions".)
 
 Merging feat/reapi-exec (trial merge 2026-10-15 at db5eea0): conflicts in main.go/server.go
 (both moved the cache setup; Execution should be created in `server.New` next to the cache
@@ -738,3 +739,59 @@ sandbox none (bwrap unavailable). The cleanup also reported a Bazel invocation
 referencing a deleted temporary tun.bazelrc. This fallback smoke failure was not
 investigated further; the complete tun run passed both suites with bwrap.
 Superseded local iterations were canceled as well.
+
+## Remote execution in sessions (feat/bazel-rbe)
+
+Built on feat/bazel-auto + main (M0) + feat/reapi-exec. The agent sends `tun bazel test //...`;
+when the server executes actions, the session's Bazel sends them to it without being asked.
+
+- **Wiring.** `server.New` creates the Execution service next to the cache handler, so every
+  session socket gets it through `ForClient` (same per-session auth: no token, the session's
+  client namespace for its own uploads). The session's `tun.bazelrc` (rewritten before every
+  command) adds `--remote_executor=grpc://tun` over the session socket, `--jobs=<executor
+  slots>` (`Server.executionSlots`: local slots plus the slots of live runners that take
+  actions, so it follows runners joining and leaving without restarting the Bazel server) and
+  `--remote_local_fallback`. Executors write successful bwrap results to the shared action
+  cache namespace, which every session reads after its own; session uploads (local fallback,
+  `--remote_executor=` from the agent) stay in the client's namespace. `--cache-action-writes`
+  keeps its default `true` (reapi-exec made it `false` because there was one namespace).
+- **Starvation, solved by not counting orchestrating session commands.** A session command
+  whose session executes remotely takes no job slot; such commands are bounded by
+  `--max-sessions` (and one per session). Measured, `scripts/bench-starvation.sh` (job
+  20261015T105653696427-2bbbab7d): one local slot, no runners, one session building 20
+  genrules that sleep 1s. With the command holding the slot (the old rule, patched in) no
+  action ever started: 0 executed, `tun bazel --timeout 2m` ended it (exit 124). Without: 20
+  remote actions, 53.9s (first command of a new session; a loaded host). Why not count it at
+  all: the session's Bazel server only analyzes and waits. Its CPU time during a warm remote
+  build of 200 genrules was 5.9-9.2s over 72s of wall time (8-13% of one core; first build of a
+  new session: 19.5s over 92s, JVM warm-up and analysis included), job
+  20261015T112626731460-71f73009. The alternative (a separate pool of hub slots for actions)
+  would idle those slots whenever no session builds.
+- **--jobs = slots.** Measured with twice the slots too: 72.6s vs 71.9s (above job), so no
+  headroom. (A first run seemed to show 0.28s per action saved by 2x, but compared a new
+  session's first build with a warm one: 20261015T105112809976-cf993397.)
+- **healthz `execution`**: `{slots, queued, running, executed: {local|<runner>: n},
+  session_commands}`; tests and benchmarks read where actions ran from it.
+
+### Overhead per remote action
+
+`scripts/bench-rbe.sh genrules` in `scripts/dev-tun.sh` with `--local-slots 1` and two `tun
+runner` processes with one slot each (like tun-r1..r4) on the job's host (2 CPUs): 200
+independent genrules that sleep 1s, `--action_env=BENCH=<n>` per step so every action runs
+again in the warm session. Job 20261015T112626731460-71f73009 (on the shared hub host, other agents'
+jobs possible):
+
+| step | Bazel elapsed | processes | overhead per action (elapsed x parallelism / 200 - 1s) |
+|---|---|---|---|
+| g1 new session, remote, --jobs=3 | 92.0s | 200 remote (67 hub, 66 + 67 runners) | (incl. Bazel start and analysis) |
+| g2 warm, remote, --jobs=6 | 72.4s | 200 remote | 0.09s |
+| g3 warm, remote, --jobs=3 (tun's) | 71.8s | 200 remote | **0.08s** |
+| g4 warm, local linux-sandbox, --jobs=3 | 103.6s | 200 linux-sandbox | 0.55s |
+| g5 warm, local linux-sandbox, --jobs=auto (2) | 109.8s | 200 linux-sandbox | 0.10s |
+
+So a remote action costs ~80ms of slot time on top of its command (Execute round trip, FIFO,
+input materialization, bwrap with its own network namespace, output upload, AC write), less
+than Bazel's own linux-sandbox once the 2 CPUs are shared by 3 actions. The runners here are
+on the same host as the hub; on other hosts each runner action adds its HTTP round trips to
+the hub (assignment, CAS fetches, started, exited, outputs, done), ~35ms each from an exe.dev
+VM, not measured here (see Deviations).

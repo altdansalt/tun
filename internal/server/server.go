@@ -93,6 +93,7 @@ type Server struct {
 	// don't take a job slot (their actions do; see schedule). At most MaxSessions.
 	orchestrating int
 	executed      map[string]int // actions that completed, by runner ("local" or a name)
+	execTimes     api.Execution  // summed times of completed actions (the *Sec fields)
 	svc           services
 	runners       map[string]*runnerState // the current instance of each runner name
 	retired       map[string]*runnerState // by instance id: superseded or dropped instances
@@ -691,6 +692,7 @@ func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
 		delete(s.jobs, j.ID)
 		if state == api.Exited {
 			s.executed[j.Runner]++
+			s.actionTimes(j)
 		}
 	}
 }

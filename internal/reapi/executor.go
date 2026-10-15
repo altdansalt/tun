@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
@@ -29,6 +30,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 			return nil, err
 		}
 		ctx := parent
+		start := time.Now()
 		root, err := os.MkdirTemp(dataDir, "action-")
 		if err != nil {
 			return nil, err
@@ -49,6 +51,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		if err = materializeContext(ctx, store, fs, ".", get(action, 2).b, 0, &inputBudget{}); err != nil {
 			return nil, err
 		}
+		fetched := time.Now()
 		cwd := string(get(command, 6).b)
 		if err = safeRelative(cwd); err != nil {
 			return nil, err
@@ -98,6 +101,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		if net != nil {
 			defer net.Close()
 		}
+		execStart := time.Now()
 		ended := make(chan struct{})
 		go func() {
 			select {
@@ -108,6 +112,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		}()
 		err = cmd.Wait()
 		close(ended)
+		execEnd := time.Now()
 		code := int64(0)
 		if err != nil {
 			if ex, ok := err.(*exec.ExitError); ok {
@@ -185,12 +190,39 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 				result = append(result, bytesField(2, node)...)
 			}
 		}
+		result = append(result, bytesField(9, executionMetadata(start, fetched, execStart, execEnd, time.Now()))...)
 		if len(result) > 3<<20 {
 			return nil, capacityError()
 		}
 		return result, nil
 	}
 }
+// executionMetadata is an ExecutedActionMetadata: worker start, input fetch, execution and
+// output upload times (worker_start = input_fetch_start, execution_completed =
+// output_upload_start, output_upload_completed = worker_completed).
+func executionMetadata(start, fetched, execStart, execEnd, end time.Time) []byte {
+	worker, _ := os.Hostname()
+	ts := func(n int, t time.Time) []byte {
+		return bytesField(n, msg(intField(1, t.Unix()), intField(2, int64(t.Nanosecond()))))
+	}
+	return msg(bytesField(1, []byte(worker)), ts(3, start), ts(4, end), ts(5, start), ts(6, fetched),
+		ts(7, execStart), ts(8, execEnd), ts(9, execEnd), ts(10, end))
+}
+
+// ExecutionTimes returns how long an ActionResult's executor spent fetching inputs, executing
+// and uploading outputs, from its ExecutedActionMetadata (ok false without one).
+func ExecutionTimes(result []byte) (fetch, exec, upload time.Duration, ok bool) {
+	m := get(result, 9).b
+	if m == nil {
+		return 0, 0, 0, false
+	}
+	t := func(n int) time.Time {
+		ts := get(m, n).b
+		return time.Unix(int64(get(ts, 1).v), int64(get(ts, 2).v))
+	}
+	return t(6).Sub(t(5)), t(8).Sub(t(7)), t(10).Sub(t(9)), true
+}
+
 func nodeName(b []byte) (string, error) {
 	n := string(get(b, 1).b)
 	if n == "" || n == "." || n == ".." || strings.ContainsAny(n, "/\x00") {

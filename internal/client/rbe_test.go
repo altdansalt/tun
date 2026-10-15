@@ -72,7 +72,9 @@ func TestBazelRemoteExecution(t *testing.T) {
 	if r.code != 0 || !strings.Contains(r.stderr, "remote execution on 1 slots") || remoteProcs(r.stderr) != 4 || out("g3.txt") != "one\n3\n" {
 		t.Fatalf("first build (hub slot): %+v", r)
 	}
-	if h := ts.health(); h.Execution == nil || h.Execution.Executed[api.LocalRunner] != 4 || h.Execution.Slots != 1 {
+	// Each action sleeps 0.2s: the executors' metadata (summed in healthz) says so.
+	if h := ts.health(); h.Execution == nil || h.Execution.Executed[api.LocalRunner] != 4 || h.Execution.Slots != 1 ||
+		h.Execution.ExecutionSec < 0.8 || h.Execution.InputFetchSec <= 0 {
 		t.Fatalf("health after the first build: %+v", h.Execution)
 	}
 
