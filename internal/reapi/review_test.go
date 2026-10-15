@@ -172,3 +172,34 @@ func BenchmarkStoreWrite(b *testing.B) {
 		})
 	}
 }
+
+func TestUploadKeepsIncrementalHash(t *testing.T) {
+	s, err := Open(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("x"), 3<<20)
+	d := digest(data)
+	name := "uploads/hash/blobs/" + string(get(d, 1).b) + fmt.Sprintf("/%d", len(data))
+	partial := filepath.Base(s.uploadPath(name))
+	var previous any
+	for offset := 0; offset < len(data); offset += 16 << 10 {
+		end := offset + (16 << 10)
+		finish := end == len(data)
+		if _, err = s.appendUpload(name, d, uint64(offset), data[offset:end], finish); err != nil {
+			t.Fatal(err)
+		}
+		if !finish {
+			s.mu.Lock()
+			h := s.files[partial].Value.(*cacheEntry).hash
+			s.mu.Unlock()
+			if h == nil || (previous != nil && h != previous) {
+				t.Fatal("incremental SHA-256 state replaced between chunks")
+			}
+			previous = h
+		}
+	}
+	if !s.has(d) {
+		t.Fatal("finished upload missing")
+	}
+}

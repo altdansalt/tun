@@ -158,6 +158,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Unary input is complete; Read/GetTree may keep producing output for hours.
+	if method != "/google.bytestream.ByteStream/Write" {
+		_ = rc.SetReadDeadline(time.Time{})
+	}
 	var out []byte
 	switch method {
 	case "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities":
