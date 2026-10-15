@@ -738,3 +738,16 @@ Validation of the zero-slot follow-up (2026-10-15):
 Session drain timings include cold JVM startup/sync because SIGTERM arrives just after
 the runner admission commit, before the command has necessarily started. All servers
 and runners in these checks are private processes inside the outer tun job.
+
+Remote tun friction during this follow-up: an uncapped/no-disk-cache Gazelle job was
+placed on the hub (`20261015T134211766721-30228d4f`) and canceled after 428s with no
+progress beyond analysis; the bounded-heap, disk-cache run on tun-r4 above completed
+in 60.595s (different settings, not a controlled host comparison). A duplicate CLI
+smoke job also landed on the hub and was canceled after 201s. This is exactly the
+placement pressure `--local-slots 0` is meant to remove. The initial parallel-package
+full race run (`20261015T133510967260-04339af6`) exceeded the 10-minute client-package
+limit and a real REAPI Bazel command's deadline. Serial package execution (`-p 1`)
+passed all Go packages in `20261015T134835670473-6b23a643` (client 366.601s, REAPI
+144.093s); that superseded job was canceled before finishing its old smoke script.
+The failure also exposed a cancellation test racing runner sandbox startup; it now
+waits for command output before asserting that a warm lease survives cancellation.

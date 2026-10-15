@@ -45,7 +45,7 @@ tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>      
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
-           [--net auto|private|host] [--min-free 10%] [--drain-timeout 15m]
+           [--net auto|private|host] [--min-free 10%] [--max-client-cache 1GB] [--drain-timeout 15m]
 tun token [--data DIR] new NAME   issue a client token on the server host
 tun runners                       (JSON lines: the server's live runners)
 tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
