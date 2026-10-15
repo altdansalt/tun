@@ -690,7 +690,7 @@ namespaces (see SPEC.md and docs/deploy.md). The legacy shared token remains adm
 migration and provides no isolation. This implements the trust boundary assumed by M1/M2;
 it does not change the Bazel-native direction. Shared v0 tool caches still allow poisoning.
 
-The hub trims tool caches to budgets (SPEC.md, Tool cache budgets): the shared Go/XDG caches
+Each session host trims tool caches to budgets (SPEC.md, Tool cache budgets): the shared Go/XDG caches
 together, each client's Bazel repository cache separately. Bazel's disk caches are left to
 Bazel's own GC (`--experimental_disk_cache_gc_max_size`) except under disk pressure, and
 bazelisk downloads are never trimmed. Bazel trusts whole repository cache entries and
@@ -704,3 +704,37 @@ file contents their client uploaded, so a digest learned elsewhere is not a capa
 The REAPI CAS is still shared by digest (SPEC.md, Known gaps); when M2 adds remote
 execution, inputs fetched by executors should be checked against the same per-client
 ownership (FindMissingBlobs answering per client) before a shared CAS serves other clients.
+
+## Zero-local-slot hub follow-up
+
+Merged per-client tokens/uploader ownership into runner placement. The hub admits only
+manifest digests owned by the authenticated client; runner-side fetching is trusted
+after that admission. That token identity selects both runner-local client caches and
+the hub action-cache namespace through the session credential. Runner session engines
+now trim idle per-client repository caches, protecting live sessions.
+
+A hub with `--local-slots 0` also schedules services on runners, with runner-initiated
+HTTP upgrade tunnels for its port proxy. Services occupy runner slots until stopped;
+this differs from hub-local services' separate pool and keeps runner concurrency bounded.
+Deployment flags are in [deploy.md](deploy.md#coordination-only-hub).
+
+Session command outputs and test-attempt logs are snapshotted before the session can
+run another command, then shipped to the hub; `tun get ID //pkg:target`, `//pkg:test`
+and `//pkg:test.log` work after runner loss or session eviction. This is an M2 bridge
+to M3's on-demand CAS downloads: it eagerly copies output files, bounded by
+`--max-download`, and does not yet retain directory/tree artifacts. The uncapped label
+index is kept in the command archive; summaries for agents remain bounded. No change
+to the agreed milestone order or remote execution direction.
+
+Validation of the zero-slot follow-up (2026-10-15):
+
+| exercise | outer tun job | result |
+|---|---|---|
+| real hub/runner restarts, including zero-slot hub and runner-hosted sessions | `20261015T134528679625-281e4940` (tun-r4) | 222.811s; ordinary zero-slot hub drain 4.249s; session hub/runner drains 58.000/51.097s, retained output/logs and cache hits after restart |
+| runner service HTTP streaming/WebSocket, service re-adoption after hub drain timeout, synchronized session cancellation | `20261015T135044572540-2a60fdf7` (tun-r6) | 111.789s including compilation; tests 4.606s, service 0.40s, service restart 1.11s |
+| HTTP/1.1 tunnel ALPN against an HTTP/2-capable TLS hub | `20261015T134820174178-8554debd` (tun-r5) | passed; test 0.11s |
+| Gazelle regeneration with bounded heap and the host disk cache | `20261015T134954387068-ffe0cc4e` (tun-r4) | 60.595s; 64 disk-cache hits |
+
+Session drain timings include cold JVM startup/sync because SIGTERM arrives just after
+the runner admission commit, before the command has necessarily started. All servers
+and runners in these checks are private processes inside the outer tun job.

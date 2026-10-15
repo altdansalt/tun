@@ -283,9 +283,11 @@ prints it ("tun: job ID exited; server error: ...").
 `tun run --service [--port N]... -- <cmd>` starts a job meant to run until canceled (dev server,
 database, test fixture):
 - No timeout unless `--timeout` is given explicitly (`timeout_sec: 0` = none).
-- Not queued and not counted against `--max-jobs` (services are mostly idle and must not starve
+- On a hub with local slots: not queued and not counted against `--max-jobs` (services are mostly idle and must not starve
   or be starved by builds). Instead at most `--max-services` (default 4) run at once; creating
-  another fails with 429 and an explanation, rather than queueing indefinitely.
+  another fails with 429 and an explanation. With `--local-slots 0`, services instead queue
+  on service-capable runners and occupy runner slots. Their HTTP proxy uses runner-initiated
+  upgraded HTTP connections, including streaming and WebSocket traffic.
 - Each requested port N is a name: the server allocates a free host port H (kernel-chosen, not
   held by another live service) and sets `TUN_PORT_<N>=H` in the job env, plus `PORT=H` when
   exactly one port was requested (these override `-e`). The service must listen on
@@ -324,7 +326,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   `--sandbox` and `--net auto|private|host` as for serve: with a private network the runner
   runs the job's network helper and serves its egress proxy itself, so the job's HTTP(S)
   traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
-  `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
+  `~/.config/tun/token`. It must be the hub admin token; client tokens cannot authenticate runners. a separate runner credential
   (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
   work, finishes its jobs up to --drain-timeout (default 15m) and tells the hub it is
   leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
@@ -332,7 +334,9 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   to start. All its hub requests have timeouts (2 minutes; polls 90s).
 - Scheduling: one FIFO; the head job goes to whichever free slot asks first: one of the hub's
   `--local-slots` (default `--max-jobs`; `0` = pure hub that only dispatches) or a runner's.
-  Services always run on the hub (not counted in either). healthz `max_jobs` = local slots +
+  Services run on the hub when it has local slots. With `--local-slots 0` they queue on
+  service-capable runners and hold a runner slot until stopped; `--max-services` still bounds
+  total admitted services. healthz `max_jobs` = local slots +
   live runners' slots, `running` counts jobs on both. With `--local-slots 0` the hub doesn't
   unpack workspaces at all; the runner enforces `--max-workspace` (the job then fails instead
   of a 413 at creation). With local slots the hub unpacks at creation as before (and deletes
@@ -488,8 +492,8 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   the bazel client (Bazel cancels the command), SIGKILL after the kill grace, and if the
   command still hasn't ended after twice the grace, kill the session sandbox. A server
   orderly shutdown finishes admitted commands before killing the sandboxes; after a crash
-  the next server marks running bazel jobs failed. `tun get` of
-  a bazel job is a 409 (outputs stay in the session's output base).
+  the next server marks running bazel jobs failed. `tun get` fetches retained outputs and test logs by label
+  (see Retained session artifacts).
 - **Sync.** The client lists the same files as for `tun run` (minus top-level `bazel-*`
   symlinks: Bazel's convenience links) and builds a manifest: entries `{p, t: f|d|l, m (perm
   bits), s (sha256), n (size), l (link target)}`, each parent directory listed before its
@@ -688,3 +692,22 @@ Local sessions from disk are discarded when restarting with no local slots. Loca
 placement resource samples are cached for one second. Runner CAS retention uses the
 runner's KeepBlobs interval (24h by default), and disk pressure also reclaims session CAS;
 abandoned inner job dirs expire after an hour.
+
+### Retained session artifacts
+After each session command, tun snapshots BEP target output files and every test attempt's
+logs into the command's retained output archive before releasing its session lock. Runners
+upload it to the hub. `tun get ID //pkg:target` fetches its outputs; a test label also
+fetches its attempt logs (`//pkg:test.log` selects only logs). Workspace-relative staged
+paths such as `bazel-bin/pkg/output` also work. Artifacts survive subsequent commands,
+session eviction and runner/hub restarts, until `--keep-work` retention or disk pressure
+removes them. Downloads use ordinary owner/admin authorization. Files are opened through
+the session output base's os.Root; arbitrary absolute paths are never accepted. The
+per-command byte limit is `--max-download`; collection errors appear in the job's
+output error and downloads fail explicitly. Directory/tree artifacts are not yet staged.
+The archive retains an uncapped label index; BEP JSON for agents remains bounded.
+
+Runner session engines trim their per-client repository caches with
+`--max-client-cache` (default 1GB; 0 disables the budget), protecting every live session's
+client. Blob fetches use the runner's trusted CAS path because the hub already checked
+uploader ownership at admission. Session cache credentials select the authenticated
+client's namespace, never a caller-supplied identity header.
