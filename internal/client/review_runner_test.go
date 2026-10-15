@@ -101,7 +101,11 @@ func TestReviewRunnerDelayedPollOldInstance(t *testing.T) {
 // before [started] ... the call is a 410, so the runner never starts it").
 func TestReviewRunnerStartedCancelRace(t *testing.T) {
 	t.Parallel()
-	ts := startServer(t, hubConfig(""))
+	// Not dropped as dead between polls: on a loaded host (go test -race of everything) the
+	// hub's 1s of hubConfig passed and the next poll was told the runner was superseded.
+	cfg := hubConfig("")
+	cfg.RunnerDeadAfter = 30 * time.Second
+	ts := startServer(t, cfg)
 	f := &fakeRunner{ts: ts, name: "race", instance: "i1"}
 	f.poll(0)
 	// Batches of jobs raced at once: review/runners raced one at a time 10000 times (~30s
