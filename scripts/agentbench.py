@@ -114,6 +114,10 @@ def main():
     if min(a.agents + [a.iterations, a.timeout, a.budget]) < 1:
         p.error('counts and limits must be positive')
     a.repo = a.repo.resolve()
+    if 'bb' in a.systems:
+        branch = subprocess.run(['git', '-C', str(a.repo), 'symbolic-ref', '--quiet', 'HEAD'], capture_output=True)
+        if branch.returncode:
+            p.error('bb remote requires a named source branch; check out a pushed branch before benchmarking')
     commit = git(a.repo, 'rev-parse', 'HEAD')
     remote = git(a.repo, 'remote', 'get-url', 'public' if a.profile == 'tun' else 'origin')
     targets = a.targets or (['//internal/workspace/...', '//internal/server/...'] if a.profile == 'tun' else ['//v2/label:label_test'])

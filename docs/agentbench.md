@@ -37,7 +37,9 @@ The caller's checkout is untouched. For tun the default targets are
 `//internal/workspace/... //internal/server/...`; Gazelle uses `//v2/label:label_test`.
 Override with positional targets. Both services use `test ... --jobs=2` with the same
 source edits and selected targets. BB fetches the configured public remote and committed
-HEAD, then applies the uncommitted edit; push your branch before running BB. Tun needs
+HEAD, then applies the uncommitted edit; push your branch before running BB.
+BB also requires the source checkout to be on a named branch; detached source HEAD is
+rejected by the harness before launching any agents. Tun needs
 neither that push nor a Git server. For tun's own repo, the `public` git remote is used
 for BB; for Gazelle, `origin`. Neither remote is changed in the caller checkout.
 

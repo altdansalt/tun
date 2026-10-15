@@ -79,6 +79,11 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(len({r['edit'] for r in rows}), 3)
                 self.assertTrue(all(r['started_at'] for r in rows))
                 self.assertEqual(len({r['job']['id'] for r in rows}), 1)
+                b.git(repo, 'checkout', '--detach', 'HEAD')
+                rejected = subprocess.run(['python3', str(Path(b.__file__)), '--repo', str(repo), '--systems', 'bb', '--out', str(root / 'rejected')], capture_output=True, text=True)
+                self.assertEqual(rejected.returncode, 2)
+                self.assertIn('named source branch', rejected.stderr)
+                self.assertFalse((root / 'rejected').exists())
             finally:
                 server.shutdown()
                 thread.join()
