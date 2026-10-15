@@ -157,6 +157,15 @@ Measured (2026-10-15, private dev server on a tun host via `tun run -c 'scripts/
 | `--cold`                         | 6.91s | 6.34s, new server | 427B + 0B | 20261015T081346640293-da0e4076 |
 | v0: `tun run -- bazel build` (every time) | 6.5-7.8s | new server, full analysis | tarball | |
 
+After the security fixes and with the BEP summary (same setup, tun job
+20261015T091046678975-d7e2d5f7, hub under load): first command 9.9s (Bazel elapsed 9.7s, new
+server; job 20261015T091049121021-84c87d9a), no-op 0.40s (Bazel 0.36s;
+20261015T091059030954-db282b89), one-line change 0.37s (Bazel 0.28s, 140B uploaded;
+20261015T091059429520-40590e2e), each ending in `tun: bazel build exit=0 after 0.4s: 1 targets
+built`; `--json` returns `bazel-bin/g.txt` as the output. Reading and parsing the BEP adds no
+measurable time on this workspace. The per-command sweep and the read-only root don't show
+either.
+
 Cost of a warm session on the trivial workspace: Bazel server RSS 223MB, 117MB on disk
 (nearly all Bazel's install base, extracted per session; sharing it across sessions would save
 that and ~1s per new session, but makes it writable by every session).
