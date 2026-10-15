@@ -411,7 +411,9 @@ func TestBazelSessionLongArgs(t *testing.T) {
 // alone even if a process it started keeps the job's output open for longer than the kill
 // escalation.
 func TestBazelSessionCancelLeftover(t *testing.T) {
-	ts := bazelServer(t, server.Config{}, false)
+	// The sandbox is killed if the canceled command hasn't ended after twice the grace: not
+	// 50ms, which sh exiting on SIGTERM exceeded on a loaded host.
+	ts := bazelServer(t, server.Config{KillGrace: 500 * time.Millisecond}, false)
 	ws := bazelWS(t, map[string]string{})
 	ts.tun(ws, "bazel", "build")
 	c := newClient(ts.env(ws, nil, nil, nil, nil))
@@ -437,7 +439,7 @@ func TestBazelSessionCancelLeftover(t *testing.T) {
 	if j := ts.waitDone(j.ID); j.State != api.Canceled {
 		t.Fatalf("%+v", j)
 	}
-	time.Sleep(200 * time.Millisecond) // past the escalation (KillGrace is 50ms here)
+	time.Sleep(1200 * time.Millisecond) // past the escalation (twice KillGrace)
 	if ss := ts.sessions(); len(ss) != 1 || !ss[0].Server {
 		t.Fatalf("the session's sandbox was killed: %+v", ss)
 	}
