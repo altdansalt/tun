@@ -373,12 +373,14 @@ func (s *Server) run(j *job) {
 		s.finish(j, api.Canceled, nil, nil, "canceled before it started")
 		return
 	}
+	// Taken before the launch: if this goroutine stalls after it (a loaded host), run_sec
+	// still covers the whole command (it once reported 0.114s for sleep 0.2).
+	now := time.Now().UTC()
 	if err := p.start(); err != nil {
 		s.finish(j, api.Failed, nil, nil, "starting command: "+err.Error())
 		return
 	}
 	j.net = p.net
-	now := time.Now().UTC()
 	j.State, j.StartedAt = api.Running, &now
 	s.persist(j)
 	j.kill = p.kill // called with s.mu held

@@ -52,12 +52,14 @@ func TestQueueVisibility(t *testing.T) {
 		!strings.HasPrefix(lines[1], "tun: started after ") || !strings.HasSuffix(lines[1], "s in queue") {
 		t.Errorf("queued run: %+v", r)
 	}
-	d := ts.status(ts.lastID())
-	if d.QueuePosition != nil || d.QueueSec < 1 || d.StartedAt == nil || d.EndedAt == nil ||
+	// d waited for whatever was left of a's 2s (how much depends on the host's load).
+	d, ja := ts.status(ts.lastID()), ts.status(a)
+	if d.QueuePosition != nil || d.StartedAt == nil || d.EndedAt == nil || ja.EndedAt == nil ||
+		d.StartedAt.Before(*ja.EndedAt) || d.QueueSec != secsOf(d.StartedAt.Sub(d.CreatedAt)) ||
 		d.RunSec != secsOf(d.EndedAt.Sub(*d.StartedAt)) {
-		t.Errorf("finished job timing: %+v", d)
+		t.Errorf("finished job timing: %+v (a ended %v)", d, ja.EndedAt)
 	}
-	if ja := ts.status(a); ja.RunSec < 1.9 || ja.QueueSec > 0.5 {
+	if ja.RunSec < 1.9 || ja.QueueSec > 0.5 {
 		t.Errorf("a timing: queue %v run %v", ja.QueueSec, ja.RunSec)
 	}
 
