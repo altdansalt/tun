@@ -111,7 +111,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache in this directory (relative to the data dir); empty disables it")
-	sharedMax := fs.String("max-shared-cache", "6GB", "combined tool cache budget; oldest mtime first, one-hour grace; 0 disables size cap")
+	sharedMax := fs.String("max-shared-cache", "5GB", "budget of the shared tool caches (Go build and module caches, XDG caches; not Bazel disk caches), least recently used first; 0: none")
+	clientMax := fs.String("max-client-cache", "1GB", "budget of each client's Bazel repository cache (its disk cache has Bazel's own GC); 0: none")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
 	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
@@ -190,8 +191,14 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		sharedLimit, err = 0, nil
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "tun: --max-shared-cache:", err)
-		return 125
+		return fail("--max-shared-cache: %v", err)
+	}
+	clientLimit, err := parseSize(*clientMax)
+	if *clientMax == "0" {
+		clientLimit, err = 0, nil
+	}
+	if err != nil {
+		return fail("--max-client-cache: %v", err)
 	}
 	mf, err := ParseMinFree(*minFree)
 	if err != nil {
@@ -233,7 +240,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
-		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf, MaxSharedCache: sharedLimit,
+		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs, MinFree: mf, MaxSharedCache: sharedLimit, MaxClientCache: clientLimit,
 		MaxSessions: *maxSessions, SessionIdle: *sessionIdle, BazeliskSeed: *bazeliskSeed, Cache: store, CacheReadOnly: !*cacheWrites})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)

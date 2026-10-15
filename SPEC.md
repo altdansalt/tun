@@ -20,7 +20,7 @@ tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N]
           [--ephemeral] [--exit-on-eof] [--drain-timeout 15m]
           [--cache-dir reapi] [--cache-max-size 10GB] [--cache-action-writes=true] [--cache-socket PATH]
           [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
-          [--min-free 10%] [--max-shared-cache 6GB] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
+          [--min-free 10%] [--max-shared-cache 5GB] [--max-client-cache 1GB] [--max-sessions 2] [--session-idle 30m] [--bazelisk-seed DIR]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -152,21 +152,35 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
   from tun (action results, BEP and job details are per client), but low-entropy content
   whose digest can be guessed is not confidential there (see Known gaps).
 
-### Shared cache disk budget
+### Tool cache budgets
 
-`--max-shared-cache` (default 6GB; 0 disables the size cap) trims the combined
-`$DATA/cache/{go-build,gomod,xdg}` and per-client Bazel tool caches, on each GC sweep
-(at most ten minutes apart). Under `--min-free` pressure these caches are trimmed before
-finished workspaces and idle sessions. Files are removed oldest-mtime first; files modified
-within the last hour and Bazel caches belonging to any live session are protected. This is
-an approximate LRU and a soft cap: reads do not necessarily update mtime, and protected or
-unremovable files can keep usage over budget. Open files survive unlink on Linux; tools
-must tolerate cache misses. Trimming never follows symlinks outside each cache root.
-Shared v0 tool caches remain writable by every job and provide no integrity isolation.
-
-Extracted Go modules are evicted as whole directories, only when no local job/service is
-running; individual module source files are never trimmed. Go download-cache entries and
-other tool cache files use the ordinary age grace.
+Tool caches are trimmed on each GC sweep (at most ten minutes apart) and, under `--min-free`
+pressure, before finished workspaces and idle sessions are deleted (internal/server/
+sharedcache.go has the details):
+- `--max-shared-cache` (default 5GB; 0: none) bounds `$DATA/cache/{go-build,gomod,xdg}`
+  together, except Bazel disk caches in them (`xdg/tun-bazel/disk`, which bazel-ci.sh bounds
+  with Bazel's own `--experimental_disk_cache_gc_max_size`).
+- `--max-client-cache` (default 1GB; 0: none) bounds each client's Bazel repository cache
+  (`$DATA/bazel/<client>/repo`). Its disk cache (used only without the REAPI cache) has
+  Bazel's own GC (5G); its `bazelisk/` (Bazel binaries) is never trimmed, and is re-seeded
+  from `--bazelisk-seed` whenever its downloads are missing.
+- Tools trust whole trees, so trimming evicts what a tool can lose without being misled:
+  single go-build entries; an extracted Go module together with its `cache/download` files
+  (download files are never trimmed alone: a missing `.ziphash` makes go re-extract a module
+  others may be compiling from, a missing `.lock` breaks locking); a whole top-level dir of
+  `xdg` (a tool's install); a whole Bazel repository cache entry
+  (`content_addressable/<algo>/<hash>`, or `contents/<hash>`: fetched repository trees).
+  Trees in the shared caches are only evicted while no local job or service runs, and a
+  client's Bazel caches only while it has no live session (checked under the admission lock,
+  so none starts until the tree is renamed away); a busy server trims them only between jobs.
+- Least recently used first, approximated by the newest mtime in the unit (dirs count: an
+  extracted archive keeps old file mtimes). Future mtimes are reset to now. Grace: an hour
+  since the last change, and for go-build entries Go's own 5 days + 1 hour (Go refreshes a
+  used entry's mtime at most hourly), except under disk pressure (an hour). Under pressure
+  Bazel disk cache files are candidates too.
+- Soft caps: reads need not update mtimes, and protected or unremovable entries can keep
+  usage over budget. Trimming never follows symlinks out of a cache root. Runners do not
+  trim tool caches yet.
 
 ## Workspace
 - Root = `git rev-parse --show-toplevel` of the client's cwd; if not in git, the cwd itself.
@@ -606,6 +620,26 @@ Bazel flags.
 - `scripts/ci.sh` (vet, build, test -race) must pass.
 - `bazel test //...` (`scripts/bazel-ci.sh`) must pass too: MODULE.bazel with rules_go, gazelle-generated
   BUILD files, hermetic Go SDK at go.mod's version (so the code must build and pass with Go 1.25).
+
+## Known gaps in client isolation
+Client tokens (see Visibility) separate jobs, logs, outputs, sessions, action results and
+uploaded content. These remain shared or weak; treat clients as mutually trusted for
+integrity until they are fixed:
+- Shared tool caches (`$DATA/cache/{go-build,gomod,xdg}`) are writable by every job of every
+  client. A job can plant a Go build cache entry, alter an extracted module, or put a binary
+  in a tool's XDG cache (e.g. bazelisk's, or bazel-ci.sh's Bazel disk cache) that later jobs
+  of other clients run or link. There is no integrity isolation between clients there; only
+  Bazel sessions' caches are per client. (docs/bazel.md: executor-written caches.)
+- The REAPI CAS is shared by digest (see Bazel remote cache): any client can confirm
+  whether content with a guessed digest exists and read it.
+- `--sandbox none` gives jobs the server user's full access: they can read `$DATA` (every
+  client's workspaces, blobs, CAS, logs and the admin token) and the client token files'
+  hashes. Client tokens isolate nothing from a job in that mode.
+- `--net host` (or `auto` falling back to it) leaves jobs on the host network: a job can
+  connect directly to other clients' services' host ports (bypassing the token-checked
+  proxy) and to anything else listening on the host's loopback.
+- Jobs of different clients run as the same Unix user; isolation relies on bwrap.
+- The legacy admin token gives no isolation (see Visibility).
 
 ## Non-goals for v0 (later, driven by usage)
 Service-to-service networking (with isolation, jobs can't reach each other at all),

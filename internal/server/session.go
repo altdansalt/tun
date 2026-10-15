@@ -441,12 +441,17 @@ func (s *Server) prepareSession(sess *session, in, host sessionPaths) error {
 			return err
 		}
 	}
-	if err := os.Mkdir(host.bazelisk, 0o700); err == nil && s.cfg.BazeliskSeed != "" {
-		if err := copyTree(filepath.Join(s.cfg.BazeliskSeed, "downloads"), filepath.Join(host.bazelisk, "downloads")); err != nil {
-			log.Printf("tun: seeding %s from %s: %v", host.bazelisk, s.cfg.BazeliskSeed, err)
-		}
-	} else if err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Mkdir(host.bazelisk, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
+	}
+	// Seed whenever the downloads are missing (new client, or removed by hand), not only on
+	// the first session: bazelisk/ is never trimmed (sharedcache.go), but may be deleted.
+	if dl := filepath.Join(host.bazelisk, "downloads"); s.cfg.BazeliskSeed != "" {
+		if _, err := os.Lstat(dl); errors.Is(err, os.ErrNotExist) {
+			if err := copyTree(filepath.Join(s.cfg.BazeliskSeed, "downloads"), dl); err != nil {
+				log.Printf("tun: seeding %s from %s: %v", host.bazelisk, s.cfg.BazeliskSeed, err)
+			}
+		}
 	}
 	if err := writeOwn(host.rc, []byte(s.bazelrc(sess.Name, in, s.remoteSetup(in)))); err != nil {
 		return err

@@ -42,7 +42,8 @@ type Config struct {
 	GCInterval                    time.Duration // 0: derived from the Keep* durations
 	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
 	MaxLog                        int64         // max bytes kept per stdout/stderr; 0: unlimited
-	MaxSharedCache                int64         // disposable tool cache budget; zero disables size cap
+	MaxSharedCache                int64         // shared tool cache budget (sharedcache.go); 0: none
+	MaxClientCache                int64         // each client's Bazel cache budget (sharedcache.go); 0: none
 	MinFree                       MinFree       // free space to keep on the data dir's filesystem (see disk.go)
 
 	// Runners (see hub.go). HubOnly: no local job slots (tun serve --local-slots 0), so

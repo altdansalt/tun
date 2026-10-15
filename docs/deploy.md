@@ -112,12 +112,23 @@ token with the same name to rotate, then remove the old `DATA/clients/<sha256(to
 to revoke; issuance/revocation does not require restart. The files contain names, never raw
 tokens. Back up this directory with the server data.
 
-For a 25GB hub, the default `--max-shared-cache 6GB` supplements the independent
-`--cache-max-size` REAPI budget and `--min-free` reserve. Account for both budgets, session
-output bases and retained jobs when configuring disk. Tool cache trimming protects files
-modified in the last hour and all live session clients' Bazel caches, so caps are soft.
-It runs periodically and before disk-pressure retention; inspect `tun: trimmed ...` logs.
+Tool cache budgets for a 25GB hub (see SPEC.md, Tool cache budgets). Measured on runner
+tun-r3 (job 20261015T113251890110-695fa3c0, after weeks of tun CI): go-build 509MB, gomod
+4KB, xdg 0.9GB (bazelisk 74MB; bazel-ci.sh's repository cache 521MB and disk cache 316MB).
+Budget, with defaults:
 
-Extracted Go modules are evicted as whole directories, only when no local job/service is
-running; individual module source files are never trimmed. Go download-cache entries and
-other tool cache files use the ordinary age grace.
+| what | bound | GB |
+|---|---|---|
+| REAPI cache | `--cache-max-size` 10GB | 10 |
+| shared tool caches | `--max-shared-cache` 5GB | 5 |
+| bazel-ci.sh's Bazel disk cache | Bazel GC, 3G | 3 |
+| each client's Bazel repository cache | `--max-client-cache` 1GB | 1 per client |
+| each client's Bazel disk cache | Bazel GC 5G, only without the REAPI cache | 0 |
+| sessions' output bases | `--max-sessions` 2, ~1-2GB each | 2-4 |
+| reserve | `--min-free` 10% | 2.5 |
+
+That is ~23-25GB before workspaces, blobs and retained jobs with two Bazel clients: on a
+25GB hub pass `--cache-max-size 6GB` (or less), leaving several GB for jobs. `--min-free` is
+the backstop: under pressure tool caches are trimmed first (with shorter graces), then
+finished workspaces, then idle sessions. Budgets are soft (recently used entries, running
+jobs' and live sessions' caches are protected); inspect `tun: trimmed ...` logs.

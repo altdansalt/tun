@@ -512,8 +512,17 @@ namespaces (see SPEC.md and docs/deploy.md). The legacy shared token remains adm
 migration and provides no isolation. This implements the trust boundary assumed by M1/M2;
 it does not change the Bazel-native direction. Shared v0 tool caches still allow poisoning.
 
-The hub trims disposable Go/XDG and per-client Bazel tool caches to a combined soft 6GB
-budget and under min-free pressure. Oldest mtime first approximates LRU; a one-hour write
-grace and live-session cache exclusion avoid disrupting active sessions. Session output
-bases retain their existing session lifecycle; REAPI retains its separate verified LRU.
+The hub trims tool caches to budgets (SPEC.md, Tool cache budgets): the shared Go/XDG caches
+together, each client's Bazel repository cache separately. Bazel's disk caches are left to
+Bazel's own GC (`--experimental_disk_cache_gc_max_size`) except under disk pressure, and
+bazelisk downloads are never trimmed. Bazel trusts whole repository cache entries and
+fetched repository trees (`<repository_cache>/contents`), so they are evicted whole, and only
+while their client has no live session (shared ones only while no job runs). Session
+output bases keep their session lifecycle; REAPI keeps its separate verified LRU.
 No milestone deviation is required.
+
+Uploaded workspace content is per uploader (SPEC.md, Visibility): sessions can only sync
+file contents their client uploaded, so a digest learned elsewhere is not a capability.
+The REAPI CAS is still shared by digest (SPEC.md, Known gaps); when M2 adds remote
+execution, inputs fetched by executors should be checked against the same per-client
+ownership (FindMissingBlobs answering per client) before a shared CAS serves other clients.
