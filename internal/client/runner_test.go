@@ -313,7 +313,9 @@ func jobIDs(r api.RunnerPollResponse) []string {
 
 func TestRunnerProtocol(t *testing.T) {
 	t.Parallel()
-	ts := startServer(t, hubConfig(""))
+	cfg := hubConfig("")
+	cfg.RunnerBackstop = 200 * time.Millisecond
+	ts := startServer(t, cfg)
 	f := &fakeRunner{ts: ts, name: "fake", instance: "i1"}
 	id := ts.detach("", "--no-workspace", "--", "true")
 	code, resp := f.poll(1)
@@ -392,14 +394,17 @@ func TestRunnerProtocol(t *testing.T) {
 		t.Errorf("canceled while assigned: %+v", j)
 	}
 
-	// Another live runner can't take the name; the same source restarting can.
-	clash := &fakeRunner{ts: ts, name: "fake", instance: "i2", as: "elsewhere"}
-	if code, _ := clash.poll(1); code != 409 {
-		t.Errorf("name clash: %d", code)
+	// The newest instance with a name wins; the older one is told it was superseded.
+	newer := &fakeRunner{ts: ts, name: "fake", instance: "i2", as: "elsewhere"}
+	if code, resp := newer.poll(1); code != 200 || resp.Superseded != "" {
+		t.Errorf("newer instance: %d %+v", code, resp)
+	}
+	if code, resp := f.poll(1); code != 200 || !strings.Contains(resp.Superseded, "superseded") {
+		t.Errorf("older instance: %d %+v", code, resp)
 	}
 	f.instance = "i3"
-	if code, _ := f.poll(1); code != 200 {
-		t.Errorf("restart: %d", code)
+	if code, resp := f.poll(1); code != 200 || resp.Superseded != "" {
+		t.Errorf("restart: %d %+v", code, resp)
 	}
 
 	// Hub backstop: a runner that keeps polling but never ends a timed-out job.
@@ -535,5 +540,111 @@ func TestRunnerNetIsolation(t *testing.T) {
 	}
 	if r := ts.tun("", "run", "--no-workspace", "-c", "echo out; exit 3"); r.code != 3 || r.stdout != "out\n" {
 		t.Errorf("exit status through the helper: %+v", r)
+	}
+}
+
+func TestRunnerDetachOutThenGet(t *testing.T) {
+	t.Parallel()
+	ts := startServer(t, hubConfig(""))
+	ts.startRunner("r1", 1)
+	r := ts.tun("", "run", "--detach", "--out", "f", "--no-workspace", "-c", "echo x > f; echo y > g")
+	if r.code != 0 {
+		t.Fatalf("--detach --out: %+v", r)
+	}
+	id := strings.TrimSpace(r.stdout)
+	if j := ts.waitDone(id); !slices.Equal(j.Outputs, []string{"f"}) {
+		t.Errorf("outputs: %+v", j)
+	}
+	dst := t.TempDir()
+	if g := ts.tun("", "get", "-o", dst, id, "f"); g.code != 0 || readFile(t, filepath.Join(dst, "f")) != "x\n" {
+		t.Errorf("get: %+v", g)
+	}
+	if g := ts.tun("", "get", "-o", dst, id, "g"); g.code != 125 || !strings.Contains(g.stderr, "tun run --detach --out g") {
+		t.Errorf("get of an undeclared path: %+v", g)
+	}
+}
+
+// Graceful shutdown tells the hub at once; a superseded runner finishes its job and exits.
+func TestRunnerLeaveAndSupersede(t *testing.T) {
+	t.Parallel()
+	ts := startServer(t, hubConfig(""))
+	a := ts.startRunner("a", 1)
+	ts.waitRunners(1)
+	start := time.Now()
+	a.r.Shutdown(5 * time.Second)
+	<-a.done
+	if h := ts.health(); len(h.Runners) != 0 || time.Since(start) > 900*time.Millisecond {
+		t.Errorf("after leaving (%v): %+v", time.Since(start), h.Runners)
+	}
+
+	old := ts.startRunner("dup", 1)
+	ts.waitRunners(1)
+	env, wait, done := release(t)
+	id := ts.detach("", append(env, "--no-workspace", "-c", wait)...)
+	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Running })
+	ts.startRunner("dup", 1)
+	eventually(t, "superseded", func() bool { return old.r.Superseded() != "" })
+	select {
+	case <-old.done:
+		t.Fatal("superseded runner exited with a job running")
+	default:
+	}
+	// New work goes to the new instance even while the old one finishes.
+	if r := ts.tun("", "run", "--no-workspace", "--", "echo", "new"); r.code != 0 || r.stdout != "new\n" {
+		t.Errorf("job on the new instance: %+v", r)
+	}
+	done()
+	if j := ts.waitDone(id); j.State != api.Exited {
+		t.Errorf("old instance's job: %+v", j)
+	}
+	<-old.done
+}
+
+func TestRunnerDataDirLock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := server.RunnerConfig{Hub: "http://127.0.0.1:1", Name: "x", Slots: 1, DataDir: dir, Sandbox: sandbox.None}
+	if _, err := server.NewRunner(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.NewRunner(cfg); err == nil || !strings.Contains(err.Error(), "in use by another tun runner") {
+		t.Errorf("second runner on one data dir: %v", err)
+	}
+}
+
+func TestRunnerExitedThenLost(t *testing.T) {
+	t.Parallel()
+	ts := startServer(t, hubConfig(""))
+	f := &fakeRunner{ts: ts, name: "x", instance: "i1"}
+	id := ts.detach("", "--no-workspace", "--", "true")
+	f.poll(1)
+	f.req("POST", "/v1/runner/jobs/"+id+"/started", nil)
+	three := 3
+	ex, _ := json.Marshal(api.RunnerDone{State: api.Exited, ExitCode: &three})
+	if code, _ := f.req("POST", "/v1/runner/jobs/"+id+"/exited", ex); code != 200 {
+		t.Fatalf("exited: %d", code)
+	}
+	// The runner dies while uploading: the job keeps the reported result.
+	j := ts.waitDone(id)
+	if j.State != api.Exited || j.ExitCode == nil || *j.ExitCode != 3 || !strings.Contains(j.Error, "lost") {
+		t.Errorf("after the runner was lost: %+v", j)
+	}
+}
+
+func TestRunnerStartTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := hubConfig("")
+	cfg.RunnerStartTimeout = 300 * time.Millisecond
+	ts := startServer(t, cfg)
+	f := &fakeRunner{ts: ts, name: "slow", instance: "i1"}
+	id := ts.detach("", "--no-workspace", "--", "true")
+	f.poll(1)
+	var resp api.RunnerPollResponse
+	eventually(t, "requeue of a never started job", func() bool {
+		_, resp = f.poll(0, id) // the runner holds it but never starts it
+		return slices.Contains(resp.Cancel, id)
+	})
+	if j := ts.status(id); j.State != api.Queued || j.Runner != "" {
+		t.Errorf("requeued: %+v", j)
 	}
 }

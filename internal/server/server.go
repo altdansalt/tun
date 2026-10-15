@@ -47,6 +47,11 @@ type Config struct {
 	HubOnly         bool
 	RunnerPollWait  time.Duration // how long a runner's poll waits for work; default 25s
 	RunnerDeadAfter time.Duration // a runner silent for this long is lost; default 30s
+	// RunnerBackstop: how long past its timeout (or a requested kill) plus KillGrace a live
+	// runner's command may still be running before the hub ends the job itself; default 5m.
+	RunnerBackstop time.Duration
+	// RunnerStartTimeout: an assigned job not started by then is requeued; default 10m.
+	RunnerStartTimeout time.Duration
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
@@ -59,7 +64,8 @@ type Server struct {
 	queue   []*job // FIFO of queued jobs
 	running int    // local non-service jobs
 	svc     services
-	runners map[string]*runnerState
+	runners map[string]*runnerState // the current instance of each runner name
+	retired map[string]*runnerState // by instance id: superseded or dropped instances
 	closed  bool
 	quit    chan struct{} // closed by Close
 	wg      sync.WaitGroup
@@ -77,10 +83,13 @@ type job struct {
 	cancelReq bool
 
 	// Runner jobs (see hub.go).
-	assignedAt time.Time  // given to a runner, which has not started it yet (state queued)
-	killReq    string     // end state the hub asked the runner for (canceled)
-	killReqAt  time.Time  //
-	logMu      sync.Mutex // serializes log chunk writes
+	assignedAt time.Time       // given to a runner, which has not started it yet (state queued)
+	killReq    string          // end state the hub asked the runner for (canceled)
+	killReqAt  time.Time       //
+	rn         *runnerState    // the runner instance it is assigned to
+	exitedAt   time.Time       // the runner reported the command ended (.../exited)
+	exited     *api.RunnerDone // what it reported then
+	logMu      sync.Mutex      // serializes log chunk writes
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`
 	OutSkipped []string `json:"out_skipped,omitempty"`
@@ -98,6 +107,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.RunnerDeadAfter <= 0 {
 		cfg.RunnerDeadAfter = 30 * time.Second
+	}
+	if cfg.RunnerBackstop <= 0 {
+		cfg.RunnerBackstop = 5 * time.Minute
+	}
+	if cfg.RunnerStartTimeout <= 0 {
+		cfg.RunnerStartTimeout = 10 * time.Minute
 	}
 	if cfg.RunnerPollWait <= 0 {
 		cfg.RunnerPollWait = 25 * time.Second
@@ -123,7 +138,7 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 	}
-	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, quit: make(chan struct{})}
+	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, retired: map[string]*runnerState{}, quit: make(chan struct{})}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
 	}
@@ -290,6 +305,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runner/poll", auth(s.runnerPoll))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/started", auth(s.runnerStarted))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/done", auth(s.runnerDone))
+	mux.HandleFunc("POST /v1/runner/jobs/{id}/exited", auth(s.runnerExited))
+	mux.HandleFunc("POST /v1/runner/leave", auth(s.runnerLeave))
 	mux.HandleFunc("PUT /v1/runner/jobs/{id}/outputs", auth(s.runnerOutputs))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/{stream}", auth(s.runnerLog))
 	mux.HandleFunc("POST /v1/jobs", auth(s.createJob))
@@ -476,8 +493,8 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	case isRunnerJob(j) && j.State == api.Running:
 		if j.killReq == "" {
 			j.killReq, j.killReqAt = api.Canceled, time.Now()
-			if rn := s.runners[j.Runner]; rn != nil {
-				rn.poke()
+			if j.rn != nil {
+				j.rn.poke()
 			}
 		}
 	case j.kill != nil:

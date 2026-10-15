@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
@@ -51,18 +52,21 @@ type Runner struct {
 	cfg      RunnerConfig
 	instance string
 	host     string
+	previous string          // the instance that used the data dir before
+	lock     *os.File        // flock on the data dir: one runner process per data dir
 	seq      int64           // polls sent (only the Run goroutine touches it)
 	ctx      context.Context // canceled by Kill: no more requests, jobs abandoned
 	kill     context.CancelFunc
 	pollCtx  context.Context // canceled to stop taking work
 	stopPoll context.CancelFunc
 
-	mu       sync.Mutex
-	jobs     map[string]*runnerJob
-	draining bool
-	wg       sync.WaitGroup
-	blobMu   sync.Mutex
-	blobLock map[string]*sync.Mutex
+	mu         sync.Mutex
+	jobs       map[string]*runnerJob
+	draining   bool
+	superseded string // the hub's message once a newer instance took this runner's name
+	wg         sync.WaitGroup
+	blobMu     sync.Mutex
+	blobLock   map[string]*sync.Mutex
 }
 
 type runnerJob struct {
@@ -86,7 +90,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		cfg.KeepBlobs = 24 * time.Hour
 	}
 	if cfg.HTTP == nil {
-		cfg.HTTP = &http.Client{}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.ResponseHeaderTimeout = 2 * time.Minute // polls are answered within ~25s
+		cfg.HTTP = &http.Client{Transport: tr}
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -106,6 +112,21 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Two runners on one data dir would wipe and reuse each other's job dirs.
+	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return nil, fmt.Errorf("data dir %s is in use by another tun runner (%v); give each runner its own --data (and --name)", dir, err)
+	}
+	instance := randHex(8)
+	prev, _ := os.ReadFile(filepath.Join(dir, "instance"))
+	if err := os.WriteFile(filepath.Join(dir, "instance"), []byte(instance+"\n"), 0o600); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	if err := workspace.RemoveAll(filepath.Join(dir, "jobs")); err != nil {
 		return nil, fmt.Errorf("cleaning old job dirs: %v", err)
 	}
@@ -115,7 +136,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		}
 	}
 	host, _ := os.Hostname()
-	r := &Runner{cfg: cfg, instance: randHex(8), host: host, jobs: map[string]*runnerJob{}, blobLock: map[string]*sync.Mutex{}}
+	r := &Runner{cfg: cfg, instance: instance, previous: strings.TrimSpace(string(prev)), lock: lock, host: host, jobs: map[string]*runnerJob{}, blobLock: map[string]*sync.Mutex{}}
 	r.ctx, r.kill = context.WithCancel(context.Background())
 	r.pollCtx, r.stopPoll = context.WithCancel(r.ctx)
 	return r, nil
@@ -154,8 +175,30 @@ func (r *Runner) Run() {
 		for _, j := range resp.Jobs {
 			r.startJob(j)
 		}
+		if resp.Superseded != "" {
+			r.mu.Lock()
+			if r.superseded == "" {
+				r.cfg.Logf("tun runner: %s; finishing %d jobs, then exiting", resp.Superseded, len(r.jobs))
+			}
+			r.superseded, r.draining = resp.Superseded, true
+			left := len(r.jobs)
+			r.mu.Unlock()
+			if left == 0 {
+				break
+			}
+			sleepCtx(r.pollCtx, 250*time.Millisecond) // the hub answers at once: keep a heartbeat
+		}
 	}
 	r.wg.Wait()
+	r.lock.Close()
+}
+
+// Superseded is the hub's message if Run returned because a newer runner instance took
+// this runner's name ("" otherwise).
+func (r *Runner) Superseded() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.superseded
 }
 
 // Kill stops the runner like a crash: commands are killed, nothing more is reported (the
@@ -189,6 +232,11 @@ func (r *Runner) Shutdown(timeout time.Duration) {
 	go func() { r.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		// Tell the hub, so it stops counting this runner's slots now rather than once it is
+		// overdue.
+		ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
+		r.postJSON(ctx, "/v1/runner/leave", api.RunnerLeave{Name: r.cfg.Name, Instance: r.instance}, nil)
+		cancel()
 	case <-time.After(timeout):
 		r.Kill()
 		<-done
@@ -214,6 +262,7 @@ func (r *Runner) do(ctx context.Context, method, p string, body io.Reader) (*htt
 	req.Header.Set("X-Tun-Token", r.cfg.Token)
 	req.Header.Set("Authorization", "Bearer "+r.cfg.Token)
 	req.Header.Set(api.HeaderRunner, r.cfg.Name)
+	req.Header.Set(api.HeaderRunnerInstance, r.instance)
 	req.Header.Set("X-Tun-Client", r.host) // the hub tells a restart from a name clash by it
 	return r.cfg.HTTP.Do(req)
 }
@@ -236,6 +285,8 @@ func hubError(resp *http.Response) error {
 
 // postJSON sends in as JSON and decodes a 2xx answer into out (if not nil).
 func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute) // a hung hub connection must not stall the runner
+	defer cancel()
 	b, err := json.Marshal(in)
 	if err != nil {
 		return err
@@ -257,7 +308,7 @@ func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
 func (r *Runner) poll() (api.RunnerPollResponse, error) {
 	r.mu.Lock()
 	r.seq++
-	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
+	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Previous: r.previous, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
 		NetworkIsolation: r.cfg.PrivateNet, Running: []string{}}
 	for id := range r.jobs {
 		req.Running = append(req.Running, id)
@@ -331,7 +382,7 @@ func (r *Runner) handle(j *runnerJob) {
 		r.cfg.Logf("tun runner: job %s: dropped", id)
 		return
 	}
-	if res.State == api.Failed && res.Msg == "" {
+	if res.State == api.Failed && res.Msg == "" { // shut down before the command started
 		res.Msg = fmt.Sprintf("runner %s shut down while the job was running", r.cfg.Name)
 	}
 	done.State, done.ExitCode, done.Signal, done.Error = res.State, res.Code, res.Sig, res.Msg
@@ -425,6 +476,17 @@ func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
 	<-shipped
 	if res.State == "crash" {
 		return res, done
+	}
+	if res.State == api.Failed && res.Msg == "" {
+		res.Msg = fmt.Sprintf("runner %s shut down while the job was running", r.cfg.Name)
+	}
+	// Report the result now: shipping logs and outputs may take a while, and the hub's
+	// timeout backstop must not count that as the command running.
+	ex := api.RunnerDone{State: res.State, ExitCode: res.Code, Signal: res.Sig, Error: res.Msg}
+	if err := r.retry(time.Minute, func() error {
+		return r.postJSON(r.ctx, "/v1/runner/jobs/"+spec.ID+"/exited", ex, nil)
+	}); errors.Is(err, errGone) {
+		return procResult{State: "crash"}, done
 	}
 	if err := r.retry(10*time.Minute, func() error { return r.shipLogs(spec.ID, &sent) }); err != nil {
 		r.cfg.Logf("tun runner: job %s: shipping logs: %v", spec.ID, err)

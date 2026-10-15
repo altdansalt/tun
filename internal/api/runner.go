@@ -8,8 +8,12 @@ import "time"
 // LocalRunner is the Job.Runner value of jobs run by the hub itself.
 const LocalRunner = "local"
 
-// HeaderRunner names the runner on every /v1/runner/jobs/... request.
-const HeaderRunner = "X-Tun-Runner"
+// HeaderRunner names the runner on every /v1/runner/jobs/... request; HeaderRunnerInstance
+// (optional) is its RunnerPoll.Instance, so one instance can't act on another's jobs.
+const (
+	HeaderRunner         = "X-Tun-Runner"
+	HeaderRunnerInstance = "X-Tun-Runner-Instance"
+)
 
 // MaxOutputs is the most --out paths one job may declare.
 const MaxOutputs = 256
@@ -17,7 +21,10 @@ const MaxOutputs = 256
 // RunnerPoll is the body of POST /v1/runner/poll. It doubles as the runner's heartbeat.
 type RunnerPoll struct {
 	Name     string `json:"name"`
-	Instance string `json:"instance"` // random per runner process: tells a restart from a name clash
+	Instance string `json:"instance"` // random per runner process
+	// Previous is the instance that last used this runner's data dir (which it holds locked):
+	// that process is gone, so the hub fails its jobs at once instead of waiting for it.
+	Previous string `json:"previous,omitempty"`
 	// Seq increases with every poll of an instance; the hub ignores a poll older than one it
 	// has seen (a request delayed in the network must not undo newer state). 0: unsequenced.
 	Seq     int64    `json:"seq,omitempty"`
@@ -32,6 +39,16 @@ type RunnerPoll struct {
 type RunnerPollResponse struct {
 	Jobs   []RunnerJob `json:"jobs"`
 	Cancel []string    `json:"cancel"`
+	// Superseded is set when a newer instance took over this runner's name: this instance
+	// gets no more work, should finish the jobs it holds (polling on as its heartbeat), then
+	// exit.
+	Superseded string `json:"superseded,omitempty"`
+}
+
+// RunnerLeave is the body of POST /v1/runner/leave: a runner shutting down cleanly.
+type RunnerLeave struct {
+	Name     string `json:"name"`
+	Instance string `json:"instance"`
 }
 
 // RunnerJob is one job assignment: everything the runner needs to run it.
@@ -57,7 +74,9 @@ type LogAck struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// RunnerDone is the body of POST /v1/runner/jobs/{id}/done.
+// RunnerDone is the body of POST /v1/runner/jobs/{id}/done, and of .../exited (sent as soon
+// as the command has ended, before the remaining logs and the outputs are shipped; the
+// outputs fields are then empty).
 type RunnerDone struct {
 	State    string `json:"state"`
 	ExitCode *int   `json:"exit_code"`

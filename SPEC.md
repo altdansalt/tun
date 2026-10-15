@@ -44,7 +44,8 @@ tun runners                       (JSON lines: the server's live runners)
 ```
 `tun logs --tail N`: only the last N lines (a final line without a newline counts); with `-f`,
 start at the last N lines present when it connects, then follow until the job ends.
-`tun run --out PATH` (repeatable): after the job ends (any state), download PATH (relative to the
+`tun run --out PATH` (repeatable; with `--detach` it only declares the outputs, for a later
+`tun get`): after the job ends (any state), download PATH (relative to the
 workspace root; file, dir, or `path.Match` glob) from the job's work dir into the same relative path
 of the local workspace root (`tun get`: or under `-o DIR`), replacing existing files (temp + rename),
 (the paths are also sent with the job as `outputs`: a job that runs on a runner keeps only those),
@@ -235,8 +236,10 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
   `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
   (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
-  work, kills its jobs and reports them `failed` ("runner N shut down"); a second signal quits
-  at once.
+  work, kills its jobs, reports them `failed` ("runner N shut down") and tells the hub it is
+  leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
+  signal quits at once. A runner flocks its data dir: a second runner on the same dir refuses
+  to start. All its hub requests have timeouts (2 minutes; polls 90s).
 - Scheduling: one FIFO; the head job goes to whichever free slot asks first: one of the hub's
   `--local-slots` (default `--max-jobs`; `0` = pure hub that only dispatches) or a runner's.
   Services always run on the hub (not counted in either). healthz `max_jobs` = local slots +
@@ -244,12 +247,14 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   unpack workspaces at all; the runner enforces `--max-workspace` (the job then fails instead
   of a 413 at creation). With local slots the hub unpacks at creation as before (and deletes
   its copy once a runner starts the job).
-- Protocol (all runner-initiated, bearer auth, `X-Tun-Runner: <name>` on job requests):
-  - `POST /v1/runner/poll` `{name, instance, seq, slots, running: [ids], sandbox, network_isolation}` long-polls
+- Protocol (all runner-initiated, bearer auth, `X-Tun-Runner: <name>` and
+  `X-Tun-Runner-Instance: <instance>` on job requests; a job is only touched by the instance
+  it was assigned to):
+  - `POST /v1/runner/poll` `{name, instance, previous, seq, slots, running: [ids], sandbox, network_isolation}` long-polls
     (up to 25s) and is the heartbeat. `instance` is random per runner process; `seq` grows
     with each poll and a poll at or below the highest seen is answered empty and ignored (a
     delayed request must not undo newer state). The answer
-    `{jobs: [assignment], cancel: [ids]}`: assignments carry the full spec (argv/script, cwd,
+    `{jobs: [assignment], cancel: [ids], superseded}`: assignments carry the full spec (argv/script, cwd,
     env, timeout_sec, workspace sha, outputs) and the hub's max_log/max_workspace/max_download;
     `cancel` lists held ids the runner must kill and drop (canceled, ended or unknown on the
     hub, or no longer its). A job assigned while a poll waits is sent at once.
@@ -258,7 +263,9 @@ client API is unchanged. Job state, logs and outputs live on the hub.
     unpacked and right before the command starts. This is the commit point: a job canceled
     before it ends `canceled` and the call is a 410, so the runner never starts it. If a poll
     that arrived after the assignment doesn't list the job, the answer was lost and the job
-    goes back to the queue in creation order.
+    goes back to the queue in creation order, and so does an assignment not started within
+    10 minutes (the runner can't fetch or unpack it). The check and the transition are one
+    critical section on the hub, as for done.
   - `GET /v1/blobs/{sha}` fetches the workspace; the runner verifies the hash and caches it by
     sha (unused for 24h: deleted).
   - `POST /v1/runner/jobs/{id}/stdout?offset=N` (and `/stderr`): a chunk (at most 8MB) that
@@ -266,6 +273,10 @@ client API is unchanged. Job state, logs and outputs live on the hub.
     overlaps are harmless; a chunk past the hub's end is a 409; both answer `{offset}` = the
     hub's size, where the runner resumes. The runner caps logs at the hub's `--max-log` (same
     marker); the hub stops writing a little past it as a backstop.
+  - `POST /v1/runner/jobs/{id}/exited` `{state, exit_code, signal, error}` as soon as the
+    command has ended, before the rest of the logs and the outputs are shipped: from then on
+    the hub's timeout backstop doesn't apply, and if the runner is lost before done the job
+    ends with this result (its error notes that logs/outputs may be incomplete).
   - `PUT /v1/runner/jobs/{id}/outputs`: a tar of the declared outputs, then
     `POST /v1/runner/jobs/{id}/done` `{state, exit_code, signal, error, outputs_missing,
     outputs_skipped, outputs_error}` (exited|failed|timeout|canceled; a kill the hub asked for
@@ -273,14 +284,21 @@ client API is unchanged. Job state, logs and outputs live on the hub.
     hub no longer wants the job: the runner kills and drops it.
 - Liveness: a runner that hasn't polled for `--runner-timeout` (default 30s) is lost: its
   running jobs fail ("runner N lost: no poll for Xs"), unstarted assignments are requeued.
-  A poll from a new instance under a known name is a restart if it comes from the same source
-  (exe.dev source VM, else the hostname the runner sends) or the old instance is overdue: the
-  old instance's jobs fail. From another source while the old one is live it is a 409 (name
-  clash). A running job that the runner's poll no longer lists fails.
-- Timeouts are enforced by the runner (same semantics as local); the hub backstops: a runner
-  job still running `timeout + kill grace + --runner-timeout` after it started ends `timeout`
-  ("enforced by the hub"), and a cancel not confirmed within `kill grace + --runner-timeout`
-  ends as requested. Cancel of a running runner job is delivered via the poll answer
+  The newest instance of a name wins. A poll from a new instance takes the name over: if the
+  old instance is overdue, or the new one's `previous` (the instance that last held its data
+  dir, read from the dir at start) names it, the old instance is gone and its jobs fail at
+  once ("runner N restarted"). Otherwise the old instance is *retired*: its unstarted jobs
+  are requeued, it gets no more work, and its polls (still its heartbeat) are answered with
+  `superseded` set; it finishes and reports the jobs it holds, then exits (status 1). So two
+  live runners with one name don't fight: the older one drains. Polls from retired instances
+  never touch the current one (retired ids are remembered for an hour after their last job),
+  and within one instance `seq` is checked before anything is updated. A running job that
+  its instance's poll no longer lists fails.
+- Timeouts are enforced by the runner (same semantics as local); the hub backstops a live
+  runner that never reports the end: a job whose runner hasn't said `exited` by `timeout +
+  kill grace + 5 minutes` after it started ends `timeout` ("enforced by the hub"), and a
+  cancel not confirmed within `kill grace + 5 minutes` ends as requested. (A dead runner is
+  handled by liveness, within `--runner-timeout`.) Cancel of a running runner job is delivered via the poll answer
   (the waiting poll is woken).
 - Hub restart: jobs a previous hub left `running` on a runner are kept running and adopted
   when that runner polls and lists them (logs resume at the hub's offsets); if no runner
@@ -291,7 +309,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   the work dir with the files endpoint's rules (os.Root, symlink and special-file rules,
   `--max-download`, entry limit) and uploads one tar. `GET /v1/jobs/{id}/files` for a runner
   job serves from that tar: a requested path must be one of the outputs or inside one (else
-  409, naming the declared paths and suggesting `--out PATH`); missing/skipped headers and the
+  409, naming the declared paths and suggesting `--out PATH`, also with `--detach`); missing/skipped headers and the
   complete trailer work as for local jobs; a size-limit failure is a 413 with the same
   message. Retention deletes the tar with the work dir (`--keep-work`, then 410). Hub-local
   jobs keep serving any path from the work dir.
