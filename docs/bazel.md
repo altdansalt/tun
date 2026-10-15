@@ -544,7 +544,8 @@ manifest sync, per-client caches and BEP parser. Runner log chunks, cancellation
 exit/done acknowledgements use the existing transport. The engine's parent runner data dir
 is hidden in bwrap, including v0 jobs. Session caches remain per client on each host.
 
-The runner's Unix cache socket is an HTTP/2 reverse proxy to the hub. Each lease has a
+The runner's Unix cache socket terminates HTTP/2 gRPC and bridges to binary gRPC-Web
+over HTTP/1.1 to the hub (see the proxy correction below). Each lease has a
 random server-issued cache credential, retained outside the sandbox. The hub binds that
 credential to the lease's client namespace and revokes it on eviction or host loss; it
 cannot authorize the ordinary tun API. Identity headers from the sandbox cannot change
@@ -770,3 +771,159 @@ Selected workspace/server targets bound shared-host work; Gazelle is the externa
 profile. This exercises warm sessions plus the existing cache, with no remote
 execution flags or milestone deviation. Healthz is the authority for the deployment
 actually measured; missing load fields are unknown, never zero.
+## Cache transport over HTTP/1 proxies (fix/cache-over-proxy)
+
+The deployed runner→exe.dev→hub path negotiates HTTP/2 at the public TLS endpoint
+(`curl --http2 -v` accepted h2 on 2026-10-15), but reaches the backend over HTTP/1.1.
+Native gRPC response trailers and the hub's HTTP/2 requirement made every runner
+session cache handshake fail with Bazel exit 34. Direct h2c fixtures missed that hop.
+
+The runner now terminates native gRPC at its local session socket and sends binary
+gRPC-Web (`application/grpc-web+proto`) over HTTP/1.1. Protobuf request frames are
+unchanged, including chunked ByteStream Write uploads. The hub writes status/message
+as the final 0x80 body frame; the runner incrementally translates it back to native
+HTTP/2 trailers. ByteStream Read and future Execute/WaitExecution response frames
+stream without buffering the entire RPC. Missing/truncated trailer frames fail the
+transport rather than becoming success. Authentication, scoped lease credentials,
+namespace selection, cancellation and RPC deadlines retain their existing paths.
+
+This follows the agreed Bazel-native direction; no milestone change. Binary gRPC-Web
+only: no browser CORS support or base64 text mode. Bazel itself still speaks native
+gRPC and requires a local bridge when a remote endpoint has an HTTP/1 backend hop.
+
+### Remote-execution branch audit
+
+At `origin/feat/bazel-rbe`, `internal/server/actions.go:executeAction` builds a
+`reapi.RemoteStore`: Fetch and Upload call `POST /v1/runner/cas` using JSON
+`casTransfer{Digest, Data, Upload}`. These transfers use the ordinary runner HTTP
+client and survive HTTP/1 proxies; they do not use the session's native gRPC hop.
+They buffer whole blobs (JSON base64, 96MiB decoded limit), an existing design limit.
+Execute/WaitExecution client streams do use the gRPC seam; the binary response-frame
+bridge added here can carry them when that branch merges.
+
+Merge note: main now uses the same `POST /v1/runner/cas` path for workspace sync
+(JSON digest list → tar response), whereas the execution branch expects a JSON
+object and response. Reconcile those schemas or give action CAS a separate route
+when merging RBE; the path collision is separate from proxy protocol compatibility.
+
+### Reproduction
+
+```sh
+tun run --timeout 20m -c 'DEV_TUN_SERVE_ARGS="--local-slots 0" scripts/dev-tun.sh scripts/bench-cache-proxy.sh'
+```
+
+This creates only private hub/runner/proxy processes. Each step uses
+`tun bazel --cold test //internal/workspace:workspace_test`: seed, warm remote cache,
+then both remote and disk caches disabled. The runner reaches the private hub through
+an HTTP/1-only httputil.ReverseProxy. All Bazel output roots remain under job TMPDIR.
+
+### Real proxy and validation observations (2026-10-15)
+
+The VM's authenticated HTTP/1.1 chunked upload to the deployed
+`PUT /v1/blobs/{sha}` returned 201 for 10,485,760 bytes in 1.103s. A rejected
+session-cache request alone was insufficient evidence: its credential error arrived
+before the upload finished.
+
+For a complete gRPC-Web check, service job `20261015T150815263913-e0bb28a2` on tun-r4
+ran this branch's private REAPI handler with an HTTP/1-only listener. Requests from
+the VM went through `https://tun.int.exe.xyz/v1/jobs/ID/ports/7071/`, including the real
+exe.dev proxy and the hub→runner service tunnel. A private service header supplied
+the inner handler's token (the outer tun token was stripped by the service proxy).
+A 10MiB random ByteStream Write used chunked HTTP/1 requests with 64KiB protobuf
+messages. After sending only the first message, the client paused and made a separate
+QueryWriteStatus request: the backend reported 65,536 committed bytes **before the
+remaining upload was sent**. This verifies request-body streaming across the real
+proxy, rather than merely accepting a buffered request.
+
+Write completed in **2.001s**, Read in **2.698s** (160 response messages); both returned
+body-framed grpc-status=0, and the downloaded bytes matched the original SHA256.
+The private service was canceled immediately afterward. The shared server was never
+replaced or restarted. This exercises the real proxy against a private handler; it
+does not claim a shared-deployment rollout of the new hub/runner binaries.
+
+The real-Bazel cross-host cache/isolation test now puts runner→hub traffic behind
+an HTTP/1-only ReverseProxy. It passed with race detection in outer job
+`20261015T150519578915-7aba2f44` on tun-r4 (244.101s job, 338.793s queued):
+seed, cache hit after runner loss, and a different client's cache miss. The 10MiB
+in-process streaming upload/download and path/redirect security tests passed there too.
+The upload test gates the remaining request on the backend ingesting the first chunk.
+
+Gazelle ran in `20261015T150636471159-24c1fcb9` on tun-r3: 110.504s execution,
+377.997s queued, 64 disk cache hits; only BUILD source ordering changed.
+RBE audit above is against branch tip `20c1a73`.
+
+### Cold-session cache comparison
+
+Outer job `20261015T150412969517-4b3feddf` ran on tun-r2. All three private
+runner-hosted commands passed, using Bazel 9.3.0 and this checkout's workspace test.
+Each discarded the JVM, analysis state and output base (`--cold`). The measured
+duration includes Bazel startup and execution, excludes workspace sync/admission;
+Bazel's own elapsed time is shown separately.
+
+| Cache state | Command duration | Bazel elapsed | Actions | Private job |
+|---|---:|---:|---|---|
+| Empty remote cache (seed) | 489.104s | 484.195s | 12 linux-sandbox | `20261015T150437467915-00b7f7c6` |
+| Warm remote cache | **102.107s** | 100.292s | **12 remote cache hits**, no local actions | `20261015T151247373624-065c3ddc` |
+| Remote and disk caches disabled | **448.003s** | 446.385s | 12 linux-sandbox | `20261015T151434678287-42fe2ccf` |
+
+Warm remote cache took **77.2% less command time (4.39× faster)** than no cache.
+This is one shared-host sample per state, not a throughput/SLA result or a comparison
+against a warm disk cache. Cold analysis, extraction and JVM startup still cost about
+100s on this loaded host. The seed and uncached run both spent about 354s on their
+critical paths compiling the Go toolchain/stdlib. No heavy Bazel work ran on the VM.
+
+The outer job's final exit was 1 **after all three successful commands** because its
+benchmark cleanup tried to remove Bazel's read-only output directories. The harness
+now makes only its private directories writable before unlinking their contents;
+it does not chmod artifact files or follow directory symlinks. The measured cache
+commands were not rerun for this cleanup-only correction.
+
+### Validation follow-ups and tun friction
+
+Full vet/build/race job `20261015T150230668265-210aceb3` on tun-r1 took 819.797s
+(28.599s queued). Vet/build and REAPI (232.401s), sandbox, server and workspace tests
+passed. Client tests reported one failure: the cancellation-race fixture's fake runner
+was expired by its one-second heartbeat budget during a loaded batch. The fixture now
+allows one minute between polls; it still tests the same start/cancel race. Its focused
+race rerun passed in 23.500s in `20261015T151227072904-9cfb4cc6` on tun-r3.
+
+Final streaming/malformed-response regressions passed in
+`20261015T151325874876-1d565c24` on tun-r5: 11.407s execution, **483.398s queued**.
+They caught and fixed EOF before a trailer payload (plain EOF must never hide a
+truncated trailer frame). Missing trailers, truncated headers/messages, compressed
+frames and missing status also fail closed.
+
+The ordinary CLI smoke passed in `20261015T151227072904-9cfb4cc6`, but its subsequent
+session hub restart check exposed a test-ordering deadlock: the hub exited after a
+successful 49.6s command, while the script waited for the attached client's retry
+before restarting the hub. The test now restarts the hub before waiting for that
+client, matching its existing queued-command restart test. This does not change
+production restart behavior. The complete job was 321.099s with 360.399s queued;
+it did not reach the separate runner smoke suite.
+
+Other concrete friction: initial submissions retried without a job ID while the shared
+hub returned 503 "server draining for restart" despite healthz `ok=true`. Queues took
+339–483s even for short focused checks. The first private benchmark attempt,
+`20261015T150231866978-399285d3` on tun-r4, failed workspace CAS sync with unexpected
+EOF before Bazel started; the diagnostic rerun succeeded without a transport change
+and the cause remains unisolated. Cold JVM/toolchain startup dominates quick tests;
+`--tail` heartbeats show liveness but Go's package buffering hides individual test
+progress. The documented BuildBuddy fallback passed the initial focused bridge tests
+(invocation `0dca4213-22ed-4116-8ece-ee6236387b61`); a fallback benchmark attempt had
+no Go on PATH, so measurements returned to tun once its drain finished.
+
+All five corrected real-process restart cases passed in outer job
+`20261015T152444081313-926065ca` on tun-r4 (19.894s queued): ordinary hub, runner
+and pure-hub drains were 3.150/2.849/4.199s; session hub and runner drains were
+61.049/54.392s, each retaining logs/artifacts and producing a cache hit after restart.
+Its subsequent runner smoke was invoked without the required zero-local-slot hub
+flags, so that setup failed its placement assertion and is not a valid runner-smoke
+result. The runner suite is rerun separately with the documented zero-slot setup.
+
+The separate zero-slot runner smoke **passed** in
+`20261015T152941973292-5e060c32` on tun-r6: 128.300s execution, 332.881s queued.
+It checked network isolation, real Bazel cache socket forwarding/warm affinity,
+artifacts and test logs by label, runner services, concurrent placement, cancellation,
+runner loss and SIGTERM draining. Together with the passing ordinary smoke, corrected
+restart suite and focused race regressions above, this completes validation; no shared
+hub or runner process was restarted by this task.

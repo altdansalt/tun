@@ -74,7 +74,7 @@ slots on their session host; a lost host means a cold session on the next comman
 cache, disk cache) in $DATA/bazel.
 
 Remote cache (--cache-dir, default "reapi" in the data dir; --cache-dir= disables it): Bazel's
-remote cache protocol (REAPI gRPC over h2c) on this listener and on $DATA/cache.sock, both
+remote cache protocol (REAPI gRPC over h2c, binary gRPC-Web over HTTP/1.1) on this listener and on $DATA/cache.sock, both
 with the token (Bazel: --remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN).
 Every tun bazel session uses it without asking: tun's bazelrc points Bazel at the session's
 own socket, which needs no token. File contents are shared (they are verified); action

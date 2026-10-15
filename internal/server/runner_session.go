@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/workspace"
 )
 
@@ -34,8 +35,10 @@ func (r *Runner) newSessionHost() error {
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Protocols = new(http.Protocols)
-	tr.Protocols.SetHTTP2(true)
-	tr.Protocols.SetUnencryptedHTTP2(true)
+	tr.Protocols.SetHTTP1(true)
+	// HTTP/1 means one connection per concurrent RPC; keep a Bazel-sized pool warm so cache
+	// bursts don't pay a TLS handshake through the proxy per call.
+	tr.MaxIdleConnsPerHost = 64
 	r.sessionTransport = tr
 	// HTTP upgrades require HTTP/1.1, including when the hub advertises h2 over TLS.
 	base := http.DefaultTransport.(*http.Transport)
@@ -57,7 +60,7 @@ func (r *Runner) newSessionHost() error {
 	r.serviceHTTP = &http.Client{Transport: st}
 
 	s.sessionProxy = func(sess *session) http.Handler {
-		proxy := &httputil.ReverseProxy{Transport: tr, ModifyResponse: func(resp *http.Response) error { resp.Header.Del("Location"); return nil }, Rewrite: func(p *httputil.ProxyRequest) {
+		proxy := &httputil.ReverseProxy{Transport: reapi.WebTransport{Base: tr}, ModifyResponse: func(resp *http.Response) error { resp.Header.Del("Location"); return nil }, Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(target)
 			p.Out.URL.Path = target.Path + "/v1/session-cache" + p.In.URL.Path
 			p.Out.URL.RawPath = ""

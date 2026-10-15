@@ -6,6 +6,7 @@ go_library(
         "action.go",
         "grpc.go",
         "store.go",
+        "web.go",
         "wire.go",
     ],
     importpath = "github.com/altdansalt/tun/internal/reapi",

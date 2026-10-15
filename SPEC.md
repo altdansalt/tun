@@ -596,7 +596,8 @@ Errors: JSON `{"error": "..."}` with proper status codes; malformed query parame
 ## Bazel remote cache
 
 `--cache-dir DIR` (default `reapi`; relative DIR is under DATA; empty disables it) serves
-stdlib-only REAPI gRPC over h2c on the existing HTTP listener and `DATA/cache.sock`
+stdlib-only REAPI gRPC over h2c and binary gRPC-Web over HTTP/1.1 on the existing HTTP
+listener and `DATA/cache.sock`
 (override with `--cache-socket`). Both endpoints accept `x-tun-token` or `authorization:
 Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS (FindMissingBlobs, BatchUpdateBlobs,
 BatchReadBlobs, GetTree), ActionCache and ByteStream (Read, Write, QueryWriteStatus), SHA256
@@ -676,7 +677,11 @@ with four concurrent requests. Both hosts use the same session engine, agent, ma
 Logs use the existing offset protocol; exit/done also carries the summary and BEP JSON.
 The hub's poll response carries authoritative session leases; revoked idle sessions stop.
 
-On runners `/tun/sock/cache.sock` serves an HTTP/2 reverse proxy to the hub REAPI cache.
+On runners `/tun/sock/cache.sock` terminates native HTTP/2 gRPC and forwards binary
+gRPC-Web (`application/grpc-web+proto`) to the hub over HTTP/1.1. Request frames stream
+unchanged; response trailers travel in a final body frame and become native gRPC trailers
+at the socket. Neither blobs nor whole RPCs are buffered by the bridge. This works through
+HTTP/1.1-only reverse proxies, including the exe.dev backend hop.
 The server issues a random per-session credential in the assignment, kept in runner memory;
 the sandbox sees only its socket. `/v1/session-cache/{rpc}` authenticates with `X-Tun-Session` and
 `X-Tun-Session-Credential` headers, using a session map lookup and constant-time comparison,

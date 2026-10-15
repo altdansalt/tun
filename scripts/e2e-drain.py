@@ -130,14 +130,18 @@ with tempfile.TemporaryDirectory() as tmp:
                 target = worker if signal_runner else hub
                 drain_start = time.monotonic()
                 target.send_signal(signal.SIGTERM)
-                assert job.wait(timeout=120) == 0, contents(name+"-job", "err")
+                if signal_runner:
+                    assert job.wait(timeout=120) == 0, contents(name+"-job", "err")
                 assert target.wait(timeout=120) == 0
                 seconds = time.monotonic()-drain_start
                 if signal_runner:
                     worker = launch(rargs, name+"-worker2", env)
                 else:
+                    # The command can finish before its client fetches final
+                    # status. Restart the hub so that client's retry can finish.
                     hub = launch(args, name+"-server2")
                     until(lambda: urllib.request.urlopen(url+"/v1/healthz").status == 200)
+                    assert job.wait(timeout=120) == 0, contents(name+"-job", "err")
                 logs = subprocess.check_output(["tun", "logs", "--stderr", jid], env=env, text=True)
                 assert "tun: bazel build exit=0" in logs, logs
                 subprocess.run(["tun", "get", "-o", ws+"/got", jid, "//:slow"], env=env, check=True)
