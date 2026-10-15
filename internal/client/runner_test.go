@@ -28,13 +28,6 @@ func hubConfig(data string) server.Config {
 	return server.Config{DataDir: data, HubOnly: true, RunnerPollWait: 100 * time.Millisecond, RunnerDeadAfter: time.Second}
 }
 
-// release returns -e flags and a shell snippet that waits until the returned func is called.
-// Jobs here run unsandboxed on this host, so a file in a test dir works as the signal.
-func release(t *testing.T) (env []string, wait string, done func()) {
-	p := filepath.Join(t.TempDir(), "release")
-	return []string{"-e", "REL=" + p}, `while [ ! -e "$REL" ]; do sleep .01; done`, func() { os.WriteFile(p, nil, 0o644) }
-}
-
 type testRunner struct {
 	r    *server.Runner
 	done chan struct{}

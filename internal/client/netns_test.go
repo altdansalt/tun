@@ -17,20 +17,7 @@ import (
 
 	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/sandbox"
-	"github.com/altdansalt/tun/internal/server"
 )
-
-// netServer runs jobs under bwrap with a private network namespace each.
-func netServer(t *testing.T) *testServer {
-	t.Helper()
-	if !sandbox.BwrapUsable() {
-		t.Skip("bwrap not installed or unusable on this host")
-	}
-	if err := sandbox.NetUsable(); err != nil {
-		t.Skipf("no private network namespaces here: %v", err)
-	}
-	return startServer(t, server.Config{Sandbox: sandbox.Bwrap, PrivateNet: true})
-}
 
 func TestNetIsolation(t *testing.T) {
 	ts := netServer(t)

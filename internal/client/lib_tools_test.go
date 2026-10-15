@@ -1,3 +1,5 @@
+// Shared test helpers (:testlib): the hermetic Go and Bazel binaries under bazel test.
+
 package client
 
 import (

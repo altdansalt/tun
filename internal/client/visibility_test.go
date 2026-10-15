@@ -17,15 +17,6 @@ import (
 	"github.com/altdansalt/tun/internal/server"
 )
 
-func (ts *testServer) health() api.Health {
-	ts.t.Helper()
-	h, err := ts.client().Health(context.Background())
-	if err != nil {
-		ts.t.Fatal(err)
-	}
-	return h
-}
-
 func TestQueueVisibility(t *testing.T) {
 	t.Parallel()
 	ts := startServer(t, server.Config{MaxJobs: 1})

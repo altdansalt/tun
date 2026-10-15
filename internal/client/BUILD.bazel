@@ -1,5 +1,8 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# The tests are hand-maintained below (gazelle would merge them into one client_test):
+# gazelle:exclude *_test.go
+
 go_library(
     name = "client",
     srcs = [
@@ -18,49 +21,20 @@ go_library(
     ],
 )
 
-go_test(
-    name = "client_test",
-    # Integration tests: in-process servers that run jobs in bwrap sandboxes and private
-    # network namespaces (nested inside Bazel's linux-sandbox; loopback only), plus jobs that
-    # run go and scripts/ci.sh.
-    size = "large",
+# Shared test helpers (lib_*_test.go: in-process server, CLI, services, fake bazel, toolchain
+# paths). Same package as the tests (they use the client's internals), so every go_test below
+# embeds it and compiles it along with its own files.
+go_library(
+    name = "testlib",
+    testonly = True,
     srcs = [
-        "auth_test.go",
-        "bazel_test.go",
-        "bazelci_test.go",
-        "cache_test.go",
-        "fast_test.go",
-        "files_review_test.go",
-        "files_test.go",
-        "gc_test.go",
-        "hardening_test.go",
-        "integration_test.go",
-        "netns_test.go",
-        "review2_test.go",
-        "review_runner_test.go",
-        "review_test.go",
-        "runner_test.go",
-        "sandbox_test.go",
-        "service_review_test.go",
-        "service_test.go",
-        "visibility_test.go",
-    ],
-    data = [
-        "//scripts:bazel-ci.sh",
-        "//scripts:bb-ci.sh",
-        "//scripts:ci.sh",
-        "@bazel_binary//file",
-        "@go_sdk//:bin/go",
-        "@go_sdk//:files",
+        "lib_bazel_test.go",
+        "lib_server_test.go",
+        "lib_service_test.go",
+        "lib_tools_test.go",
     ],
     embed = [":client"],
-    env = {
-        # TestBazelReal seeds its server's bazelisk home with this Bazel binary.
-        "TUN_TEST_BAZEL": "$(rlocationpath @bazel_binary//file)",
-        "TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)",
-    },
-    # Nested real Bazel fetches modules from the Bazel Central Registry (via the proxy, .bazelrc).
-    tags = ["requires-network"],
+    importpath = "github.com/altdansalt/tun/internal/client",
     deps = [
         "//internal/api",
         "//internal/reapi",
@@ -69,3 +43,120 @@ go_test(
         "//internal/workspace",
     ],
 )
+
+# Integration tests: in-process servers that run jobs (bwrap sandboxes and private network
+# namespaces nested inside Bazel's linux-sandbox; loopback only). One target per area, so that
+# Bazel caches and (with remote execution) schedules them separately; a test file that
+# changes reruns only its target. All of them depend on //internal/server and :client, so a
+# change there reruns them all (in parallel). Each new _test.go must be added to one of them
+# (scripts/bazel-ci.sh checks that every Go file is in a BUILD file).
+[go_test(
+    name = name,
+    size = size,
+    srcs = srcs,
+    data = data,
+    embed = [":testlib"],
+    env = env,
+    tags = tags,
+    deps = [
+        "//internal/api",
+        "//internal/reapi",
+        "//internal/sandbox",
+        "//internal/server",
+        "//internal/workspace",
+    ],
+) for name, srcs, size, data, env, tags in [
+    (
+        # Core: tun run/logs/cancel/status, files and outputs, retention, queue visibility.
+        "run_test",
+        [
+            "auth_test.go",
+            "fast_test.go",
+            "files_test.go",
+            "gc_test.go",
+            "integration_test.go",
+            "visibility_test.go",
+        ],
+        "medium",
+        ["//scripts:ci.sh"],
+        {},
+        [],
+    ),
+    (
+        # bwrap sandboxes and private network namespaces; jobs that run the hermetic go.
+        "sandbox_test",
+        [
+            "hardening_test.go",
+            "netns_test.go",
+            "sandbox_test.go",
+        ],
+        "medium",
+        [
+            "@go_sdk//:bin/go",
+            "@go_sdk//:files",
+        ],
+        {"TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
+        [],
+    ),
+    (
+        "service_test",
+        [
+            "service_review_test.go",
+            "service_test.go",
+        ],
+        "medium",
+        [],
+        {},
+        [],
+    ),
+    (
+        "runner_test",
+        [
+            "review_runner_test.go",
+            "runner_test.go",
+        ],
+        "medium",
+        [],
+        {},
+        [],
+    ),
+    (
+        # tun bazel sessions against a fake bazel, and the remote cache.
+        "bazel_test",
+        [
+            "bazel_test.go",
+            "cache_test.go",
+        ],
+        "medium",
+        [],
+        {},
+        [],
+    ),
+    (
+        # A real nested Bazel: the slowest test (a cold Bazel server and analysis).
+        "bazel_real_test",
+        ["bazel_real_test.go"],
+        "large",
+        ["@bazel_binary//file"],
+        {"TUN_TEST_BAZEL": "$(rlocationpath @bazel_binary//file)"},
+        # It fetches modules from the Bazel Central Registry (via the proxy, .bazelrc).
+        ["requires-network"],
+    ),
+    (
+        # Regressions from the review rounds (logs, files, HTTP edge cases; ci.sh and bb-ci.sh
+        # flag quoting).
+        "review_test",
+        [
+            "files_review_test.go",
+            "review2_test.go",
+            "review_test.go",
+        ],
+        "medium",
+        [
+            "//scripts:bb-ci.sh",
+            "//scripts:ci.sh",
+        ],
+        {},
+        [],
+    ),
+]]

@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,21 +10,6 @@ import (
 	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/server"
 )
-
-func exists(p string) bool {
-	_, err := os.Lstat(p)
-	return err == nil
-}
-
-// eventually polls cond for up to 20s.
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	for deadline := time.Now().Add(20 * time.Second); !cond(); time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-	}
-}
 
 func TestRetentionWorkDirs(t *testing.T) {
 	t.Parallel()
@@ -195,13 +179,4 @@ func TestMaxLog(t *testing.T) {
 	if err != nil || fi.Size() > 2048 {
 		t.Errorf("stdout file: %v %v", fi, err)
 	}
-}
-
-func (ts *testServer) lastID() string {
-	ts.t.Helper()
-	js, err := ts.client().List(context.Background(), 1, nil)
-	if err != nil || len(js) == 0 {
-		ts.t.Fatalf("list: %v %v", js, err)
-	}
-	return js[0].ID
 }

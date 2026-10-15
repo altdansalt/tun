@@ -10,18 +10,7 @@ import (
 	"testing"
 
 	"github.com/altdansalt/tun/internal/api"
-	"github.com/altdansalt/tun/internal/sandbox"
-	"github.com/altdansalt/tun/internal/server"
 )
-
-// bwrapServer runs jobs under bwrap, with private networks where they work.
-func bwrapServer(t *testing.T) *testServer {
-	t.Helper()
-	if !sandbox.BwrapUsable() {
-		t.Skip("bwrap not installed or unusable on this host")
-	}
-	return startServer(t, server.Config{Sandbox: sandbox.Bwrap, PrivateNet: sandbox.NetUsable() == nil})
-}
 
 func TestBwrapIsolation(t *testing.T) {
 	t.Parallel()

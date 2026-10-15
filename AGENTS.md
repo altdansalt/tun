@@ -9,8 +9,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
   and runs every target: unit and integration tests and the CLI smoke suites
   (`//scripts:e2e_test`, `//scripts:e2e_runners_test`) against the Bazel-built `//cmd/tun`.
   Only what your change affects rebuilds and reruns; unchanged tests show `(cached) PASSED`.
-  - Ends with one summary line: `tun: bazel test exit=3 after 61.2s: 1 of 8 tests failed:
-    //internal/client:client_test; logs: tun get <id> //internal/client:client_test`. Failing
+  - Ends with one summary line: `tun: bazel test exit=3 after 61.2s: 1 of 14 tests failed:
+    //internal/client:run_test; logs: tun get <id> //internal/client:run_test`. Failing
     tests' logs are printed already (`--test_output=errors`, .bazelrc); `tun get <id> //label`
     writes that test's full logs to `bazel-testlogs/<pkg>/<name>/` (`-o DIR` elsewhere).
   - Subsets: `tun bazel test //internal/server:server_test --test_filter=TestEphemeral`
@@ -27,6 +27,10 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     them (`tun run --out internal --out cmd -c 'bazel --output_user_root=$TMPDIR/b run //:gazelle'`).
     A Go file missing from BUILD.bazel is silently not built/tested; `tun run -- ./scripts/bazel-ci.sh`
     checks that (`-e GAZELLE=1`: gazelle's full diff). Test data/tags/size are kept by gazelle.
+  - internal/client's tests are split by area into separate targets (`run_test`, `sandbox_test`,
+    `service_test`, `runner_test`, `bazel_test`, `bazel_real_test`, `review_test`; shared helpers
+    in `lib_*_test.go`, the `:testlib` library), so Bazel caches and schedules them separately.
+    Gazelle leaves them alone there: add a new `_test.go` to one of them by hand.
   - Tests that run real Bazel nested in a test (TestBazelReal, reapi's TestBazelCache, e2e.sh's
     `tun bazel` step) use the pinned `@bazel_binary` (MODULE.bazel) and reach the Bazel Central
     Registry through tun's egress proxy (`--test_env` in .bazelrc; tagged `requires-network`).
