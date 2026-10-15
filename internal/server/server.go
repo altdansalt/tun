@@ -138,6 +138,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.KillGrace == 0 {
 		cfg.KillGrace = 10 * time.Second
 	}
+	if cfg.MaxUpload <= 0 {
+		cfg.MaxUpload = 512 << 20
+	}
 	if cfg.MaxSessions < 1 {
 		cfg.MaxSessions = 2
 	}
