@@ -178,9 +178,13 @@ type MissingBlobs struct {
 
 // Session is a warm Bazel session (GET /v1/sessions, tun sessions).
 type Session struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Client    string    `json:"client"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Client string `json:"client"`
+	// Identity keys the session's id, its Bazel caches and its action cache namespace: the
+	// client with where the name came from ("vm:" exe.dev proxy, "self:" X-Tun-Client, "addr:"
+	// remote address), so a self-reported name never equals a proxy-attested one.
+	Identity  string    `json:"identity"`
 	Root      string    `json:"root"` // the client's workspace path
 	CreatedAt time.Time `json:"created_at"`
 	LastUsed  time.Time `json:"last_used"`

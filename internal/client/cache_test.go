@@ -34,7 +34,8 @@ func pbDigest(data string) []byte {
 }
 
 // grpcCall makes one unary gRPC call over h2c, through dial if given (a unix socket), else
-// to the test server's TCP address. It returns the response message and grpc-status.
+// to the test server's TCP address. It returns the response message and grpc-status. client
+// is sent as X-Tun-Client, or with a "vm:" prefix as X-Exedev-Source-Vm (the exe.dev proxy's).
 func (ts *testServer) grpcCall(dial func() (net.Conn, error), method, token, client string, req []byte) ([]byte, string) {
 	ts.t.Helper()
 	frame := binary.BigEndian.AppendUint32([]byte{0}, uint32(len(req)))
@@ -43,7 +44,9 @@ func (ts *testServer) grpcCall(dial func() (net.Conn, error), method, token, cli
 	if token != "" {
 		r.Header.Set("X-Tun-Token", token)
 	}
-	if client != "" {
+	if vm, ok := strings.CutPrefix(client, "vm:"); ok {
+		r.Header.Set("X-Exedev-Source-Vm", vm)
+	} else if client != "" {
 		r.Header.Set("X-Tun-Client", client)
 	}
 	p := new(http.Protocols)
@@ -82,8 +85,9 @@ func TestBazelSessionRemoteCache(t *testing.T) {
 	ws := bazelWS(t, map[string]string{"x": "1"})
 	r := ts.tun(ws, "bazel", "sh", `cat /tun/tun.bazelrc; test -S /tun/sock/cache.sock && echo sock-ok; touch /tun/sock/x || echo sock-ro`)
 	if r.code != 0 || !strings.Contains(r.stdout, "common --remote_cache=grpc://tun\ncommon --remote_proxy=unix:/tun/sock/cache.sock\n") ||
-		!strings.Contains(r.stdout, "sock-ok") || !strings.Contains(r.stdout, "sock-ro") || strings.Contains(r.stdout, "--remote_executor") ||
-		!strings.Contains(r.stderr, "remote cache: tun's, through /tun/sock/cache.sock") {
+		!strings.Contains(r.stdout, "sock-ok") || !strings.Contains(r.stdout, "sock-ro") ||
+		!strings.Contains(r.stdout, "common --remote_executor=grpc://tun\ncommon --jobs=4\ncommon --remote_local_fallback\n") ||
+		!strings.Contains(r.stderr, "remote cache: tun's, through /tun/sock/cache.sock; remote execution on 4 slots") {
 		t.Fatalf("session: %+v", r)
 	}
 	if !ts.health().RemoteCache {
@@ -117,6 +121,13 @@ func TestBazelSessionRemoteCache(t *testing.T) {
 	}
 	if _, c := ts.grpcCall(nil, "ActionCache/GetActionResult", token, "someone-else", action); c != "5" {
 		t.Fatalf("another client got the session's result: %s", c)
+	}
+	// A proxy-attested name equal to the session's self-reported one is another client.
+	if sess.Identity != "self:"+sess.Client {
+		t.Fatalf("session identity %q for client %q", sess.Identity, sess.Client)
+	}
+	if _, c := ts.grpcCall(nil, "ActionCache/GetActionResult", token, "vm:"+sess.Client, action); c != "5" {
+		t.Fatalf("an exe.dev VM named like the session's self-reported client got its result: %s", c)
 	}
 	// --cold discards the session dir, the socket comes back with the new sandbox; the action
 	// cache stays (it is the client's, not the session's).

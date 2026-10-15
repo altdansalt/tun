@@ -62,9 +62,9 @@ type session struct {
 	loaded      bool
 }
 
-// sessionID is the id of the session (client, root, name).
-func sessionID(client, root, name string) string {
-	h := sha256.Sum256([]byte(client + "\x00" + root + "\x00" + name))
+// sessionID is the id of the session (client identity, root, name).
+func sessionID(identity, root, name string) string {
+	h := sha256.Sum256([]byte(identity + "\x00" + root + "\x00" + name))
 	return hex.EncodeToString(h[:10])
 }
 
@@ -96,6 +96,11 @@ func (s *Server) loadSessions() error {
 		f.Close()
 		if err != nil || sess.ID != e.Name() {
 			log.Printf("tun: ignoring session dir %s: bad session.json", p)
+			continue
+		}
+		if sess.Identity == "" { // from before identities: its id can't be reached any more
+			log.Printf("tun: deleting session dir %s: no client identity (made by an older tun)", p)
+			workspace.RemoveAll(p)
 			continue
 		}
 		s.sessions[sess.ID] = &sess
@@ -132,7 +137,7 @@ func writeOwn(name string, b []byte) error {
 
 // checkBazelJob validates a bazel job request and fills in its session. It returns the
 // HTTP status for a bad request.
-func (s *Server) checkBazelJob(req *api.CreateJob, client string) (int, error) {
+func (s *Server) checkBazelJob(req *api.CreateJob) (int, error) {
 	b := req.Bazel
 	switch {
 	case len(req.Argv) > 0 || req.Script != "" || req.Workspace != "" || req.Service || len(req.Ports) > 0 || len(req.Outputs) > 0:
@@ -238,7 +243,7 @@ func (s *Server) claimSession(j *job) bool {
 	}
 	now := time.Now().UTC()
 	b := j.bz
-	sess := &session{Session: api.Session{ID: j.SessionID, Name: b.Session, Client: j.Client, Root: b.Root, CreatedAt: now, LastUsed: now}, loaded: true}
+	sess := &session{Session: api.Session{ID: j.SessionID, Name: b.Session, Client: j.Client, Identity: j.identity, Root: b.Root, CreatedAt: now, LastUsed: now}, loaded: true}
 	s.sessions[sess.ID] = sess
 	sess.job = j
 	return true
@@ -370,7 +375,7 @@ const cacheSock = "cache.sock"
 func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandbox.Spec) {
 	dir := s.sessionDir(sess.ID)
 	sb := filepath.Join(dir, "sandbox")
-	caches := s.clientCaches(sess.Client)
+	caches := s.clientCaches(sess.Identity)
 	host = sessionPaths{
 		work: filepath.Join(sb, "work"), home: filepath.Join(sb, "home"), tmp: filepath.Join(sb, "tmp"),
 		out: filepath.Join(sb, "out"), repo: filepath.Join(caches, "repo"), disk: filepath.Join(caches, "disk"),
@@ -399,12 +404,12 @@ func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandb
 	return in, host, spec
 }
 
-// clientCaches is the dir of client's Bazel caches. Per client, because none of them can be
+// clientCaches is the dir of the Bazel caches of a client identity. Per client, because none of them can be
 // trusted once a session has written it: bazelisk runs a cached Bazel binary without checking
 // it again, and Bazel trusts its repository contents cache (<repository_cache>/contents,
 // fetched repository trees) and disk cache. One client can only poison its own.
-func (s *Server) clientCaches(client string) string {
-	h := sha256.Sum256([]byte(client))
+func (s *Server) clientCaches(identity string) string {
+	h := sha256.Sum256([]byte(identity))
 	return filepath.Join(s.cfg.BazelCaches, hex.EncodeToString(h[:8]))
 }
 
@@ -561,7 +566,7 @@ func (s *Server) startCacheSocket(sess *session) error {
 		return fmt.Errorf("session cache socket: %v", err)
 	}
 	ln.(*net.UnixListener).SetUnlinkOnClose(false)
-	srv := &http.Server{Handler: s.cache.ForClient(sess.Client), Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: s.cache.ForClient(sess.Identity), Protocols: reapi.Protocols(), ReadHeaderTimeout: 10 * time.Second}
 	go srv.Serve(ln)
 	s.mu.Lock()
 	sess.cache = &cacheSocket{srv: srv, dir: dir}

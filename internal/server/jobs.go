@@ -101,7 +101,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Bazel != nil {
-		if code, err := s.checkBazelJob(&req, clientOf(r)); err != nil {
+		if code, err := s.checkBazelJob(&req); err != nil {
 			writeErr(w, code, err.Error())
 			return
 		}
@@ -159,8 +159,8 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		Service: req.Service, Client: clientOf(r), Outputs: req.Outputs,
 	}}
 	if b := req.Bazel; b != nil {
-		j.bz, j.Argv = b, append([]string{"bazel"}, b.Args...)
-		j.Session, j.SessionID = b.Session, sessionID(j.Client, b.Root, b.Session)
+		j.bz, j.Argv, j.identity = b, append([]string{"bazel"}, b.Args...), identityOf(r)
+		j.Session, j.SessionID = b.Session, sessionID(j.identity, b.Root, b.Session)
 	}
 	if j.Service {
 		j.Runner = api.LocalRunner // services always run on the hub

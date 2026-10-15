@@ -129,6 +129,7 @@ type job struct {
 	logMu      sync.Mutex      // serializes log chunk writes
 	bz         *api.BazelJob   // a tun bazel job (kept in memory only: after a restart it has failed)
 	slotless   bool            // a bazel job running outside the job slots (see schedule)
+	identity   string          // a bazel job's client identity (identityOf)
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`
 	OutSkipped []string `json:"out_skipped,omitempty"`
@@ -456,13 +457,8 @@ func (s *Server) CacheHandler() http.Handler {
 }
 
 // cacheClient is the action cache namespace of a token-authenticated gRPC request: its
-// client identity (see clientOf), as for jobs and sessions.
-func cacheClient(r *http.Request) string {
-	if c := clientOf(r); c != "" && c != "@" {
-		return c
-	}
-	return "unknown"
-}
+// client identity (see identityOf), as for sessions.
+func cacheClient(r *http.Request) string { return identityOf(r) }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -537,6 +533,23 @@ func clientOf(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+// identityOf is clientOf with where the name came from: "vm:" for the exe.dev proxy's
+// header, "self:" for X-Tun-Client, "addr:" for the remote address. What is keyed by client
+// (session ids, Bazel caches, action cache namespaces) uses it, so a client can't pick a
+// self-reported name equal to another's proxy-attested one to share (and poison) its caches.
+func identityOf(r *http.Request) string {
+	if v := cleanName(r.Header.Get("X-Exedev-Source-Vm")); v != "" {
+		return "vm:" + v
+	}
+	if v := cleanName(r.Header.Get("X-Tun-Client")); v != "" {
+		return "self:" + v
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return "addr:" + host
+	}
+	return "addr:" + r.RemoteAddr
 }
 
 // cleanName trims a header value to at most 128 printable ASCII characters.

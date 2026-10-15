@@ -97,3 +97,32 @@ func TestBazelrc(t *testing.T) {
 		t.Fatalf("note:\n%s", note)
 	}
 }
+
+// Session ids, Bazel caches and action cache namespaces are keyed by identityOf: a
+// self-reported name never equals a proxy-attested (or address) one.
+func TestIdentityOf(t *testing.T) {
+	req := func(h map[string]string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "10.0.0.1:5000"
+		for k, v := range h {
+			r.Header.Set(k, v)
+		}
+		return r
+	}
+	for _, c := range []struct {
+		h    map[string]string
+		want string
+	}{
+		{map[string]string{"X-Exedev-Source-Vm": "box", "X-Tun-Client": "other"}, "vm:box"},
+		{map[string]string{"X-Tun-Client": "box"}, "self:box"},
+		{map[string]string{"X-Tun-Client": "vm:box"}, "self:vm:box"},
+		{nil, "addr:10.0.0.1"},
+	} {
+		if got := identityOf(req(c.h)); got != c.want {
+			t.Errorf("%v: %q, want %q", c.h, got, c.want)
+		}
+	}
+	if sessionID("vm:box", "/r", "default") == sessionID("self:box", "/r", "default") {
+		t.Error("same session id for vm:box and self:box")
+	}
+}
