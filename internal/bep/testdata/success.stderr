@@ -1,0 +1,10 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.3.0) and connecting to it...
+INFO: Analyzed target //:output (6 packages loaded, 8 targets configured).
+INFO: Found 1 target...
+Target //:output up-to-date:
+  bazel-bin/hello.txt
+INFO: Elapsed time: 16.798s, Critical Path: 0.11s
+INFO: 2 processes: 1 internal, 1 linux-sandbox.
+INFO: Build completed successfully, 2 total actions
+INFO: Build Event Protocol files produced successfully.

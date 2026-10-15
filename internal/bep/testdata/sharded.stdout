@@ -1,0 +1,5 @@
+//:sharded                                                               PASSED in 0.0s
+  Stats over 3 runs: max = 0.0s, min = 0.0s, avg = 0.0s, dev = 0.0s
+
+Executed 1 out of 1 test: 1 test passes.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
