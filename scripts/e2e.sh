@@ -8,6 +8,15 @@ tmp=$(mktemp -d)
 service=
 job=
 cleanup() {
+  local result=$?
+  if [ "$result" -ne 0 ]; then
+    for log in first second other json; do
+      if [ -f "$tmp/$log" ]; then
+        echo "e2e: $log diagnostics:" >&2
+        tail -80 "$tmp/$log" >&2
+      fi
+    done
+  fi
   [ -z "$service" ] || tun cancel "$service" >/dev/null 2>&1 || true
   [ -z "$job" ] || tun cancel "$job" >/dev/null 2>&1 || true
   rm -rf "$tmp"
