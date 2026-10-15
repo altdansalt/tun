@@ -47,6 +47,8 @@ type Job struct {
 	Workspace  string     `json:"workspace,omitempty"`
 	Sandbox    string     `json:"sandbox"`
 	Error      string     `json:"error,omitempty"`
+	// WorkDeleted: retention deleted the job's work/home/tmp dirs; status and logs remain.
+	WorkDeleted bool `json:"work_deleted,omitempty"`
 }
 
 // Error is the body of every non-2xx response.

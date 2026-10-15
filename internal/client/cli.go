@@ -48,7 +48,8 @@ environment:
 
 job objects (status, ls, cancel) have fields: id, state (queued|running|exited|failed|timeout|
 canceled), exit_code, signal, created_at, started_at, ended_at, argv, script, cwd,
-timeout_sec, workspace, sandbox, error.
+timeout_sec, workspace, sandbox, error, work_deleted (true once the server's retention
+deleted the job's files; status and logs remain).
 `
 
 const runUsage = `usage: tun run [flags] -- <argv...>

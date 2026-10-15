@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/altdansalt/tun/internal/sandbox"
 )
@@ -30,6 +31,12 @@ $DATA/jobs/<id>/sandbox dir and the shared caches, and hides the rest of the dat
 other jobs, its own logs/state) and the server user's home. none runs jobs as plain
 subprocesses of this server user: NO ISOLATION - a job can read the token and every other
 job's files. Use none only if every job is as trusted as whoever runs tun serve.
+
+Retention: a sweep at startup and periodically deletes finished jobs' sandbox dir (work,
+home, tmp) after --keep-work (the job then shows "work_deleted": true; status and logs still
+work), whole job records (job.json + logs) after --keep-jobs, and workspace blobs not used by
+a queued/running job for --keep-blobs. A duration of 0 keeps forever. Each job's stdout and
+stderr are capped at --max-log; the workspace's unpacked size at --max-workspace.
 
 flags:
 `
@@ -53,6 +60,11 @@ func Main(args []string, stderr io.Writer) int {
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
+	maxWorkspace := fs.String("max-workspace", "2GB", "max total size of a job's unpacked workspace files (bytes, or with KB/MB/GB suffix)")
+	maxLog := fs.String("max-log", "256MB", "max bytes kept of each job's stdout and of its stderr; past it the server appends a marker and discards the rest")
+	keepWork := fs.Duration("keep-work", time.Hour, "delete a finished job's sandbox dir (work, home, tmp) this long after it ends (0: never)")
+	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
+	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -75,6 +87,17 @@ func Main(args []string, stderr io.Writer) int {
 	if err != nil {
 		return fail("--max-download: %v", err)
 	}
+	wsLimit, err := parseSize(*maxWorkspace)
+	if err != nil {
+		return fail("--max-workspace: %v", err)
+	}
+	logLimit, err := parseSize(*maxLog)
+	if err != nil {
+		return fail("--max-log: %v", err)
+	}
+	if *keepWork < 0 || *keepJobs < 0 || *keepBlobs < 0 {
+		return fail("--keep-work, --keep-jobs and --keep-blobs must not be negative")
+	}
 	switch *mode {
 	case "auto":
 		*mode = sandbox.None
@@ -92,7 +115,8 @@ func Main(args []string, stderr io.Writer) int {
 	if *mode == sandbox.None {
 		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit})
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit,
+		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
