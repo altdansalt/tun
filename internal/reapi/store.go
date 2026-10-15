@@ -35,10 +35,11 @@ type Store struct {
 	max      int64
 }
 type cacheEntry struct {
-	name  string
-	size  int64
-	atime time.Time
-	hash  hash.Hash // partial uploads only; nil after restart until first resume
+	name      string
+	size      int64
+	atime     time.Time
+	persisted time.Time // the file's mtime as last set (written, or bumped by touch)
+	hash      hash.Hash // partial uploads only; nil after restart until first resume
 }
 
 func (s *Store) fileLock(name string) *sync.Mutex {
@@ -49,7 +50,8 @@ func (s *Store) record(name string, size int64, h hash.Hash) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.forgetLocked(name)
-	s.files[name] = s.lru.PushBack(&cacheEntry{name, size, time.Now(), h})
+	now := time.Now() // also the file's mtime: it was just written
+	s.files[name] = s.lru.PushBack(&cacheEntry{name: name, size: size, atime: now, persisted: now, hash: h})
 	s.total += size
 }
 func (s *Store) forgetLocked(name string) {
@@ -64,14 +66,29 @@ func (s *Store) forget(name string) {
 	defer s.mu.Unlock()
 	s.forgetLocked(name)
 }
-func (s *Store) touch(name string) {
+
+// touch marks name used in the LRU index. It reports whether the file's mtime (the order
+// after a restart) should be bumped too: only if the last bump is over persistUse old, so a
+// hot file (an executor reads thousands of input files per action) costs no disk write.
+func (s *Store) touch(name string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if el := s.files[name]; el != nil {
-		el.Value.(*cacheEntry).atime = time.Now()
+		e := el.Value.(*cacheEntry)
 		s.lru.MoveToBack(el)
+		now := time.Now()
+		if now.Sub(e.persisted) < persistUse {
+			e.atime = now
+			return false
+		}
+		e.atime, e.persisted = now, now
 	}
+	return true
 }
+
+// persistUse is how stale a cache file's mtime may get before a use bumps it.
+const persistUse = 10 * time.Minute
+
 func Open(dir string, max int64) (*Store, error) {
 	if max <= 0 {
 		return nil, fmt.Errorf("cache max size must be positive")
@@ -94,7 +111,7 @@ func Open(dir string, max int64) (*Store, error) {
 			log.Printf("cache stat %s: %v", x.Name(), err)
 			continue
 		}
-		entries = append(entries, &cacheEntry{name: x.Name(), size: info.Size(), atime: info.ModTime()})
+		entries = append(entries, &cacheEntry{name: x.Name(), size: info.Size(), atime: info.ModTime(), persisted: info.ModTime()})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].atime.Before(entries[j].atime) })
 	for _, x := range entries {
@@ -143,9 +160,10 @@ func (s *Store) readName(name string) ([]byte, error) {
 	p := filepath.Join(s.dir, name)
 	b, e := os.ReadFile(p)
 	if e == nil {
-		s.touch(name)
-		now := time.Now()
-		_ = os.Chtimes(p, now, now)
+		if s.touch(name) {
+			now := time.Now()
+			_ = os.Chtimes(p, now, now)
+		}
 	}
 	return b, e
 }
@@ -367,9 +385,10 @@ func (s *Store) openBlob(d []byte) (*os.File, error) {
 		f.Close()
 		return nil, os.ErrNotExist
 	}
-	s.touch("cas-" + k)
-	now := time.Now()
-	_ = os.Chtimes(p, now, now)
+	if s.touch("cas-" + k) {
+		now := time.Now()
+		_ = os.Chtimes(p, now, now)
+	}
 	return f, nil
 }
 
