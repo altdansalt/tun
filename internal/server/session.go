@@ -171,8 +171,9 @@ func (s *Server) checkBazelJob(req *api.CreateJob, client string) (int, error) {
 func (s *Server) casPath(sha string) string { return filepath.Join(s.cfg.DataDir, "cas", sha) }
 
 // missingBlobs returns the manifest's file digests the server lacks, and marks the others
-// used (an mtime older than an hour is bumped) so the sweep keeps them.
-func (s *Server) missingBlobs(m []api.ManifestEntry) []string {
+// used (an mtime older than an hour is bumped) so the sweep keeps them. For a client
+// (non-empty owner), content it did not upload itself counts as missing (see owners.go).
+func (s *Server) missingBlobs(owner string, m []api.ManifestEntry) []string {
 	s.gc.blobMu.Lock()
 	defer s.gc.blobMu.Unlock()
 	seen := map[string]bool{}
@@ -184,6 +185,12 @@ func (s *Server) missingBlobs(m []api.ManifestEntry) []string {
 		}
 		seen[e.Sha] = true
 		fi, err := os.Stat(s.casPath(e.Sha))
+		if err == nil && owner != "" {
+			li, lerr := os.Lstat(filepath.Join(s.ownerDir(owner, "cas"), e.Sha))
+			if lerr != nil || !os.SameFile(li, fi) {
+				err = os.ErrNotExist
+			}
+		}
 		switch {
 		case err != nil:
 			missing = append(missing, e.Sha)
@@ -198,7 +205,10 @@ func (s *Server) missingBlobs(m []api.ManifestEntry) []string {
 // entries are file contents named by their sha256. Each is verified and stored.
 func (s *Server) putCAS(w http.ResponseWriter, r *http.Request) {
 	body := io.Reader(http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload))
-	n, err := workspace.ReadBlobs(body, r.Header.Get("Content-Encoding") == "gzip", s.cfg.MaxUpload, filepath.Join(s.cfg.DataDir, "cas"))
+	client := owner(r)
+	n, err := workspace.ReadBlobs(body, r.Header.Get("Content-Encoding") == "gzip", s.cfg.MaxUpload, filepath.Join(s.cfg.DataDir, "cas"), func(tmp, sha string) error {
+		return s.store(client, "cas", sha, tmp, s.casPath(sha))
+	})
 	var mbe *http.MaxBytesError
 	switch {
 	case errors.As(err, &mbe) || errors.Is(err, workspace.ErrBlobsTooLarge):

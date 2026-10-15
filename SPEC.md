@@ -125,17 +125,32 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
   remote IP, as before. **This mode gives no client isolation.** Keep it off agent VMs once
   migrated. Runner authentication is unchanged; client tokens cannot call runner endpoints.
 - All authenticated clients can list jobs and read job status/metadata, useful for spotting
-  load. Logs, files/outputs, BEP results, service proxying and cancellation require the owner
-  or admin. Sessions listed to client tokens are restricted to that client; session identity
-  and reuse always include the authenticated client. Shared CAS/workspace content is not a
-  confidentiality boundary (digests are capabilities); downloading workspace blobs directly
-  is reserved for admin/runner credentials.
+  load; another client's `argv`, `script` and `workspace` are omitted (commands often carry
+  secrets; the workspace digest names its content). Logs, files/outputs, BEP results, service
+  proxying and cancellation require the owner or admin. Sessions listed to client tokens are
+  restricted to that client; session identity and reuse always include the authenticated client.
+- Uploaded content is per uploader. A digest is not a capability (it leaks through metadata
+  or logs, and low-entropy content such as a config file with a short secret can be guessed
+  and confirmed), so proof of possession is uploading the bytes. A workspace blob (`PUT
+  /v1/blobs/{sha}`) or tun bazel file content (`POST /v1/cas`) is stored once, and each client
+  that uploaded it is recorded as an owner (a hard link under `$DATA/owners/`, removed with
+  the content by retention). For a client token, `HEAD /v1/blobs/{sha}` is 200 only for its
+  own uploads, `POST /v1/jobs` with another client's workspace says it is not uploaded, and a
+  tun bazel manifest's digests the client did not upload are reported missing (409), so the
+  CLI uploads them; nothing reveals whether another client has the content. Content already
+  on the server costs each further client one upload, and content uploaded before this
+  change one re-upload. Admin requests may use any content; `GET /v1/blobs/{sha}` is admin
+  (runner) only.
 - `tun ls --state S` (comma-separated), `--client NAME`, `--mine` filter before `--limit`.
   `--mine` uses the token's client name, or the legacy header identity for admin requests.
 - REAPI TCP and authenticated Unix endpoints use the same tokens, via `x-tun-token` or
   `authorization: Bearer TOKEN` metadata. Action-cache writes and lookups use the token's
   client namespace regardless of headers or `instance_name`. Session sockets keep their
-  fixed client identity. CAS is shared and verified by digest.
+  fixed client identity. The REAPI CAS is shared and verified by digest: unlike tun's own
+  uploads it is **not** per uploader, so any token holder can test whether a digest exists
+  (FindMissingBlobs) and read content by digest. Clients cannot learn each other's digests
+  from tun (action results, BEP and job details are per client), but low-entropy content
+  whose digest can be guessed is not confidential there (see Known gaps).
 
 ### Shared cache disk budget
 
@@ -501,12 +516,13 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.
 
 ## HTTP API (JSON, all under /v1, bearer auth)
-- `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
-- `GET /v1/blobs/{sha256}` — the blob's bytes (runners fetch workspaces with it).
+- `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash and records the uploader; HEAD is
+  200 only for the client's own uploads (any blob for admin; see Visibility).
+- `GET /v1/blobs/{sha256}` — the blob's bytes (admin only: runners fetch workspaces with it).
 - `POST /v1/cas`: tun bazel's file contents, a tar (gzip if `Content-Encoding: gzip`) of
   regular files named by their sha256; each is verified; over `--max-upload` is a 413.
   Stored in `$DATA/cas/`, deleted unused for `--keep-blobs` (job creation marks the ones a
-  manifest names as used).
+  manifest names as used). Owned per uploader like workspace blobs.
 - `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace, service, ports, outputs}` -> job object (201).
   Or `{cwd, timeout_sec, bazel: {session, cold, root, manifest, args}}` for tun bazel (see
   Bazel sessions; 409 `{error, missing}` if file contents must be uploaded first). The body
@@ -518,7 +534,8 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `timeout_sec` <= 0 means the default (1800), except for services where 0 (or less) means none; over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason, summary}`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, runner, outputs, queue_sec, run_sec, queue_position, session, session_id, queue_reason, summary}`
+  (`argv`, `script` and `workspace` only for the owner or admin, here and in the list).
 - `GET /v1/jobs?limit=N&state=S[,S...]&client=NAME&mine=1` -> list, newest first, filtered
   before the limit (`mine=1`: client = this request's client identity; with `client` it's a 400;
   unknown states are a 400). `POST /v1/jobs/{id}/cancel`.

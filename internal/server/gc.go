@@ -156,6 +156,7 @@ func (s *Server) sweepCAS(now time.Time) {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
+	s.sweepOwners("cas", s.casPath)
 }
 
 // sweepOrphans deletes job dirs that no loaded job owns (half-created, or unreadable job.json).
@@ -209,6 +210,7 @@ func (s *Server) sweepBlobs(now time.Time, inUse map[string]bool) {
 			log.Printf("tun: gc: deleting blob %s: %v", e.Name(), err)
 		}
 	}
+	s.sweepOwners("blobs", s.blobPath)
 }
 
 // useBlob reports whether blob sha exists and, if so, marks it used now. Callers use the

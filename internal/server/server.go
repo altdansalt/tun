@@ -556,8 +556,18 @@ func cleanName(v string) string {
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	if j := s.lookup(w, r); j != nil {
-		writeJSON(w, 200, s.snapshot(j))
+		writeJSON(w, 200, redact(r, s.snapshot(j)))
 	}
+}
+
+// redact hides from other clients what a job's owner may consider secret: its command
+// (argv and scripts often carry tokens) and its workspace digest. Others still see that it
+// exists, its state and timing, to understand the server's load.
+func redact(r *http.Request, v api.Job) api.Job {
+	if o := owner(r); o != "" && o != v.Client {
+		v.Argv, v.Script, v.Workspace = nil, "", ""
+	}
+	return v
 }
 
 // listJobs serves GET /v1/jobs?limit=N&state=S[,S...]&client=NAME|mine=1, newest first.
@@ -601,7 +611,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	list := make([]api.Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		if (len(states) == 0 || states[j.State]) && (client == "" || j.Client == client) {
-			list = append(list, s.view(j, now))
+			list = append(list, redact(r, s.view(j, now)))
 		}
 	}
 	s.mu.Unlock()
