@@ -45,7 +45,11 @@ in parallel, at the cost of a second Bazel server). The server deletes a session
 30 minutes without a command (tun serve --session-idle) or to make room for a new one (LRU);
 then the next command starts it again, using the remote cache. Sessions live on the hub
 or a runner, keep host affinity, and recreate elsewhere after host loss. --max-sessions
-is per host. tun sessions lists them and their host.
+is per host. tun sessions lists them and their host; tun sessions stop frees yours. A
+command that starts a Bazel server says why on its "started a new session sandbox" line,
+and when the client couldn't know (the session was evicted, expired, stopped, or its host
+went away) also at the end of its summary line ("; cold start: ..."), as does a command
+whose new session evicted another one ("; evicted client C's session S ...").
 
 Sync: instead of uploading the workspace (the same files tun run ships: git tracked and
 untracked-not-ignored; Bazel's bazel-* convenience symlinks at the root are left out), tun
