@@ -909,3 +909,11 @@ and pure-hub drains were 3.150/2.849/4.199s; session hub and runner drains were
 Its subsequent runner smoke was invoked without the required zero-local-slot hub
 flags, so that setup failed its placement assertion and is not a valid runner-smoke
 result. The runner suite is rerun separately with the documented zero-slot setup.
+
+The separate zero-slot runner smoke **passed** in
+`20261015T152941973292-5e060c32` on tun-r6: 128.300s execution, 332.881s queued.
+It checked network isolation, real Bazel cache socket forwarding/warm affinity,
+artifacts and test logs by label, runner services, concurrent placement, cancellation,
+runner loss and SIGTERM draining. Together with the passing ordinary smoke, corrected
+restart suite and focused race regressions above, this completes validation; no shared
+hub or runner process was restarted by this task.
