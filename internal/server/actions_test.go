@@ -70,7 +70,7 @@ func TestBazelRunnerExecution(t *testing.T) {
 	go hs.Serve(ln)
 	defer hs.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg, _ := json.Marshal(map[string]any{"Hub": "http://" + ln.Addr().String(), "Token": s.Token(), "Name": "action-test", "Slots": 2, "DataDir": t.TempDir(), "Sandbox": mode})
+	cfg, _ := json.Marshal(map[string]any{"Hub": "http://" + ln.Addr().String(), "Token": s.RunnerToken(), "Name": "action-test", "Slots": 2, "DataDir": t.TempDir(), "Sandbox": mode})
 	proc := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestActionRunnerProcess$")
 	proc.Env = append(os.Environ(), "TUN_TEST_ACTION_RUNNER="+string(cfg))
 	proc.Stdout = os.Stderr

@@ -61,6 +61,7 @@ type Server struct {
 	actionStore *reapi.Store
 	cfg         Config
 	token       string
+	runnerToken string
 
 	mu      sync.Mutex
 	jobs    map[string]*job
@@ -77,15 +78,16 @@ type Server struct {
 
 type job struct {
 	api.Job
-	actionCtx    context.Context
-	Action       []byte             `json:"action,omitempty"`
-	Command      []byte             `json:"command,omitempty"`
-	ActionStatus int                `json:"action_status,omitempty"`
-	ActionResult []byte             `json:"action_result,omitempty"`
-	Env          map[string]string  `json:"env,omitempty"`
-	done         chan struct{}      // closed when the job reaches a terminal state
-	kill         func(state string) // set while running; requests termination with the given end state
-	net          *sandbox.Net       // set while running with a private network namespace
+	actionCtx     context.Context
+	Action        []byte             `json:"action,omitempty"`
+	Command       []byte             `json:"command,omitempty"`
+	ActionStatus  int                `json:"action_status,omitempty"`
+	ActionMissing []byte             `json:"action_missing,omitempty"`
+	ActionResult  []byte             `json:"action_result,omitempty"`
+	Env           map[string]string  `json:"env,omitempty"`
+	done          chan struct{}      // closed when the job reaches a terminal state
+	kill          func(state string) // set while running; requests termination with the given end state
+	net           *sandbox.Net       // set while running with a private network namespace
 	// cancelReq is set by a cancel that arrives after the job left the queue (or, for a
 	// service, was admitted) but before run started it; run then finishes it as canceled.
 	cancelReq bool
@@ -150,6 +152,12 @@ func New(cfg Config) (*Server, error) {
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
 	}
+	if s.runnerToken, err = loadToken(filepath.Join(dir, "runner-token")); err != nil {
+		return nil, err
+	}
+	if err := reapi.SweepExecRoots(dir); err != nil {
+		return nil, err
+	}
 	if err := s.recover(); err != nil {
 		return nil, err
 	}
@@ -181,7 +189,8 @@ func randHex(n int) string {
 }
 
 // Token returns the bearer token clients must present.
-func (s *Server) Token() string { return s.token }
+func (s *Server) Token() string       { return s.token }
+func (s *Server) RunnerToken() string { return s.runnerToken }
 
 // recover loads job.json files and fails jobs a previous server left unfinished.
 func (s *Server) recover() error {
@@ -253,6 +262,9 @@ func (s *Server) sandboxDir(id string) string { return filepath.Join(s.jobDir(id
 // pre-existing file or symlink can't redirect the write. Caller holds s.mu (or owns j
 // exclusively).
 func (s *Server) persist(j *job) error {
+	if j.Action != nil {
+		return nil
+	}
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
@@ -300,8 +312,16 @@ func (s *Server) Handler() http.Handler {
 			if got == "" {
 				got, ok = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 			}
-			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-				writeErr(w, 401, "missing or wrong bearer token (the server's token is in its $DATA/token)")
+			want := s.token
+			if strings.HasPrefix(r.URL.Path, "/v1/runner/") {
+				want = s.runnerToken
+			}
+			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+				writeErr(w, 401, "missing or wrong bearer token (clients use $DATA/token; runners use $DATA/runner-token)")
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/v1/runner/") && r.Header.Get(api.HeaderRunnerInstance) == "" {
+				writeErr(w, 400, "missing X-Tun-Runner-Instance")
 				return
 			}
 			h(w, r)
@@ -310,6 +330,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("HEAD /v1/blobs/{sha}", auth(s.headBlob))
 	mux.HandleFunc("PUT /v1/blobs/{sha}", auth(s.putBlob))
 	mux.HandleFunc("GET /v1/blobs/{sha}", auth(s.getBlob))
+	mux.HandleFunc("GET /v1/runner/blobs/{sha}", auth(s.getBlob))
 	mux.HandleFunc("POST /v1/runner/cas", auth(s.runnerCAS))
 	mux.HandleFunc("POST /v1/runner/poll", auth(s.runnerPoll))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/started", auth(s.runnerStarted))
@@ -464,6 +485,9 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	list := make([]api.Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
+		if j.Action != nil {
+			continue
+		}
 		if (len(states) == 0 || states[j.State]) && (client == "" || j.Client == client) {
 			list = append(list, s.view(j, now))
 		}
@@ -532,5 +556,8 @@ func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
 	close(j.done)
 	if isRunnerJob(j) {
 		s.runnerJobEnded(j)
+	}
+	if j.Action != nil {
+		delete(s.jobs, j.ID)
 	}
 }

@@ -81,12 +81,13 @@ type LogAck struct {
 // as the command has ended, before the remaining logs and the outputs are shipped; the
 // outputs fields are then empty).
 type RunnerDone struct {
-	ActionStatus int    `json:"action_status,omitempty"`
-	ActionResult []byte `json:"action_result,omitempty"`
-	State        string `json:"state"`
-	ExitCode     *int   `json:"exit_code"`
-	Signal       *int   `json:"signal"`
-	Error        string `json:"error,omitempty"`
+	ActionMissing []byte `json:"action_missing,omitempty"`
+	ActionStatus  int    `json:"action_status,omitempty"`
+	ActionResult  []byte `json:"action_result,omitempty"`
+	State         string `json:"state"`
+	ExitCode      *int   `json:"exit_code"`
+	Signal        *int   `json:"signal"`
+	Error         string `json:"error,omitempty"`
 	// Outcome of collecting the declared outputs (uploaded before done).
 	OutputsMissing []string `json:"outputs_missing,omitempty"`
 	OutputsSkipped []string `json:"outputs_skipped,omitempty"`

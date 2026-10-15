@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -17,9 +18,7 @@ import (
 // executeAction joins the existing FIFO, sharing slots with v0 jobs.
 func (s *Server) executeAction(ctx context.Context, action, command []byte) ([]byte, error) {
 	j := &job{actionCtx: ctx, done: make(chan struct{}), Action: action, Command: command, Job: api.Job{ID: newID(), State: api.Queued, CreatedAt: time.Now().UTC(), TimeoutSec: 86400, Sandbox: s.cfg.Sandbox}}
-	if _, err := s.prepare(j); err != nil {
-		return nil, err
-	}
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -33,6 +32,17 @@ func (s *Server) executeAction(ctx context.Context, action, command []byte) ([]b
 	case <-j.done:
 	case <-ctx.Done():
 		s.mu.Lock()
+		j.killReq, j.killReqAt = api.Canceled, time.Now()
+		for i, q := range s.queue {
+			if q == j {
+				s.queue = append(s.queue[:i], s.queue[i+1:]...)
+				s.finish(j, api.Canceled, nil, nil, "canceled while queued")
+				break
+			}
+		}
+		if j.rn != nil {
+			j.rn.poke()
+		}
 		if j.kill != nil {
 			j.kill(api.Canceled)
 		} else {
@@ -43,8 +53,12 @@ func (s *Server) executeAction(ctx context.Context, action, command []byte) ([]b
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.jobs, j.ID)
+	if j.Sandbox != "bwrap" {
+		reapi.DisableActionCache(ctx)
+	}
 	if j.State != api.Exited {
-		return nil, &reapi.ExecutionError{Code: j.ActionStatus, Message: j.Error}
+		return nil, &reapi.ExecutionError{Code: j.ActionStatus, Message: j.Error, Missing: j.ActionMissing}
 	}
 	return j.ActionResult, nil
 }
@@ -68,6 +82,10 @@ func (s *Server) runAction(j *job) {
 	j.ActionResult = result
 	if err != nil {
 		j.ActionStatus = actionStatus(err)
+		var ex *reapi.ExecutionError
+		if errors.As(err, &ex) {
+			j.ActionMissing = ex.Missing
+		}
 		s.finish(j, api.Failed, nil, nil, err.Error())
 	} else {
 		code := 0
@@ -90,6 +108,10 @@ func (s *Server) runnerCAS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if reapi.BlobSize(req.Digest) > reapi.MaxExecutorBlob || len(req.Data) > reapi.MaxExecutorBlob {
+		writeErr(w, 413, "runner CAS blob exceeds 96MiB limit")
+		return
+	}
 	var err error
 	if req.Upload {
 		err = s.actionStore.PutBlob(req.Digest, req.Data)
@@ -97,6 +119,10 @@ func (s *Server) runnerCAS(w http.ResponseWriter, r *http.Request) {
 		req.Data, err = s.actionStore.ReadBlob(req.Digest)
 	}
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(w, 404, err.Error())
+			return
+		}
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -123,17 +149,21 @@ func (r *Runner) executeAction(j *runnerJob) (procResult, api.RunnerDone) {
 	}
 	remote := &reapi.RemoteStore{Local: store, Fetch: func(d []byte) ([]byte, error) {
 		var out casTransfer
-		err := r.postJSON(r.ctx, "/v1/runner/cas", casTransfer{Digest: d}, &out)
+		err := r.postJSON(ctx, "/v1/runner/cas", casTransfer{Digest: d}, &out)
 		return out.Data, err
 	}, Upload: func(d, b []byte) error {
-		return r.postJSON(r.ctx, "/v1/runner/cas", casTransfer{Digest: d, Data: b, Upload: true}, nil)
+		return r.postJSON(ctx, "/v1/runner/cas", casTransfer{Digest: d, Data: b, Upload: true}, nil)
 	}}
-	if err = r.postJSON(r.ctx, "/v1/runner/jobs/"+j.spec.ID+"/started", struct{}{}, nil); err != nil {
+	if err = r.postJSON(ctx, "/v1/runner/jobs/"+j.spec.ID+"/started", struct{}{}, nil); err != nil {
 		return procResult{State: "crash"}, done
 	}
 	result, err := reapi.LocalExecutor(remote, r.cfg.DataDir, r.cfg.Sandbox)(ctx, j.spec.Action, j.spec.Command)
 	if err != nil {
 		done.ActionStatus = actionStatus(err)
+		var ex *reapi.ExecutionError
+		if errors.As(err, &ex) {
+			done.ActionMissing = ex.Missing
+		}
 		return failed("executing action: %v", err), done
 	}
 	done.ActionResult = result
@@ -147,6 +177,10 @@ func actionStatus(err error) int {
 	}
 	if errors.Is(err, context.Canceled) {
 		return 1
+	}
+	var ex *reapi.ExecutionError
+	if errors.As(err, &ex) {
+		return ex.Code
 	}
 	return 13
 }

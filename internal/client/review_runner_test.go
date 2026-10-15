@@ -18,8 +18,9 @@ import (
 // rawReq is fakeRunner.req without t.Fatal, for use from goroutines.
 func (f *fakeRunner) rawReq(method, path string, body []byte) int {
 	req, _ := http.NewRequest(method, f.ts.url+path, bytes.NewReader(body))
-	req.Header.Set("X-Tun-Token", f.ts.srv.Token())
+	req.Header.Set("X-Tun-Token", f.ts.srv.RunnerToken())
 	req.Header.Set(api.HeaderRunner, f.name)
+	req.Header.Set(api.HeaderRunnerInstance, f.instance)
 	if f.as != "" {
 		req.Header.Set("X-Tun-Client", f.as)
 	}

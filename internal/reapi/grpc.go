@@ -143,7 +143,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Bound stalled consumers, refreshing the idle limit for each message.
 		_ = rc.SetWriteDeadline(time.Now().Add(idle))
-		return frameWrite(w, b)
+		err := frameWrite(w, b)
+		_ = rc.SetWriteDeadline(time.Time{})
+		return err
 	}
 	b, e := read()
 	if e != nil {

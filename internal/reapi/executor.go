@@ -3,6 +3,7 @@ package reapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,23 +14,26 @@ import (
 	"syscall"
 
 	"github.com/altdansalt/tun/internal/sandbox"
+	"github.com/altdansalt/tun/internal/workspace"
 )
 
 // LocalExecutor uses the CAS as its persistent input cache. Inputs are copied so
 // commands cannot mutate cached bytes through hard links.
 func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, []byte, []byte) ([]byte, error) {
 	return func(parent context.Context, action, command []byte) ([]byte, error) {
+		if mode != sandbox.Bwrap {
+			DisableActionCache(parent)
+		}
 		timeout, err := actionTimeout(action)
 		if err != nil {
 			return nil, err
 		}
-		ctx, cancel := context.WithTimeout(parent, timeout)
-		defer cancel()
+		ctx := parent
 		root, err := os.MkdirTemp(dataDir, "action-")
 		if err != nil {
 			return nil, err
 		}
-		defer os.RemoveAll(root)
+		defer workspace.RemoveAll(root)
 		work, tmp := filepath.Join(root, "work"), filepath.Join(root, "tmp")
 		if err = os.MkdirAll(work, 0700); err != nil {
 			return nil, err
@@ -42,7 +46,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 			return nil, err
 		}
 		defer fs.Close()
-		if err = materialize(store, fs, ".", get(action, 2).b, 0); err != nil {
+		if err = materializeContext(ctx, store, fs, ".", get(action, 2).b, 0, &inputBudget{}); err != nil {
 			return nil, err
 		}
 		cwd := string(get(command, 6).b)
@@ -84,8 +88,10 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 				return nil, err
 			}
 		}
-		var stdout, stderr bytes.Buffer
-		cmd, net, err := sandbox.Start(sandbox.Spec{Mode: mode, Argv: argv, Env: env, Dir: filepath.Join(work, cwd), Root: root, Tmp: tmp, DataDir: dataDir, NetworkOff: true}, &stdout, &stderr)
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		defer cancel()
+		stdout, stderr := &limitedBuffer{overflow: cancel}, &limitedBuffer{overflow: cancel}
+		cmd, net, err := sandbox.Start(sandbox.Spec{Mode: mode, Argv: argv, Env: env, Dir: filepath.Join(work, cwd), Root: root, Tmp: tmp, DataDir: dataDir, NetworkOff: true}, stdout, stderr)
 		if err != nil {
 			return nil, err
 		}
@@ -110,6 +116,9 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 				return nil, err
 			}
 		}
+		if stdout.exceeded || stderr.exceeded {
+			return nil, capacityError()
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("action timeout or shutdown: %w", ctx.Err())
 		}
@@ -126,7 +135,7 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 		}
 		seen := map[string]bool{}
 		for _, out := range outputs {
-			p := string(out)
+			p := filepath.Clean(string(out))
 			if seen[p] {
 				continue
 			}
@@ -176,6 +185,9 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 				result = append(result, bytesField(2, node)...)
 			}
 		}
+		if len(result) > 3<<20 {
+			return nil, capacityError()
+		}
 		return result, nil
 	}
 }
@@ -186,13 +198,58 @@ func nodeName(b []byte) (string, error) {
 	}
 	return n, nil
 }
+
+const MaxExecutorBlob = 96 << 20
+const maxLogBytes = 4 << 20
+
+type limitedBuffer struct {
+	bytes.Buffer
+	exceeded bool
+	overflow func()
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	left := maxLogBytes - b.Len()
+	if n > left {
+		b.exceeded = true
+		if b.overflow != nil {
+			b.overflow()
+		}
+		p = p[:left]
+	}
+	b.Buffer.Write(p)
+	return n, nil
+}
+func capacityError() error {
+	return &ExecutionError{Code: 8, Message: "executor resource limit exceeded (96MiB blob, 4MiB log, 100000 nodes, 2GiB inputs)"}
+}
+
+type inputBudget struct {
+	nodes int
+	bytes uint64
+}
+
 func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
+	return materializeContext(context.Background(), s, r, p, d, depth, &inputBudget{})
+}
+func materializeContext(ctx context.Context, s BlobStore, r *os.Root, p string, d []byte, depth int, budget *inputBudget) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if get(d, 2).v > MaxExecutorBlob {
+		return capacityError()
+	}
 	if depth > 256 {
 		return fmt.Errorf("input tree too deep")
 	}
-	b, err := s.read("cas-", d)
+	b, err := inputRead(s, d)
 	if err != nil {
 		return err
+	}
+	budget.bytes += uint64(len(b))
+	if budget.bytes > 2<<30 {
+		return capacityError()
 	}
 	if _, err = decode(b); err != nil {
 		return err
@@ -200,6 +257,13 @@ func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
 	names := map[string]bool{}
 	for _, kind := range []int{1, 2, 3} {
 		for _, node := range all(b, kind) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			budget.nodes++
+			if budget.nodes > 100000 {
+				return capacityError()
+			}
 			n, err := nodeName(node)
 			if err != nil {
 				return err
@@ -211,9 +275,10 @@ func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
 			name := filepath.Join(p, n)
 			switch kind {
 			case 1:
-				data, err := s.read("cas-", get(node, 2).b)
-				if err != nil {
-					return err
+				d := get(node, 2).b
+				budget.bytes += get(d, 2).v
+				if get(d, 2).v > MaxExecutorBlob || budget.bytes > 2<<30 {
+					return capacityError()
 				}
 				mode := os.FileMode(0644)
 				if get(node, 4).v != 0 {
@@ -223,7 +288,20 @@ func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
 				if err != nil {
 					return err
 				}
-				_, err = f.Write(data)
+				if copier, ok := s.(interface {
+					copyInput(context.Context, []byte, io.Writer) error
+				}); ok {
+					err = copier.copyInput(ctx, d, f)
+					if errors.Is(err, os.ErrNotExist) {
+						err = &ExecutionError{Code: 9, Message: "missing input", Missing: d}
+					}
+				} else {
+					var data []byte
+					data, err = inputRead(s, d)
+					if err == nil {
+						_, err = f.Write(data)
+					}
+				}
 				ce := f.Close()
 				if err != nil {
 					return err
@@ -235,7 +313,7 @@ func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
 				if err = r.Mkdir(name, 0755); err != nil {
 					return err
 				}
-				if err = materialize(s, r, name, get(node, 2).b, depth+1); err != nil {
+				if err = materializeContext(ctx, s, r, name, get(node, 2).b, depth+1, budget); err != nil {
 					return err
 				}
 			case 3:
@@ -252,17 +330,31 @@ func uploadFile(s BlobStore, r *os.Root, name, label string, info os.FileInfo) (
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("unsupported output %q", name)
 	}
+	if info.Size() > MaxExecutorBlob {
+		return nil, capacityError()
+	}
 	f, err := r.Open(name)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
+	var d []byte
+	if uploader, ok := s.(interface {
+		putOutput(*os.File) ([]byte, error)
+	}); ok {
+		d, err = uploader.putOutput(f)
+	} else {
+		var data []byte
+		data, err = io.ReadAll(io.LimitReader(f, MaxExecutorBlob+1))
+		if len(data) > MaxExecutorBlob {
+			return nil, capacityError()
+		}
+		if err == nil {
+			d = digest(data)
+			err = s.put("cas-", d, data)
+		}
 	}
-	d := digest(data)
-	if err = s.put("cas-", d, data); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	ex := int64(0)
@@ -276,11 +368,33 @@ func uploadFile(s BlobStore, r *os.Root, name, label string, info os.FileInfo) (
 	return node, nil
 }
 func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, error) {
+	return collectDirectoryBounded(s, r, p, 0, new(int))
+}
+func collectDirectoryBounded(s BlobStore, r *os.Root, p string, depth int, count *int) ([]byte, [][]byte, error) {
+	if depth > 256 {
+		return nil, nil, capacityError()
+	}
 	f, err := r.Open(p)
 	if err != nil {
 		return nil, nil, err
 	}
-	ents, err := f.ReadDir(-1)
+	var ents []os.DirEntry
+	for {
+		batch, e := f.ReadDir(1000)
+		*count += len(batch)
+		if *count > 100000 {
+			f.Close()
+			return nil, nil, capacityError()
+		}
+		ents = append(ents, batch...)
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			f.Close()
+			return nil, nil, e
+		}
+	}
 	f.Close()
 	if err != nil {
 		return nil, nil, err
@@ -302,7 +416,7 @@ func collectDirectory(s BlobStore, r *os.Root, p string) ([]byte, [][]byte, erro
 			}
 			links = append(links, bytesField(3, msg(bytesField(1, []byte(ent.Name())), bytesField(2, []byte(target))))...)
 		} else if info.IsDir() {
-			child, desc, err := collectDirectory(s, r, name)
+			child, desc, err := collectDirectoryBounded(s, r, name, depth+1, count)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -337,6 +451,9 @@ type RemoteStore struct {
 }
 
 func (s *RemoteStore) read(prefix string, d []byte) ([]byte, error) {
+	if get(d, 2).v > MaxExecutorBlob {
+		return nil, capacityError()
+	}
 	if b, err := s.Local.read(prefix, d); err == nil {
 		return b, nil
 	}
@@ -349,8 +466,49 @@ func (s *RemoteStore) read(prefix string, d []byte) ([]byte, error) {
 	}
 	return b, nil
 }
-func (s *RemoteStore) put(prefix string, d, b []byte) error { return s.Upload(d, b) }
+func (s *RemoteStore) put(prefix string, d, b []byte) error {
+	if len(b) > MaxExecutorBlob {
+		return capacityError()
+	}
+	return s.Upload(d, b)
+}
 
 // ReadBlob and PutBlob are used by the authenticated runner transport.
 func (s *Store) ReadBlob(d []byte) ([]byte, error) { return s.read("cas-", d) }
 func (s *Store) PutBlob(d, b []byte) error         { return s.put("cas-", d, b) }
+
+func inputRead(s BlobStore, d []byte) ([]byte, error) {
+	if get(d, 2).v > MaxExecutorBlob {
+		return nil, capacityError()
+	}
+	b, err := s.read("cas-", d)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, &ExecutionError{Code: 9, Message: "missing input", Missing: d}
+	}
+	return b, err
+}
+
+// SweepExecRoots removes abandoned exec roots after a process restart.
+func SweepExecRoots(dir string) error {
+	paths, err := filepath.Glob(filepath.Join(dir, "action-*"))
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		if err := workspace.RemoveAll(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func BlobSize(d []byte) uint64 { return get(d, 2).v }
+
+func (s *RemoteStore) copyInput(ctx context.Context, d []byte, dst io.Writer) error {
+	if !s.Local.has(d) {
+		if _, err := s.read("cas-", d); err != nil {
+			return err
+		}
+	}
+	return s.Local.copyInput(ctx, d, dst)
+}

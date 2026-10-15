@@ -2,6 +2,7 @@ package reapi
 
 import (
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -121,6 +122,15 @@ func (s *Store) read(kind string, d []byte) ([]byte, error) {
 	lock.Lock()
 	defer lock.Unlock()
 	p := filepath.Join(s.dir, kind+k)
+	if kind == "cas-" {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		if uint64(info.Size()) != get(d, 2).v {
+			return nil, os.ErrNotExist
+		}
+	}
 	b, e := os.ReadFile(p)
 	if e == nil {
 		s.touch(kind + k)
@@ -128,7 +138,7 @@ func (s *Store) read(kind string, d []byte) ([]byte, error) {
 		_ = os.Chtimes(p, now, now)
 	}
 
-	if e == nil && kind == "cas-" && uint64(len(b)) != get(d, 2).v {
+	if e == nil && kind == "cas-" && (uint64(len(b)) != get(d, 2).v || string(get(digest(b), 1).b) != k) {
 		return nil, os.ErrNotExist
 	}
 	return b, e
@@ -358,4 +368,64 @@ func cacheFile(name string) bool {
 		}
 	}
 	return false
+}
+
+// copyInput verifies the content while copying, with bounded memory.
+func (s *Store) copyInput(ctx context.Context, d []byte, dst io.Writer) error {
+	if isEmptyDigest(d) {
+		return ctx.Err()
+	}
+	f, err := s.openBlob(d)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(dst, h), contextReader{ctx, f})
+	if err != nil {
+		return err
+	}
+	if uint64(n) != get(d, 2).v || hex.EncodeToString(h.Sum(nil)) != string(get(d, 1).b) {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(b []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(b)
+}
+func (s *Store) putOutput(f *os.File) ([]byte, error) {
+	tmp, err := os.CreateTemp(s.dir, ".write-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(f, MaxExecutorBlob+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > MaxExecutorBlob || n > s.max {
+		return nil, capacityError()
+	}
+	d := msg(bytesField(1, []byte(hex.EncodeToString(h.Sum(nil)))), intField(2, n))
+	k, _ := key(d)
+	lock := s.fileLock("cas-" + k)
+	lock.Lock()
+	err = os.Rename(tmp.Name(), filepath.Join(s.dir, "cas-"+k))
+	if err == nil {
+		s.record("cas-"+k, n, nil)
+	}
+	lock.Unlock()
+	s.evict()
+	return d, err
 }

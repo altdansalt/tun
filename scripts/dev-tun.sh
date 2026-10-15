@@ -29,8 +29,10 @@ pid=$!
 {
   IFS= read -r url
   IFS= read -r token
+  IFS= read -r runner_token
 } <"$tmp/env"
 [[ "$url" == TUN_URL=http://127.0.0.1:* && "$token" == TUN_TOKEN=?* ]]
 export TUN_URL="${url#TUN_URL=}" TUN_TOKEN="${token#TUN_TOKEN=}"
+export TUN_RUNNER_TOKEN="${runner_token#TUN_RUNNER_TOKEN=}"
 export PATH="$tmp:$PATH"
 "$@" 3>&-

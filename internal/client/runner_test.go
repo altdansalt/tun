@@ -48,7 +48,7 @@ func (ts *testServer) startRunnerCfg(cfg server.RunnerConfig) *testRunner {
 	t.Helper()
 	dir := t.TempDir()
 	t.Cleanup(func() { workspace.RemoveAll(dir) })
-	cfg.Hub, cfg.Token, cfg.DataDir, cfg.KillGrace, cfg.Logf = ts.url, ts.srv.Token(), dir, 50*time.Millisecond, t.Logf
+	cfg.Hub, cfg.Token, cfg.DataDir, cfg.KillGrace, cfg.Logf = ts.url, ts.srv.RunnerToken(), dir, 50*time.Millisecond, t.Logf
 	r, err := server.NewRunner(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -269,8 +269,9 @@ type fakeRunner struct {
 func (f *fakeRunner) req(method, path string, body []byte) (int, []byte) {
 	f.ts.t.Helper()
 	req, _ := http.NewRequest(method, f.ts.url+path, bytes.NewReader(body))
-	req.Header.Set("X-Tun-Token", f.ts.srv.Token())
+	req.Header.Set("X-Tun-Token", f.ts.srv.RunnerToken())
 	req.Header.Set(api.HeaderRunner, f.name)
+	req.Header.Set(api.HeaderRunnerInstance, f.instance)
 	if f.as != "" {
 		req.Header.Set("X-Tun-Client", f.as)
 	}
@@ -285,6 +286,9 @@ func (f *fakeRunner) req(method, path string, body []byte) (int, []byte) {
 
 func (f *fakeRunner) poll(slots int, running ...string) (int, api.RunnerPollResponse) {
 	f.ts.t.Helper()
+	if f.instance == "" {
+		f.instance = "test-" + f.name
+	}
 	if f.seq > 0 {
 		f.seq++
 	}

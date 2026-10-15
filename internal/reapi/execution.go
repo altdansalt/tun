@@ -3,12 +3,15 @@ package reapi
 // Execution messages follow remote_execution.proto and google/longrunning/operations.proto.
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,6 +19,7 @@ import (
 type ExecutionError struct {
 	Code    int
 	Message string
+	Missing []byte
 }
 
 func (e *ExecutionError) Error() string { return e.Message }
@@ -23,11 +27,12 @@ func (e *ExecutionError) Error() string { return e.Message }
 const executionType = "type.googleapis.com/build.bazel.remote.execution.v2."
 
 type operation struct {
-	name     string
-	digest   []byte
-	stage    int64
-	response []byte
-	changed  chan struct{}
+	name      string
+	digest    []byte
+	stage     int64
+	response  []byte
+	changed   chan struct{}
+	completed time.Time
 }
 
 // Execution retains operations until shutdown. Work is independent of RPC lifetimes.
@@ -72,6 +77,9 @@ func (e *Execution) update(o *operation, stage int64, response []byte) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	o.stage, o.response = stage, response
+	if response != nil {
+		o.completed = time.Now()
+	}
 	close(o.changed)
 	o.changed = make(chan struct{})
 }
@@ -101,12 +109,18 @@ func (e *Execution) start(b []byte) (*operation, int, error) {
 	if _, err := key(d); err != nil {
 		return nil, 3, err
 	}
+	if get(d, 2).v > maxMessage {
+		return nil, 8, capacityError()
+	}
 	action, err := e.Store.read("cas-", d)
 	if err != nil {
 		return nil, 9, fmt.Errorf("missing Action: %w", err)
 	}
 	if _, err = decode(action); err != nil {
 		return nil, 3, err
+	}
+	if get(get(action, 1).b, 2).v > maxMessage {
+		return nil, 8, capacityError()
 	}
 	command, err := e.Store.read("cas-", get(action, 1).b)
 	if err != nil {
@@ -124,20 +138,31 @@ func (e *Execution) start(b []byte) (*operation, int, error) {
 	if err = validatePlatform(get(command, 5).b); err != nil {
 		return nil, 9, err
 	}
+	var cached []byte
+	if get(b, 3).v == 0 {
+		if result, err := e.Store.read("ac-", d); err == nil && e.Store.actionAvailable(result) {
+			cached = result
+		}
+	}
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return nil, 13, err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	for name, op := range e.ops {
+		if !op.completed.IsZero() && time.Since(op.completed) > time.Hour {
+			delete(e.ops, name)
+		}
+	}
 	if e.ctx.Err() != nil {
 		return nil, 14, fmt.Errorf("executor stopped")
 	}
-	e.next++
-	o := &operation{name: fmt.Sprintf("operations/%d", e.next), digest: d, stage: 2, changed: make(chan struct{})}
+	o := &operation{name: "operations/" + hex.EncodeToString(id[:]), digest: d, stage: 2, changed: make(chan struct{})}
 	e.ops[o.name] = o
-	if get(b, 3).v == 0 {
-		if result, err := e.Store.read("ac-", d); err == nil && e.Store.actionAvailable(result) {
-			o.stage = 4
-			o.response = msg(bytesField(1, result), intField(2, 1))
-			return o, 0, nil
-		}
+	if cached != nil {
+		o.stage, o.response, o.completed = 4, msg(bytesField(1, cached), intField(2, 1)), time.Now()
+		return o, 0, nil
 	}
 	if e.externalScheduler {
 		e.wg.Add(1)
@@ -181,7 +206,9 @@ func (e *Execution) worker() {
 }
 
 func (e *Execution) execute(o *operation) {
-	ctx := context.WithValue(e.ctx, stageKey{}, func() { e.update(o, 3, nil) })
+	var unsafe atomic.Bool
+	ctx := context.WithValue(e.ctx, unsafeKey{}, &unsafe)
+	ctx = context.WithValue(ctx, stageKey{}, func() { e.update(o, 3, nil) })
 	if !e.externalScheduler {
 		MarkExecuting(ctx)
 	}
@@ -206,16 +233,29 @@ func (e *Execution) execute(o *operation) {
 		} else if errors.Is(err, context.Canceled) {
 			code = 1
 		}
-		response = bytesField(3, msg(intField(1, code), bytesField(2, []byte(err.Error()))))
-	} else if get(action, 7).v == 0 && get(result, 4).v == 0 {
+		st := msg(intField(1, code), bytesField(2, []byte(err.Error())))
+		if status != nil && status.Missing != nil {
+			d := status.Missing
+			violation := msg(bytesField(1, []byte("MISSING")), bytesField(2, []byte(fmt.Sprintf("blobs/%s/%d", get(d, 1).b, get(d, 2).v))))
+			st = append(st, bytesField(3, anyMessage("type.googleapis.com/google.rpc.PreconditionFailure", bytesField(1, violation)))...)
+		}
+		response = bytesField(3, st)
+	} else if !unsafe.Load() && get(action, 7).v == 0 && get(result, 4).v == 0 {
 		if err = e.Store.put("ac-", o.digest, result); err != nil {
-			response = msg(bytesField(1, result), bytesField(4, []byte("cache write: "+err.Error())))
+			response = msg(bytesField(1, result), bytesField(5, []byte("cache write: "+err.Error())))
 		}
 	}
 	e.update(o, 4, response)
 }
 
 type stageKey struct{}
+type unsafeKey struct{}
+
+func DisableActionCache(ctx context.Context) {
+	if v, ok := ctx.Value(unsafeKey{}).(*atomic.Bool); ok {
+		v.Store(true)
+	}
+}
 
 // MarkExecuting records the scheduler commit point for operation metadata.
 func MarkExecuting(ctx context.Context) {
@@ -260,6 +300,7 @@ func (e *Execution) stream(ctx context.Context, method string, b []byte, write f
 		case <-e.ctx.Done():
 			return 14, fmt.Errorf("executor stopped")
 		case <-ch:
+		case <-time.After(30 * time.Second):
 		}
 	}
 }
@@ -273,7 +314,7 @@ func safeRelative(p string) error {
 }
 func actionTimeout(action []byte) (time.Duration, error) {
 	d := get(action, 6).b
-	if d == nil {
+	if d == nil || (get(d, 1).v == 0 && get(d, 2).v == 0) {
 		return 30 * time.Minute, nil
 	}
 	sec, nano := get(d, 1).v, get(d, 2).v

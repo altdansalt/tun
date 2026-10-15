@@ -128,8 +128,12 @@ func (s *Server) adopt(j *job) {
 
 func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	var p api.RunnerPoll
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&p); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
 		writeErr(w, 400, "bad poll JSON: "+err.Error())
+		return
+	}
+	if p.Instance == "" || p.Instance != r.Header.Get(api.HeaderRunnerInstance) {
+		writeErr(w, 400, "runner instance header must match poll")
 		return
 	}
 	name := cleanName(p.Name)
@@ -228,7 +232,7 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 		s.runners[name] = rn
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
-	rn.actions = p.Actions
+	rn.actions = p.Actions && p.Sandbox == "bwrap"
 	rn.privateNet = p.NetworkIsolation
 	return rn
 }
@@ -260,6 +264,7 @@ func (s *Server) dropRunner(rn *runnerState, msg string) {
 		if d := j.exited; d != nil {
 			s.finishRunnerJob(j, *d, msg+" before it finished shipping the job's logs and outputs")
 		} else {
+			j.ActionStatus = 14
 			s.finish(j, api.Failed, nil, nil, msg)
 		}
 	}
@@ -371,7 +376,7 @@ func (s *Server) runnerJob(w http.ResponseWriter, r *http.Request, running bool)
 		writeErr(w, 410, fmt.Sprintf("no such job %q", r.PathValue("id")))
 	case j.Runner != name || j.rn == nil:
 		writeErr(w, 410, fmt.Sprintf("job %s is not assigned to runner %q", j.ID, name))
-	case inst != "" && j.rn.instance != "" && j.rn.instance != inst:
+	case inst == "" || j.rn.instance != inst:
 		writeErr(w, 410, fmt.Sprintf("job %s belongs to another instance of runner %q", j.ID, name))
 	case api.Terminal(j.State):
 		writeErr(w, 410, fmt.Sprintf("job %s has already ended (%s)", j.ID, j.State))
@@ -522,7 +527,7 @@ func (s *Server) runnerOutputs(w http.ResponseWriter, r *http.Request) {
 
 func decodeDone(w http.ResponseWriter, r *http.Request) (api.RunnerDone, bool) {
 	var d api.RunnerDone
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&d); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 128<<20)).Decode(&d); err != nil {
 		writeErr(w, 400, "bad done JSON: "+err.Error())
 		return d, false
 	}
@@ -567,7 +572,7 @@ func (s *Server) runnerDone(w http.ResponseWriter, r *http.Request) {
 	if j == nil {
 		return
 	}
-	j.ActionResult, j.ActionStatus = d.ActionResult, d.ActionStatus
+	j.ActionResult, j.ActionStatus, j.ActionMissing = d.ActionResult, d.ActionStatus, d.ActionMissing
 	j.OutMissing, j.OutSkipped, j.OutError = d.OutputsMissing, d.OutputsSkipped, d.OutputsError
 	s.finishRunnerJob(j, d, "")
 	writeJSON(w, 200, struct{}{})
