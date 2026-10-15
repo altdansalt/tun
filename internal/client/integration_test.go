@@ -581,10 +581,73 @@ func TestProxyErrorPage(t *testing.T) {
 	}))
 	defer hs.Close()
 	var errb bytes.Buffer
-	code := Main([]string{"status", "x"}, Env{Stdout: io.Discard, Stderr: &errb, Cwd: t.TempDir(),
-		Getenv: func(k string) string { return map[string]string{"TUN_URL": hs.URL, "TUN_TOKEN": "t"}[k] }})
+	// Exercise formatting without the CLI's 16-minute outage retry policy.
+	c := &Client{URL: hs.URL, Token: "t"}
+	_, err := c.Get(context.Background(), "x")
+	code := errorf(Env{Stderr: &errb}, "%v", err)
 	want := "tun: server: not tun but an HTML page (a proxy in front of tun; is the server down or restarting?): Port 7070 unbound. We dialed port 7070 on this VM and nobody answered. (HTTP 502)\n"
 	if code != 125 || errb.String() != want {
 		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+// The proxy loses the first successful response: replay must return the admitted job.
+func TestCreateAmbiguousProxyRetry(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	var calls atomic.Int32
+	var key string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			key = r.Header.Get("X-Tun-Request-Id")
+		} else if key == "" || key != r.Header.Get("X-Tun-Request-Id") {
+			t.Error("retry changed request key")
+		}
+		rec := httptest.NewRecorder()
+		ts.srv.Handler().ServeHTTP(rec, r)
+		if calls.Load() == 1 {
+			w.WriteHeader(502)
+			return
+		}
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		w.Write(rec.Body.Bytes())
+	}))
+	defer proxy.Close()
+	c := ts.client()
+	c.URL = proxy.URL
+	c.RetryTimeout = time.Second
+	j, err := c.Create(context.Background(), api.CreateJob{Script: "echo once"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := ts.client().List(context.Background(), 100, nil)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != j.ID {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+	// Keys survive a server restart.
+	ts.stop()
+	ts2 := startServer(t, server.Config{DataDir: ts.data})
+	body := strings.NewReader(`{"script":"echo once"}`)
+	resp, err := ts2.client().requestH(context.Background(), "POST", "/v1/jobs", body, int64(body.Len()), map[string]string{"X-Tun-Request-Id": key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var replay api.Job
+	if err := json.NewDecoder(resp.Body).Decode(&replay); err != nil || replay.ID != j.ID {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestTailHeartbeat(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	var out, diagnostics bytes.Buffer
+	e := ts.env(t.TempDir(), nil, &out, &diagnostics, nil)
+	e.HeartbeatInterval = 10 * time.Millisecond
+	code := Main([]string{"run", "--no-workspace", "--tail", "1", "-c", "echo first; echo error >&2; sleep .3; echo last"}, e)
+	if code != 0 || out.String() != "last\n" || !strings.Contains(diagnostics.String(), "stdout 1 lines, stderr 1 lines; tun logs ") {
+		t.Fatalf("code=%d out=%q stderr=%q", code, out.String(), diagnostics.String())
 	}
 }

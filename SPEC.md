@@ -37,7 +37,9 @@ tun run [flags] -c '<shell script>' run via bash -c
                     stdout) and stderr (to stderr), then one "tun: job <id>: showed the last a of b
                     stdout lines and c of d stderr lines; full logs: tun logs <id>, tun logs --stderr
                     <id>" line. The opening "tun: job <id> (--tail N: ...)" line says the same.
-                    Exit status as without it. Not with --json, --detach or --service. N must be
+                    Every 30s while running, stderr reports elapsed seconds, stdout/stderr line
+                    counts, and a tun logs command. Exit status as without it.
+                    Not with --json, --detach or --service. N must be
                     >= 0 (a negative N is a usage error, exit 125; also for tun logs --tail).
 tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>       tun cancel <id>
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
@@ -567,3 +569,7 @@ workspaces and incremental upload for `tun run` (tun bazel has both), snapshots.
 See docs/deploy.md. CLI requests retry connection failures and HTTP 502/503 for up to
 16m with backoff. Runners finish jobs while heartbeating with zero advertised slots.
 Crashes and expired drain timeouts retain the failure behavior described above.
+
+Job creation sends a random `X-Tun-Request-Id` per request, reused on retries. The server
+returns the existing job for the same client and key for 24 hours, including across restarts,
+while the job remains retained. Failed admissions do not consume the key.

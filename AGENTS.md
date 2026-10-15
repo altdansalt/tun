@@ -14,7 +14,8 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     Packages: `-e PKGS='./internal/reapi ./internal/client'` (default `./...`).
     `tun run` says where the job runs: `tun: running on hub` or `tun: running on runner NAME`.
   - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
-    stderr once the job ends (same exit code); `tun logs --tail N [--stderr] <id>` for more.
+    stderr once the job ends (same exit code), with a progress heartbeat every 30s;
+    `tun logs --tail N [--stderr] <id>` for more.
   - Test the changed binary with a private server: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
     The wrapper builds the working tree, adds the new binary to PATH, exports TUN_URL/TUN_TOKEN,
     runs the command, and cleans up the server and temporary files. Never replace the shared server.

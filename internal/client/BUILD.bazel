@@ -56,6 +56,7 @@ go_test(
     env = {"TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
     deps = [
         "//internal/api",
+        "//internal/reapi",
         "//internal/sandbox",
         "//internal/server",
         "//internal/workspace",
