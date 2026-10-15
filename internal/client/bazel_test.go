@@ -42,7 +42,7 @@ fi
 mkdir -p "$ob/server"
 pid=$(cat "$ob/server/server.pid.txt" 2>/dev/null)
 if [ "$cmd" = shutdown ]; then # like Bazel's: returns once the server is gone
-  [ -n "$pid" ] && kill "$pid" && while kill -0 "$pid" 2>/dev/null; do sleep 0.01; done
+  [ -n "$pid" ] && kill "$pid" && for _ in $(seq 1000); do kill -0 "$pid" 2>/dev/null || break; sleep 0.01; done
   rm -f "$ob/server/server.pid.txt"
   exit 0
 fi
