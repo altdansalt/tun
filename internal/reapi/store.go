@@ -2,6 +2,7 @@ package reapi
 
 import (
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -117,8 +118,18 @@ func (s *Store) read(kind string, d []byte) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
+	if kind == "cas-" {
+		// Don't read a file whose size can't match (it may be large).
+		info, err := os.Stat(filepath.Join(s.dir, kind+k))
+		if err != nil {
+			return nil, err
+		}
+		if uint64(info.Size()) != get(d, 2).v {
+			return nil, os.ErrNotExist
+		}
+	}
 	b, e := s.readName(kind + k)
-	if e == nil && kind == "cas-" && uint64(len(b)) != get(d, 2).v {
+	if e == nil && kind == "cas-" && (uint64(len(b)) != get(d, 2).v || string(get(digest(b), 1).b) != k) {
 		return nil, os.ErrNotExist
 	}
 	return b, e
@@ -197,15 +208,26 @@ func (s *Store) evict() {
 	if !over {
 		return
 	}
+	s.Reclaim(func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.total > s.max
+	})
+}
+
+// Reclaim deletes least recently used cache entries while low reports disk pressure.
+// The callback runs outside index and file locks. Open readers keep their descriptors; missing
+// inputs are fetched again, as with budget eviction.
+func (s *Store) Reclaim(low func() bool) {
 	s.eviction.Lock()
 	defer s.eviction.Unlock()
 	s.mu.Lock()
 	remaining := s.lru.Len()
 	s.mu.Unlock()
-	for remaining > 0 {
+	for remaining > 0 && low() {
 		remaining--
 		s.mu.Lock()
-		if s.total <= s.max || s.lru.Len() == 0 {
+		if s.lru.Len() == 0 {
 			s.mu.Unlock()
 			return
 		}
@@ -379,4 +401,64 @@ func cacheFile(name string) bool {
 		}
 	}
 	return false
+}
+
+// copyInput verifies the content while copying, with bounded memory.
+func (s *Store) copyInput(ctx context.Context, d []byte, dst io.Writer) error {
+	if isEmptyDigest(d) {
+		return ctx.Err()
+	}
+	f, err := s.openBlob(d)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(dst, h), contextReader{ctx, f})
+	if err != nil {
+		return err
+	}
+	if uint64(n) != get(d, 2).v || hex.EncodeToString(h.Sum(nil)) != string(get(d, 1).b) {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(b []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(b)
+}
+func (s *Store) putOutput(f *os.File) ([]byte, error) {
+	tmp, err := os.CreateTemp(s.dir, ".write-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(f, MaxExecutorBlob+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > MaxExecutorBlob || n > s.max {
+		return nil, capacityError()
+	}
+	d := (Digest{Hash: hex.EncodeToString(h.Sum(nil)), Size: n}).marshal()
+	k, _ := key(d)
+	lock := s.fileLock("cas-" + k)
+	lock.Lock()
+	err = os.Rename(tmp.Name(), filepath.Join(s.dir, "cas-"+k))
+	if err == nil {
+		s.record("cas-"+k, n, nil)
+	}
+	lock.Unlock()
+	s.evict()
+	return d, err
 }

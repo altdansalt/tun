@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/reapi"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
 )
@@ -33,7 +34,7 @@ import (
 // RunnerConfig configures a Runner.
 type RunnerConfig struct {
 	Hub     string // hub base URL
-	Token   string // sent as X-Tun-Token (the hub's client token, for now)
+	Token   string // sent as X-Tun-Token (the hub's dedicated runner token)
 	Name    string
 	Slots   int
 	DataDir string // blob cache, job dirs, shared build caches
@@ -62,20 +63,22 @@ type Runner struct {
 	pollCtx  context.Context // canceled to stop taking work
 	stopPoll context.CancelFunc
 
-	mu         sync.Mutex
-	jobs       map[string]*runnerJob
-	draining   bool
-	superseded string // the hub's message once a newer instance took this runner's name
-	wg         sync.WaitGroup
-	blobMu     sync.Mutex
-	blobLock   map[string]*sync.Mutex
-	reclaimed  atomic.Int64 // blobs deleted because disk space was low
+	mu          sync.Mutex
+	jobs        map[string]*runnerJob
+	draining    bool
+	superseded  string // the hub's message once a newer instance took this runner's name
+	wg          sync.WaitGroup
+	actionStore *reapi.Store
+	blobMu      sync.Mutex
+	blobLock    map[string]*sync.Mutex
+	reclaimed   atomic.Int64
 }
 
 type runnerJob struct {
-	spec      api.RunnerJob
-	proc      *proc  // once started
-	killState string // a kill requested before the command started
+	actionCancel context.CancelFunc
+	spec         api.RunnerJob
+	proc         *proc  // once started
+	killState    string // a kill requested before the command started
 }
 
 var errGone = errors.New("the hub no longer wants this job")
@@ -128,6 +131,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		lock.Close()
 		return nil, fmt.Errorf("data dir %s is in use by another tun runner (%v); give each runner its own --data (and --name)", dir, err)
+	}
+	if err := reapi.SweepExecRoots(dir); err != nil {
+		lock.Close()
+		return nil, err
 	}
 	instance := randHex(8)
 	prev, _ := os.ReadFile(filepath.Join(dir, "instance"))
@@ -283,11 +290,14 @@ func hubError(resp *http.Response) error {
 	if json.Unmarshal(b, &e) != nil || e.Error == "" {
 		e.Error = strings.TrimSpace(string(b))
 	}
+	if resp.StatusCode == 404 {
+		return fmt.Errorf("%w: %s", os.ErrNotExist, e.Error)
+	}
 	if resp.StatusCode == 410 {
 		return fmt.Errorf("%w: %s", errGone, e.Error)
 	}
 	if resp.StatusCode == 401 {
-		return fmt.Errorf("hub refused the token (HTTP 401): %s; pass the hub's token with --token-file or $TUN_TOKEN", e.Error)
+		return fmt.Errorf("hub refused the token (HTTP 401): %s; pass the hub's runner-token with --token-file or $TUN_RUNNER_TOKEN", e.Error)
 	}
 	return fmt.Errorf("hub: %s (HTTP %d)", e.Error, resp.StatusCode)
 }
@@ -309,7 +319,7 @@ func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
 		return hubError(resp)
 	}
 	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+		return json.NewDecoder(io.LimitReader(resp.Body, (128<<20)+1024)).Decode(out)
 	}
 	return nil
 }
@@ -317,7 +327,7 @@ func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
 func (r *Runner) poll() (api.RunnerPollResponse, error) {
 	r.mu.Lock()
 	r.seq++
-	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Previous: r.previous, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
+	req := api.RunnerPoll{Actions: true, Name: r.cfg.Name, Instance: r.instance, Previous: r.previous, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
 		NetworkIsolation: r.cfg.PrivateNet, Running: []string{}}
 	for id := range r.jobs {
 		req.Running = append(req.Running, id)
@@ -378,6 +388,8 @@ func (r *Runner) cancelJob(id, state string) {
 	j := r.jobs[id]
 	switch {
 	case j == nil:
+	case j.actionCancel != nil:
+		j.actionCancel()
 	case j.proc != nil:
 		j.proc.kill(state)
 	case j.killState == "":
@@ -419,6 +431,9 @@ func failed(format string, a ...any) procResult {
 
 // execute prepares, starts and waits for the job, ships its logs and uploads its outputs.
 func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
+	if j.spec.Action != nil {
+		return r.executeAction(j)
+	}
 	spec := j.spec
 	var done api.RunnerDone
 	if err := prepareJobDir(r.cfg.DataDir, spec.ID); err != nil {
@@ -548,7 +563,7 @@ func (r *Runner) blob(sha string) (*os.File, error) {
 		return f, nil
 	}
 	err := r.retry(time.Minute, func() error {
-		resp, err := r.do(r.ctx, "GET", "/v1/blobs/"+sha, nil)
+		resp, err := r.do(r.ctx, "GET", "/v1/runner/blobs/"+sha, nil)
 		if err != nil {
 			return err
 		}

@@ -33,6 +33,7 @@ type Spec struct {
 	DataDir string   // the server data dir: hidden under bwrap except Root and Caches
 	Caches  []string // read-write shared cache dirs
 	// PrivateNet (bwrap only) gives the job its own network namespace; see net.go.
+	NetworkOff bool // isolate network without an egress proxy or injected environment
 	PrivateNet bool
 
 	// Session sandboxes (tun bazel, see agent.go). FixedRoot (bwrap only) replaces the
@@ -123,7 +124,7 @@ func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, *Net, error) {
 			files[firstMountFD-3+i], ours = f, append(ours, f)
 		}
 		argv := s.Argv
-		if s.PrivateNet || s.ExePath != "" {
+		if s.PrivateNet || s.NetworkOff || s.ExePath != "" {
 			exe, err := selfExe()
 			if err != nil {
 				return nil, nil, fmt.Errorf("binding tun into the sandbox: %v", err)
@@ -143,6 +144,13 @@ func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, *Net, error) {
 				return nil, nil, fmt.Errorf("private network: %v", err)
 			}
 			argv = append([]string{helperPath(s), helperArg}, argv...)
+		}
+		if s.NetworkOff && !s.PrivateNet {
+			if err := addPipe(envFD, s.Env); err != nil {
+				closeAll()
+				return nil, nil, err
+			}
+			argv = append([]string{helperPath(s), execHelperArg}, argv...)
 		}
 		cmd = exec.Command("bwrap", append([]string{"--args", "3", "--"}, argv...)...)
 		cmd.Env = []string{}
@@ -238,10 +246,10 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 	if s.Root != "" {
 		a = append(a, bind(s.Root, s.Root, false)...)
 	}
-	if s.PrivateNet {
+	if s.PrivateNet || s.NetworkOff {
 		a = append(a, "--unshare-net")
 	}
-	if s.PrivateNet || s.ExePath != "" {
+	if s.PrivateNet || s.NetworkOff || s.ExePath != "" {
 		a = append(a, "--ro-bind-fd", strconv.Itoa(exeFD), helperPath(s))
 	}
 	for _, c := range s.Caches {
@@ -256,8 +264,8 @@ func bwrapArgs(s Spec) ([]string, []mountSource) {
 		a = append(a, "--remount-ro", "/")
 	}
 	a = append(a, "--clearenv")
-	if s.PrivateNet {
-		return append(a, "--chdir", s.Dir), srcs // the helper sets the env
+	if s.PrivateNet || s.NetworkOff {
+		return append(a, "--chdir", s.Dir), srcs
 	}
 	for _, kv := range s.Env {
 		k, v, _ := strings.Cut(kv, "=")

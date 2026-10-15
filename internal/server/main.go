@@ -92,7 +92,7 @@ func Main(args []string, stderr io.Writer) int {
 func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	ephemeral := fs.Bool("ephemeral", false, "use random loopback port and temporary data; print TUN_URL and TUN_TOKEN on stdout when ready")
+	ephemeral := fs.Bool("ephemeral", false, "use random loopback port and temporary data; print TUN_URL, TUN_TOKEN and TUN_RUNNER_TOKEN on stdout when ready")
 	exitOnEOF := fs.Bool("exit-on-eof", false, "shut down when stdin closes")
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
@@ -102,7 +102,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
-	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache in this directory (relative to the data dir); empty disables it")
+	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache and execution service in this directory (relative to the data dir); empty disables it")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
 	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
@@ -290,7 +290,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		go func() { _, _ = io.Copy(io.Discard, stdin); close(eof) }()
 	}
 	if *ephemeral {
-		if _, err := fmt.Fprintf(stdout, "TUN_URL=http://%s\nTUN_TOKEN=%s\n", ln.Addr(), s.Token()); err != nil {
+		if _, err := fmt.Fprintf(stdout, "TUN_URL=http://%s\nTUN_TOKEN=%s\nTUN_RUNNER_TOKEN=%s\n", ln.Addr(), s.Token(), s.RunnerToken()); err != nil {
 			hs.Close()
 			return fail("write environment: %v", err)
 		}

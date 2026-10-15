@@ -36,3 +36,23 @@ func TestOpenMountSource(t *testing.T) {
 		}
 	}
 }
+
+// NetworkOff actions use the same descriptor-based mount validation as jobs/sessions.
+func TestActionMountRejectsSymlink(t *testing.T) {
+	if !BwrapUsable() {
+		t.Skip("bwrap unavailable")
+	}
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.Mkdir(real, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Start(Spec{Mode: Bwrap, Tmp: real, Root: link, DataDir: dir, Dir: link, NetworkOff: true, Argv: []string{"true"}}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("unsafe action mount accepted: %v", err)
+	}
+}

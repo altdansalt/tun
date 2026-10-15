@@ -4,6 +4,7 @@ go_library(
     name = "sandbox",
     srcs = [
         "agent.go",
+        "exactenv.go",
         "net.go",
         "sandbox.go",
     ],

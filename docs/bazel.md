@@ -183,7 +183,7 @@ VM to the shared server) and 2 more for a change (409, upload).
   third-party gRPC/protobuf dependencies. Go 1.25 `http.Server.Protocols` with
   `SetUnencryptedHTTP2` supplies h2c; HTTP trailers supply gRPC status. `internal/reapi`
   implements framing and the protobuf wire subset for cache services, citing the official
-  remote-apis and ByteStream protos. Execution remains M3 work.
+  remote-apis and ByteStream protos. Execution is implemented below (M3 core).
 - **Nested sandboxing:** Bazel's linux-sandbox inside tun's bwrap needs nested user namespaces;
   verify in M0, else run Bazel with `processwrapper-sandbox` and rely on tun's boundary.
 
@@ -325,10 +325,10 @@ to 10GB; committed CAS, action results and interrupted uploads share an on-disk 
 budget. Reads touch mtimes; writes verify SHA256 before atomic publication. Instances
 share the same content and action namespace. GetTree streams all reachable directories
 (no pagination); batch RPCs are limited to 2MiB of payload. Identity compression only.
-The advertised API version is 2.0, SHA256, with no execution capability.
+The advertised API version is 2.0, SHA256, with SHA256 execution enabled.
 
 `--cache-action-writes=false` rejects action updates with PERMISSION_DENIED and advertises
-updates disabled. Default is allow while builds execute locally. The handler's write
+updates disabled. Default is now deny; use `--cache-action-writes=true` explicitly for cache-only local builds. The handler's write
 policy is the future executor-only authorization seam; executor credentials and sandbox
 socket binding are not part of this change. Both TCP and Unix endpoints accept
 `x-tun-token` or `authorization: Bearer TOKEN` metadata. (The token-free sandbox socket is
@@ -349,7 +349,7 @@ to this cache. This is a cache milestone, not the complete remote execution prot
 
 `scripts/bench-reapi.sh` generates 200 independent genrules, seeds the remote cache, then
 rebuilds twice with fresh output roots under TMPDIR. Run via `scripts/dev-tun.sh` with
-`DEV_TUN_SERVE_ARGS='--cache-dir=reapi'` in a tun job, or on the VM host with
+`DEV_TUN_SERVE_ARGS='--cache-dir=reapi --cache-action-writes=true'` in a tun job, or on the VM host with
 `CACHE_URL=grpcs://remote.buildbuddy.dev` and `BUILDBUDDY_API_KEY`. Wall times include
 Bazel installation extraction and cold JVM/analysis; Bazel's elapsed time is printed too.
 
@@ -499,3 +499,242 @@ no cached Bazel binary and can't download one (Bad Gateway through the session's
 `latest` needs DNS for the version lookup). That is M0's tests' environment (they pass under
 `go test` in tun run), not the session cache; fix in M0 by passing a Bazel binary as test data
 or tagging them `manual`.
+
+## M3 execution core
+
+`--cache-dir` now enables Execution alongside the cache. Use
+`--remote_executor=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN
+--noremote_upload_local_results`. Client AC writes are **disabled by default**;
+only successful executor results populate the AC unless the operator explicitly
+allows client writes. Execute honors `skip_cache_lookup` and Action.do_not_cache.
+Failed commands return their exit code and stdout/stderr CAS digests without
+caching the result. Infrastructure errors use ExecuteResponse.status.
+
+Execute and WaitExecution stream google.longrunning.Operation messages, with
+ExecuteOperationMetadata and ExecuteResponse Any type URLs. Operations are kept
+in memory independently of the client's connection. Completed operations expire
+after one hour (pruned on the next Execute). Random 128-bit names prevent restart
+collisions; operations are not durable across hub restarts. Streams resend their
+current operation every 30s and clear idle write deadlines after flushing.
+Actions share the hub's v0 FIFO and local/runner slot limits. Runner polls
+advertise action support; older runners continue receiving only v0 jobs.
+The existing assignment, heartbeat, lost-runner and completion protocol applies.
+Action and Command bytes (including platform properties) stay in memory with the
+internal executor job; action jobs create no v0 job records and are hidden from tun ls. Unsupported platform properties return FAILED_PRECONDITION;
+currently OSFamily=Linux/linux and an empty container-image are accepted. Other
+properties, including a nonempty container-image, are rejected. Tools come from
+the executor host or the action's hermetic inputs, never a container image.
+
+Executors copy verified inputs from CAS into fresh exec roots. Each runner has
+a persistent 10GB LRU CAS under its data dir (`reapi-cas`), so repeated inputs
+are not downloaded again. Copies rather than hard links prevent actions from
+mutating the CAS. bwrap actions have network off, without the v0 egress proxy
+or extra environment variables; Command.environment_variables is the complete
+environment. `--sandbox=none` remains an unisolated local development mode whose results never
+populate the AC. Remote actions are assigned only to bwrap runners.
+Working directories, v2.0 output_files/output_directories, v2.1 output_paths,
+symlinks, output directory Trees, executable bits and action timeouts are handled.
+Timeouts start after input materialization and kill the whole process group.
+Cancellation interrupts input copies and runner fetches. Default action timeout
+(including an explicit zero duration) is 30 minutes;
+explicit timeouts above 24h are rejected.
+
+Deviations / limits: exec-root paths currently vary per action (fixed `/work`
+mounts remain session work); runner CAS transport uses an authenticated HTTP/JSON
+extension of the existing pull protocol, rather than an outbound HTTP/2 gRPC
+client. It buffers transferred blobs with an explicit 96MiB raw limit and bounded JSON
+decoding; oversized reads fail before loading bytes. Larger blobs need a
+streaming runner transfer follow-up. Hub CAS eviction can cause an in-flight
+action's input fetch to fail; inputs are not pinned for the whole operation.
+There is no Execution cancellation RPC yet. Warm-session integration and label
+artifact retrieval remain outside this core.
+
+Real Bazel integration tests run with bounded 90s subprocess contexts and Go's
+CI timeout: dependency chains, outputs, failing-action stderr, a clean rebuild
+with remote cache hits, and a separate runner process against a hub with zero
+local slots. Codec and executor regressions cover operation Any wrappers,
+WaitExecution reconnects, cache bypass/no-write, paths, output directories,
+working directories, environments and timeouts.
+
+`scripts/bench-exec.sh` generates 200 independent genrules, each sleeping 0.5s,
+with `--jobs=50`; all output roots live under TMPDIR. Run `local` directly in a
+tun job, or `remote` / `runners` inside scripts/dev-tun.sh with
+`DEV_TUN_SERVE_ARGS='--cache-dir=reapi --local-slots=2'` / `--local-slots=0`.
+The runners mode starts two private runner processes with two slots each.
+
+Measured 2026-10-15, Bazel 9.3.0, cold JVM/output roots:
+
+| Mode | Wall | Bazel elapsed | Process summary | tun job |
+| --- | --- | --- | --- | --- |
+| Local Bazel | 63.048s | 60.273s | 200 linux-sandbox | `20261015T083812607482-cf9f6d2c` |
+| Remote, hub local slots=2 | 61.189s | 58.889s | 200 remote | `20261015T083844410219-6fe2d8b2` |
+| Remote, hub local slots=0, 2 runners x 2 slots | 39.969s | 37.121s | 200 remote | `20261015T083957200089-badce30b` |
+
+These are shared-host end-to-end observations, not isolated scaling measurements;
+the two runner processes add slots on the same physical job host.
+Local protocol/Bazel integration passed in `20261015T083709369850-ccfa30fd`;
+the separate-runner Bazel integration and operation tests passed with race in
+`20261015T084211471977-eea1803f` (44.047s job time).
+
+Final hardening: bwrap itself injects PWD even after --clearenv; execution uses a
+small in-namespace exec helper to install exactly the Command environment after
+bwrap enters its namespaces. The helper has no egress proxy and replaces itself
+with the action. A regression compares the complete environment and network
+namespace against the host. WaitExecution honors gRPC deadlines without canceling
+the action. Scheduler/runner infrastructure timeouts preserve DEADLINE_EXCEEDED.
+
+Full vet/build/race tests, both real Bazel integrations, and both CLI smoke suites
+passed in `20261015T084344724408-eec341c1` (306.947s under concurrent self-build
+load). Subsequent vet/build/race tests covering the hardened paths and both local
+and separate-runner Bazel builds passed in `20261015T084836390529-304e8ec6`
+(111.518s). Exact-environment/network namespace tests and both Bazel execution
+integrations passed in `20261015T085232460964-85588474`.
+
+The M0 self-build benchmark uses `scripts/bench-exec-self.sh`. While M0 is a
+separate branch, prepare its overlay on the VM before submitting the tun job:
+
+```sh
+git archive origin/feat/bazel-m0 $(git ls-tree -r --name-only origin/feat/bazel-m0 | rg '(^|/)(BUILD\.bazel|MODULE\.bazel(\.lock)?|\.bazelrc|\.bazelversion|bazel-e2e\.sh)$') > m0-build.tar
+tun run --tail 100 --timeout 12m -e DEV_TUN_SERVE_ARGS='--cache-dir=reapi --local-slots=2' -c 'scripts/dev-tun.sh ./scripts/bench-exec-self.sh'
+rm m0-build.tar
+```
+
+The script copies the workspace to TMPDIR, overlays the M0 files and refreshes
+internal package libraries to include packages added since the M0 snapshot. It
+runs `bazel build //...` with M0's downloaded Go 1.25.14 SDK. It does not modify
+this branch's BUILD files or run heavy Bazel commands on the VM.
+
+Self-build debugging exposed a required wire detail: output Directory blobs must
+use canonical proto3 serialization, including field order and omission of default
+scalar values. Bazel parses and reserializes Tree children to index them by digest;
+equivalent but noncanonical protobuf made Bazel 9.3.0 crash in parseDirectory
+(job `20261015T084928396704-ca5de92d`, 260.326s). The encoder now groups Directory
+fields by number and omits false executable bits and zero digest sizes. Regressions
+cover exact canonical bytes, mixed nested file/directory trees and empty files and
+directories, plus a real Bazel tree-producing action and a dependent action.
+
+Corrected self-build succeeded in job `20261015T085626697154-490ef40b`:
+**330.740s wall**, Bazel elapsed **328.005s**, critical path **267.96s**,
+**118 processes: 44 internal, 74 remote**. The overlay was M0 commit
+`abd610e8053cb7398400a91f7bd0791c444ae16f`; package library sources/dependencies
+were refreshed for this execution branch. The downloaded Go 1.25.14 SDK was
+shipped as CAS inputs and ran with network disabled. No toolchain-environment
+failure remained after the Directory encoding fix. This is a cold build under
+shared-host load, including analysis, SDK setup and stdlib compilation; it is not
+a warm-session measurement. The earlier 240s self-build budget was insufficient
+(`20261015T084415612968-3e8f39fa`); the reproducible script now allows 600s with a
+hard kill grace and an outer tun timeout.
+
+Final **full** vet/build/race tests, both real Bazel integrations (including the
+nested mixed output Tree), exact environment/network isolation, cache reuse,
+and both CLI smoke suites passed in `20261015T085657372388-505fd9c8`:
+283.089s running after 88.216s queued. The standalone canonical-encoding and real
+Bazel Tree regressions also passed in `20261015T085609309999-7933381d`.
+
+Tun friction observed: shared capacity produced 25.599s and 88.216s queue waits;
+concurrent cold Go/Bazel builds substantially changed timings (full CI ranged
+from roughly 1–5 minutes). `--tail` plus explicit job IDs made finished runs easy
+to inspect, but redirected nested benchmark logs were unavailable through the
+parent's stdout until the script exited. REAPI executor jobs currently have
+empty v0 stdout/stderr files because their logs live in CAS; operation/stage/CAS
+log inspection in the CLI is useful follow-up work.
+
+
+## Execution review hardening
+
+Deploy the upgraded hub first: it creates `$DATA/runner-token` with mode 0600.
+Copy that file securely to each runner and restart its updated binary with
+`tun runner --token-file /path/to/runner-token` (or `TUN_RUNNER_TOKEN`).
+The client token is refused on every runner endpoint. Runner credentials work
+only under /v1/runner/, including workspace and CAS downloads; requests require
+the process instance header. Existing runners using the client token must migrate.
+
+Executor limits are 96MiB per blob/output, 4MiB per stdout/stderr stream,
+100000 materialized input nodes and 2GiB total expanded inputs. Exceeding a limit
+returns RESOURCE_EXHAUSTED; log overflow cancels execution promptly. Local file
+copies and output hashing/upload stream with bounded memory. The runner JSON
+transport still buffers individual blobs; replacing it with streaming transfer
+remains a documented deviation. Exec roots use chmod-aware cleanup and are swept
+on startup. Missing inputs return FAILED_PRECONDITION with PreconditionFailure
+MISSING violations; lost runners return UNAVAILABLE. Local CAS reads verify hashes.
+
+Review validation (2026-10-15): full vet/build/race CI, real Bazel cache and
+execution integration, and both CLI smoke suites passed in tun job
+`20261015T092730806002-f76adfff` (155.516s; client 87.067s, REAPI 114.794s,
+server 40.954s). Focused review regressions also passed on the BuildBuddy fallback
+in invocation `e091c65f-a141-4bd4-9305-6f3c46539e83`.
+
+The 200-genrule benchmark on a private dev server with zero local slots and two
+runners with two slots each completed in **50.189s wall / 45.982s Bazel elapsed**,
+with **200 remote actions**, in tun job `20261015T092604426090-0fd19469`
+(54.051s total job time). The previous 39.969s runner measurement used the same
+logical topology; these runs share remote hosts with other jobs, so the difference
+is not a controlled throughput comparison. All Bazel roots stayed under TMPDIR.
+
+Tun friction during review: job `20261015T091722785773-65cba55c` was lost when
+shared runner tun-r3 shut down. The hub subsequently timed out on health requests
+and returned a workspace-upload HTTP 502, requiring the documented BuildBuddy
+fallback until it recovered. No shared server was restarted by this work.
+Superseded CI jobs were canceled. Fallback testing also exposed inherited Bazel
+configuration; integration builds and benchmarks now ignore host bazelrc files.
+
+## Integration with warm sessions and disk retention (2026-10-15)
+
+Merged origin/main (cd41306) into feat/reapi-exec. Runner scheduling skips warm
+session commands and skips actions on runners without action support, preserving
+ordinary job scheduling behind either. Polls retain both the disk report and action
+capability. Network-disabled action sandboxes now use the common descriptor layout
+(including the exact-environment helper) and openMountSource for every mutable bind
+source. All /v1/runner/* routes continue to require the dedicated runner token and
+instance header.
+
+Before materializing action inputs, runners reclaim workspace blobs and then evict
+their CAS in LRU order while below --min-free. This extends the existing retention
+policy to action storage; it does not impose admission control when active data or
+unrelated files still keep the disk below the threshold. Concurrent readers retain
+their descriptors and evicted inputs can be fetched again. No new direction change.
+
+The repeated 200-genrule benchmark (0.5s sleep per rule, private hub with zero local
+slots, two runner processes with two slots each) completed with **200 remote actions**
+in **70.607s wall / 63.532s Bazel elapsed**, job
+`20261015T093730077050-86312200` (80.477s total job time, 0.809s queue).
+All Bazel output roots were under TMPDIR. Shared-host contention and cold startup
+are included; this is not a controlled comparison with the earlier 50.189s run.
+
+Shutdown investigation: the historical job
+`20261015T091722785773-65cba55c` remains queryable: runner tun-r3, started
+09:17:22.937 UTC, failed 09:18:06.013 with signal 15 and "runner tun-r3 shut down
+while the job was running". That establishes shutdown reporting, not the cause of
+the subsequent health timeouts/HTTP 502. Inspection of the merged handlers and
+origin/main shows runner body reads for poll, exited, done and leave outside
+Server.mu; CAS and log/output transfers also perform network reads outside it.
+Regression TestStalledRunnerReportsAllowHealth deliberately holds those JSON
+reports incomplete over a pipe and checks health still responds through the HTTP
+handler. No historical hub/proxy logs or goroutine/resource traces were available,
+so overload versus another bug remains undetermined. State persistence and some
+responses still run under the hub mutex; the test does not exclude disk stalls or
+slow response writers. No shared server was restarted.
+
+Validation of the merged tree: full vet/build/race tests (including real Bazel)
+and both CLI smoke suites passed in tun job
+`20261015T094423233532-c3ea51a8`: **527.658s** run time, 5.609s queued;
+client package 345.023s, REAPI 445.823s, server 120.019s.
+Focused disk-pressure/mount checks passed in
+`20261015T094014563979-4c9dc4b9` (19.701s), and the Bazel/session diagnostic
+passed in `20261015T094933108093-62ad2742` (client package 51.307s).
+
+Tun friction: an earlier full run, `20261015T094025566091-2fc64155`,
+was interrupted after 222.113s by "runner tun-r2 shut down while the job was
+running". All four runners resumed polling. Five subsequent hub health samples
+returned HTTP 200 in 75.8, 22.4, 26.4, 18.0 and 22.2ms; this shutdown did not
+reproduce the earlier sustained health outage. The successful full run used a
+hub-local slot and was much slower than the previous branch validation; no CPU
+or memory trace was collected to attribute that difference. Normal go test output
+was silent while packages ran; TEST_FLAGS='-json -run TestBazel' exposed live
+test progress for the diagnostic. A precautionary BuildBuddy fallback invocation
+(ca7d054a-9f74-4210-a41a-44ddc56e6783) completed before cancellation: its
+vet/build/race packages passed, but the first CLI smoke suite exited 1 under
+sandbox none (bwrap unavailable). The cleanup also reported a Bazel invocation
+referencing a deleted temporary tun.bazelrc. This fallback smoke failure was not
+investigated further; the complete tun run passed both suites with bwrap.
+Superseded local iterations were canceled as well.

@@ -68,7 +68,7 @@ client works with zero config.
 For testing, `tun serve --ephemeral` uses a random loopback port and a fresh temporary
 data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
 it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
-stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
+stdout contains exactly three lines: `TUN_URL=http://127.0.0.1:PORT`, `TUN_TOKEN=TOKEN`, and `TUN_RUNNER_TOKEN=TOKEN`;
 diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
 `scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server
@@ -215,6 +215,12 @@ Logs: if writing a job's stdout or stderr log fails (e.g. the disk is full), the
 stream is discarded (the job never blocks on it) and the job's `error` says so; `tun run`
 prints it ("tun: job ID exited; server error: ...").
 
+Runner actions also check disk pressure before fetching/materializing inputs: cached workspace
+blobs are reclaimed first, then the runner CAS is evicted least recently used first while
+space remains below `--min-free`. Concurrent readers retain open descriptors; evicted inputs
+are fetched again from the hub. The CAS also retains its 10GB size budget.
+
+
 ## Services
 `tun run --service [--port N]... -- <cmd>` starts a job meant to run until canceled (dev server,
 database, test fixture):
@@ -259,9 +265,13 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   data dir is refused; job dirs left by a previous runner process are deleted at start),
   `--sandbox` and `--net auto|private|host` as for serve: with a private network the runner
   runs the job's network helper and serves its egress proxy itself, so the job's HTTP(S)
-  traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
-  `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
-  (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
+  traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_RUNNER_TOKEN`, else
+  `~/.config/tun/runner-token`. The hub creates `$DATA/runner-token` (0600).
+  Deploy: copy this file securely to every runner, update its service to use
+  `tun runner --token-file /path/to/runner-token`, and restart the runners after
+  upgrading the hub. Client tokens are refused on all runner endpoints; runner
+  tokens are accepted only under `/v1/runner/`. Every runner request requires
+  `X-Tun-Runner-Instance`. On SIGINT/SIGTERM the runner stops taking
   work, kills its jobs, reports them `failed` ("runner N shut down") and tells the hub it is
   leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
   signal quits at once. A runner flocks its data dir: a second runner on the same dir refuses
@@ -342,8 +352,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
 - `GET /v1/healthz` adds `local_slots` and `runners: [{name, slots, running, last_seen,
   sandbox, network_isolation, source}]`; `tun runners` prints them as JSON lines.
 - Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
-  workspace; a runner-only credential (any token holder can act as a runner, and read any
-  blob by sha with `GET /v1/blobs/{sha}`, though every token holder is already fully trusted).
+  workspace. Runners fetch workspace blobs through `GET /v1/runner/blobs/{sha}`.
 
 ## Bazel sessions (tun bazel)
 First step of docs/bazel.md (M1, hub-local only). `tun bazel [--session NAME] [--cold]
@@ -523,14 +532,16 @@ stdlib-only REAPI gRPC over h2c on the existing HTTP listener and `DATA/cache.so
 (override with `--cache-socket`). Both endpoints accept `x-tun-token` or `authorization:
 Bearer TOKEN` gRPC metadata. Supports Capabilities, CAS (FindMissingBlobs, BatchUpdateBlobs,
 BatchReadBlobs, GetTree), ActionCache and ByteStream (Read, Write, QueryWriteStatus), SHA256
-and identity compression. No execution service. `--cache-max-size` bounds disk storage with
-LRU eviction, including partial uploads; `--cache-action-writes=false` denies action updates
-(default allow). Socket permissions are 0600. See docs/bazel.md for protocol limits and
-Bazel flags.
+and identity compression. Execution.Execute and WaitExecution run actions (see Remote
+execution below); completed operations remain reconnectable for one hour, until hub
+shutdown. `--cache-max-size` bounds disk storage with LRU eviction, including partial
+uploads; `--cache-action-writes=false` denies client action updates (default allow: they go
+to the client's own namespace; executor results are written internally). Socket permissions
+are 0600. See docs/bazel.md for protocol limits and Bazel flags.
 - **Namespaces.** The CAS is shared (every write is verified against its digest). Action
   results are not: an UpdateActionResult is stored in the namespace of the request's client
   and answers only that client's GetActionResult; a lookup tries the client's own namespace,
-  then the shared one, which only tun's executors write (none yet: no gRPC request can).
+  then the shared one, which only tun's executors write (no gRPC request can).
   The client is the server's identity of the request (as `client` for jobs: the exe.dev
   source VM header, else `X-Tun-Client`, else the remote address); REAPI `instance_name` is
   ignored. Capabilities advertise action updates only to requests with a namespace.
@@ -542,6 +553,12 @@ Bazel flags.
   namespace whatever the request claims. The listener stops with the sandbox (`--cold`,
   expiry, eviction, server exit). With sandbox `none` the bazelrc uses the host path,
   and if that is longer than a unix socket address allows the session has no remote cache.
+
+REAPI actions use the same FIFO and slots as v0 jobs. Runners advertise action support
+in their polls; older runners receive v0 work only. Runner CAS inputs are cached in
+`DATA/reapi-cas`; action outputs and logs are uploaded to the hub CAS. bwrap actions
+use no network or proxy and exactly the Command environment. See docs/bazel.md for
+execution limits and benchmarks.
 
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).

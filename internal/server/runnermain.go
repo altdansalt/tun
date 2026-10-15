@@ -33,8 +33,8 @@ Names: the newest runner with a given --name wins. When another runner process s
 the same name, the hub stops giving this one work; it finishes the jobs it has and exits
 with status 1. A runner holds a lock on its --data dir, so two can't share one.
 
-The token is the hub's client token (for now; a separate runner credential is future work):
---token-file, else $TUN_TOKEN, else ~/.config/tun/token. With --sandbox none a job can read
+The token is the hub's dedicated $DATA/runner-token. Copy it to each runner, then use:
+--token-file, else $TUN_RUNNER_TOKEN, else ~/.config/tun/runner-token. With --sandbox none a job can read
 it, like on the hub. With --net private (auto picks it when it works) each job has its own
 network namespace and reaches out only over HTTP(S), through a proxy run by this runner (the
 job's traffic leaves from the runner host).
@@ -103,14 +103,14 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("runner", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	hub := fs.String("hub", os.Getenv("TUN_URL"), "hub URL (default $TUN_URL)")
-	tokenFile := fs.String("token-file", "", "file with the hub's token (default $TUN_TOKEN, else ~/.config/tun/token)")
+	tokenFile := fs.String("token-file", "", "file with the hub's runner-token (default $TUN_RUNNER_TOKEN, else ~/.config/tun/runner-token)")
 	slots := fs.Int("slots", runtime.NumCPU(), "jobs run at once")
 	host, _ := os.Hostname()
 	name := fs.String("name", host, "runner name, unique per hub (shown as the job's \"runner\")")
 	data := fs.String("data", DefaultRunnerDataDir(), "data dir (blob cache, job dirs, build caches); not a tun serve data dir")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none, as for tun serve")
 	netMode := fs.String("net", "auto", "auto|private|host, as for tun serve: private gives each job its own network namespace, with outbound HTTP(S) through a proxy this runner serves")
-	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, cached workspaces are deleted, least recently used first")
+	minFree := fs.String("min-free", "10%", "free space to keep on the data dir's filesystem (bytes with KB/MB/GB, a percentage, or 0): under it, cached workspaces and action CAS entries are deleted, least recently used first")
 	fs.Usage = func() { fmt.Fprint(stderr, runnerUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -128,7 +128,7 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	case *hub == "":
 		return fail("runner: --hub URL is required (or set $TUN_URL)")
 	}
-	token := os.Getenv("TUN_TOKEN")
+	token := os.Getenv("TUN_RUNNER_TOKEN")
 	if *tokenFile != "" {
 		b, err := os.ReadFile(*tokenFile)
 		if err != nil {
@@ -136,12 +136,12 @@ func RunnerMain(args []string, stderr io.Writer) int {
 		}
 		token = strings.TrimSpace(string(b))
 	} else if home, _ := os.UserHomeDir(); token == "" && home != "" {
-		if b, err := os.ReadFile(filepath.Join(home, ".config/tun/token")); err == nil {
+		if b, err := os.ReadFile(filepath.Join(home, ".config/tun/runner-token")); err == nil {
 			token = strings.TrimSpace(string(b))
 		}
 	}
 	if token == "" {
-		fmt.Fprintln(stderr, "tun: warning: runner: no token (--token-file, $TUN_TOKEN, ~/.config/tun/token); requests go without one")
+		fmt.Fprintln(stderr, "tun: warning: runner: no token (--token-file, $TUN_RUNNER_TOKEN, ~/.config/tun/runner-token); requests go without one")
 	}
 	sb, err := resolveSandbox(*mode)
 	if err != nil {

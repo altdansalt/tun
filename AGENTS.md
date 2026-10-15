@@ -53,9 +53,17 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
 
 - REAPI integration tests run real Bazel when installed (skip otherwise). Keep every
   Bazel output root under TMPDIR, never the shared XDG cache. `scripts/bench-reapi.sh`
-  measures 200 actions; BuildBuddy measurements run on the VM host because jobs lack DNS.
+  measures 200 cache actions; use `--cache-action-writes=true` for its local seed.
+  `scripts/bench-exec.sh local|remote|runners` measures 200 execution actions (0.5s each);
+  remote modes need a private server with `--cache-dir=reapi`, and runners mode needs
+  `--local-slots=0` (it starts two private runner processes). BuildBuddy measurements run on the VM host because jobs lack DNS.
 
 ## Conventions
 - Keep it small and readable. Stdlib only. `gofmt` everything.
 - Tests are required for behavior you add. Prefer integration tests through the real HTTP server.
 - Commit with clear messages. Don't rewrite others' history.
+
+Runner authentication uses a separate credential: the hub creates `$DATA/runner-token`;
+copy it securely to runners and use `tun runner --token-file /path/to/runner-token`.
+Client tokens cannot call runner endpoints. `scripts/dev-tun.sh` exports both
+`TUN_TOKEN` (clients) and `TUN_RUNNER_TOKEN` (runners) for private tests.

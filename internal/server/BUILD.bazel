@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "server",
     srcs = [
+        "actions.go",
         "disk.go",
         "exec.go",
         "files.go",
@@ -31,14 +32,18 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "actions_test.go",
         "disk_test.go",
         "main_test.go",
+        "merge_exec_test.go",
         "review2_test.go",
+        "review_exec_test.go",
         "session_test.go",
     ],
     embed = [":server"],
     deps = [
         "//internal/api",
+        "//internal/reapi",
         "//internal/sandbox",
         "//internal/workspace",
     ],

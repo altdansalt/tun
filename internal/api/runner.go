@@ -20,6 +20,7 @@ const MaxOutputs = 256
 
 // RunnerPoll is the body of POST /v1/runner/poll. It doubles as the runner's heartbeat.
 type RunnerPoll struct {
+	Actions  bool   `json:"actions,omitempty"` // understands REAPI work assignments
 	Name     string `json:"name"`
 	Instance string `json:"instance"` // random per runner process
 	// Previous is the instance that last used this runner's data dir (which it holds locked):
@@ -54,6 +55,8 @@ type RunnerLeave struct {
 
 // RunnerJob is one job assignment: everything the runner needs to run it.
 type RunnerJob struct {
+	Action     []byte            `json:"action,omitempty"`
+	Command    []byte            `json:"command,omitempty"`
 	ID         string            `json:"id"`
 	Argv       []string          `json:"argv,omitempty"`
 	Script     string            `json:"script,omitempty"`
@@ -79,10 +82,13 @@ type LogAck struct {
 // as the command has ended, before the remaining logs and the outputs are shipped; the
 // outputs fields are then empty).
 type RunnerDone struct {
-	State    string `json:"state"`
-	ExitCode *int   `json:"exit_code"`
-	Signal   *int   `json:"signal"`
-	Error    string `json:"error,omitempty"`
+	ActionMissing []byte `json:"action_missing,omitempty"`
+	ActionStatus  int    `json:"action_status,omitempty"`
+	ActionResult  []byte `json:"action_result,omitempty"`
+	State         string `json:"state"`
+	ExitCode      *int   `json:"exit_code"`
+	Signal        *int   `json:"signal"`
+	Error         string `json:"error,omitempty"`
 	// Outcome of collecting the declared outputs (uploaded before done).
 	OutputsMissing []string `json:"outputs_missing,omitempty"`
 	OutputsSkipped []string `json:"outputs_skipped,omitempty"`

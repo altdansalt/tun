@@ -319,6 +319,10 @@ func (s *Server) env(j *job) []string {
 
 // run executes a job that has been taken off the queue (or admitted as a service).
 func (s *Server) run(j *job) {
+	if j.Action != nil {
+		s.runAction(j)
+		return
+	}
 	p, err := newProc(execSpec{
 		DataDir: s.cfg.DataDir, ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: s.env(j),
 		TimeoutSec: j.TimeoutSec, Sandbox: s.cfg.Sandbox, PrivateNet: s.cfg.PrivateNet, MaxLog: s.cfg.MaxLog, KillGrace: s.cfg.KillGrace,

@@ -95,8 +95,9 @@ func rpcAs(t *testing.T, addr, method, token, client string, b []byte) ([]byte, 
 	if e != nil && resp.Trailer.Get("grpc-status") == "0" {
 		t.Fatal(e)
 	} // Read EOF to populate trailers.
-	var buf [1]byte
-	resp.Body.Read(buf[:])
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
 	return out, resp.Trailer.Get("grpc-status")
 }
 func TestWire(t *testing.T) {
@@ -264,7 +265,7 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bazel", "--output_user_root="+root, "shutdown")
+		cmd := exec.CommandContext(ctx, "bazel", "--ignore_all_rc_files", "--output_user_root="+root, "shutdown")
 		cmd.Dir = work
 		cmd.WaitDelay = time.Second
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -273,7 +274,7 @@ genrule(name="top", srcs=[":leaf"], outs=["top.txt"], cmd="cat $(location :leaf)
 	})
 	run := func(extra ...string) string {
 		t.Helper()
-		args := []string{"--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
+		args := []string{"--ignore_all_rc_files", "--output_user_root=" + root, "--host_jvm_args=-Xmx512m", "--batch", "build", "//:top", "--jobs=2", "--remote_cache=grpc://" + addr, "--remote_header=x-tun-token=secret", "--remote_timeout=10", "--enable_bzlmod=false", "--repository_cache=" + t.TempDir()}
 		args = append(args, extra...)
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()

@@ -1,6 +1,7 @@
 package reapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
@@ -27,6 +28,7 @@ const maxMessage = 4 << 20
 // server, never from the request's instance_name.
 type Handler struct {
 	Store             *Store
+	Execution         *Execution
 	Token             string
 	AllowActionWrites bool
 	// Client names the action cache namespace of an authenticated request (its client).
@@ -163,7 +165,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Bound stalled consumers, refreshing the idle limit for each message.
 		_ = rc.SetWriteDeadline(time.Now().Add(idle))
-		return frameWrite(w, b)
+		err := frameWrite(w, b)
+		_ = rc.SetWriteDeadline(time.Time{})
+		return err
 	}
 	b, e := read()
 	if e != nil {
@@ -186,12 +190,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []byte
 	switch method {
+	case "/build.bazel.remote.execution.v2.Execution/Execute", "/build.bazel.remote.execution.v2.Execution/WaitExecution":
+		if h.Execution == nil {
+			fail(12, fmt.Errorf("execution disabled"))
+			return
+		}
+		ctx := r.Context()
+		if !deadline.IsZero() {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+			defer cancel()
+		}
+		c, err := h.Execution.stream(ctx, method, b, write)
+		if err != nil {
+			fail(c, err)
+		}
+		return
 	case "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities":
 		enabled := int64(0)
 		if h.AllowActionWrites && ns != "" {
 			enabled = 1
 		}
 		out = msg(bytesField(1, msg(intField(1, 1), bytesField(2, intField(1, enabled)), intField(4, 2<<20), intField(8, h.Store.max))), bytesField(4, intField(1, 2)), bytesField(5, intField(1, 2)))
+		if h.Execution != nil {
+			out = append(out, bytesField(2, msg(intField(1, 1), intField(2, 1)))...)
+		}
 	case "/build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs":
 		for _, d := range all(b, 2) {
 			if _, e := key(d); e != nil {

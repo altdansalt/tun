@@ -176,3 +176,26 @@ func TestCopyCappedWriteError(t *testing.T) {
 		}
 	}
 }
+
+// Actions bypass ordinary workspace unpacking but must still reclaim before execution.
+func TestActionReclaimsRunnerDisk(t *testing.T) {
+	data := t.TempDir()
+	r, err := NewRunner(RunnerConfig{Hub: "http://127.0.0.1:1", Name: "r", Slots: 1, DataDir: data, Sandbox: sandbox.None, MinFree: MinFree{Bytes: 800}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.lock.Close()
+	os.WriteFile(filepath.Join(data, "blobs", "old"), nil, 0600)
+	old := diskStat
+	defer func() { diskStat = old }()
+	diskStat = func(string) (int64, int64, error) { return 100, 1000, nil }
+	// A canceled request keeps this test independent of a hub and skips execution.
+	r.kill()
+	r.executeAction(&runnerJob{spec: api.RunnerJob{ID: "action", Action: []byte{1}}})
+	if _, err := os.Stat(filepath.Join(data, "blobs", "old")); !os.IsNotExist(err) {
+		t.Fatalf("cached workspace remains: %v", err)
+	}
+	if r.reclaimed.Load() != 1 {
+		t.Fatal("action did not reclaim")
+	}
+}

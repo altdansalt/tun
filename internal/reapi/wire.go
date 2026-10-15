@@ -1,4 +1,4 @@
-// Package reapi implements the cache subset of REAPI using the protobuf wire format.
+// Package reapi implements the supported subset of REAPI using the protobuf wire format.
 package reapi
 
 import (
@@ -130,4 +130,10 @@ func parseDigest(b []byte) (Digest, error) {
 	}
 	return d, nil
 }
-func (d Digest) marshal() []byte { return msg(bytesField(1, []byte(d.Hash)), intField(2, d.Size)) }
+func (d Digest) marshal() []byte {
+	b := bytesField(1, []byte(d.Hash))
+	if d.Size != 0 {
+		b = append(b, intField(2, d.Size)...)
+	}
+	return b
+}

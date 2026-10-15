@@ -4,19 +4,28 @@ go_library(
     name = "reapi",
     srcs = [
         "action.go",
+        "execution.go",
+        "executor.go",
         "grpc.go",
         "store.go",
         "wire.go",
     ],
     importpath = "github.com/altdansalt/tun/internal/reapi",
     visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/sandbox",
+        "//internal/workspace",
+    ],
 )
 
 go_test(
     name = "reapi_test",
     srcs = [
+        "execution_test.go",
         "reapi_test.go",
+        "review_exec_test.go",
         "review_test.go",
     ],
     embed = [":reapi"],
+    deps = ["//internal/sandbox"],
 )
