@@ -26,6 +26,8 @@ type CreateJob struct {
 	Env        map[string]string `json:"env,omitempty"`
 	TimeoutSec int               `json:"timeout_sec,omitempty"`
 	Workspace  string            `json:"workspace,omitempty"` // sha256 of an uploaded tar.gz blob; empty = empty dir
+	Service    bool              `json:"service,omitempty"`   // long-running service: see service.go
+	Ports      []int             `json:"ports,omitempty"`     // ports to expose (service only)
 }
 
 // Job is the job object returned by the API.
@@ -44,6 +46,8 @@ type Job struct {
 	Workspace  string     `json:"workspace,omitempty"`
 	Sandbox    string     `json:"sandbox"`
 	Error      string     `json:"error,omitempty"`
+	Service    bool       `json:"service,omitempty"`
+	Ports      []Port     `json:"ports,omitempty"`
 }
 
 // Error is the body of every non-2xx response.

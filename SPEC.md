@@ -13,7 +13,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 
 ## CLI
 ```
-tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--sandbox auto|bwrap|none]
+tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--max-services N] [--sandbox auto|bwrap|none]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -23,6 +23,9 @@ tun run [flags] -c '<shell script>' run via bash -c
     --detach        print the job id and exit 0 immediately
     --json          after the job ends, print one JSON object (id, exit_code, duration, ...) to stdout
                     instead of streaming (stdout/stderr then in the object, truncated to a limit)
+    --service       long-running service (see Services); tun run exits once it is ready
+    --port N        with --service: expose port N (repeatable)
+    --ready-timeout DUR  with --service: default 2m
 tun status <id>   (JSON)          tun logs [-f] <id> [--stderr]       tun cancel <id>
 tun ls            (JSON lines: recent jobs, newest first)
 ```
@@ -65,13 +68,43 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
 - A client disconnecting does NOT kill the job (agents' tool calls time out; they can `tun logs -f` back).
   Only explicit cancel (or the client's SIGINT handler) does.
 
+## Services
+`tun run --service [--port N]... -- <cmd>` starts a job meant to run until canceled (dev server,
+database, test fixture):
+- No timeout unless `--timeout` is given explicitly (`timeout_sec: 0` = none).
+- Not queued and not counted against `--max-jobs` (services are mostly idle and must not starve
+  or be starved by builds). Instead at most `--max-services` (default 4) run at once; creating
+  another fails with 429 and an explanation, rather than queueing indefinitely.
+- Each requested port N is a name: the server allocates a free host port H (kernel-chosen, not
+  held by another live service) and sets `TUN_PORT_<N>=H` in the job env, plus `PORT=H` when
+  exactly one port was requested (these override `-e`). The service must listen on
+  `127.0.0.1:H` (or all interfaces; the bwrap sandbox shares the host network).
+- The server probes each host port (TCP connect, every 100ms) until it accepts and marks the port
+  `ready`. The job object has `service: true` and `ports: [{port, host_port, ready, path}]`; the
+  CLI adds `url` (= `$TUN_URL` + path) in `tun run --service`, `tun status` and `tun ls`.
+- `tun run --service` waits until the job is running and every port is ready, then prints the job
+  id and one `N URL` line per port to stdout (`--json`: the job object) and exits 0. If the job
+  ends first, it prints the job's stdout/stderr and exits like `tun run` would (125 if the code was
+  0, since a service that exits isn't one). If not ready within `--ready-timeout`, it cancels the
+  job, prints its output, exits 125. SIGINT/SIGTERM while waiting cancel it. `--detach` returns the
+  id at once without waiting.
+- Cancel and server shutdown kill services exactly like other jobs (whole process group; after
+  a shutdown the next server marks them failed).
+- `--port` without `--service` is an error; at most 16 ports, each 1-65535, no duplicates.
+
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
-- `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace}` -> job object (201).
+- `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace, service, ports}` -> job object (201).
 - `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error}`.
 - `GET /v1/jobs?limit=N` -> list. `POST /v1/jobs/{id}/cancel`.
 - `GET /v1/jobs/{id}/stdout?offset=N&follow=1` (and `/stderr`): raw bytes from offset; with follow,
   streams (flush as written) until the job ends and all bytes are sent. Reattachable at any offset.
+- `ANY /v1/jobs/{id}/ports/{N}/{path...}` (also without the trailing slash): reverse proxy to the
+  service's host port for N, path rewritten to `/{path...}` (escaping and query kept). Bearer auth as
+  everywhere; the `Authorization` header is not forwarded. Sets `X-Forwarded-For/Host/Proto` and
+  `X-Forwarded-Prefix: /v1/jobs/{id}/ports/{N}`. Responses are flushed as they stream; protocol
+  upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
+  running, 502 (JSON error) if nothing accepts on the host port.
 - `GET /v1/healthz` (no auth).
 Errors: JSON `{"error": "..."}` with proper status codes.
 
@@ -84,5 +117,6 @@ Errors: JSON `{"error": "..."}` with proper status codes.
 - `scripts/ci.sh` (vet, build, test -race) must pass.
 
 ## Non-goals for v0 (later, driven by usage)
-Long-running services / port exposure, artifact download, multi-host scheduling, persistent
+Service-to-service networking beyond the shared host network, unauthenticated/public URLs, TLS
+termination, artifact download, multi-host scheduling, persistent
 workspaces, snapshots, incremental (per-file) upload.

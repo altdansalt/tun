@@ -25,6 +25,9 @@ const Usage = `tun: run commands on a tun server, in a fresh sandboxed copy of y
 usage:
   tun run [flags] -- <argv...>       run argv (no shell) and stream its output
   tun run [flags] -c '<script>'      run a script via bash -c
+  tun run --service [--port N]... -- <argv...>
+                                     start a long-running service, proxied at
+                                     <server>/v1/jobs/<id>/ports/N/; exits once it's ready
   tun status <id>                    print the job as one JSON object
   tun logs [-f] [--stderr] <id>      print a job's stdout (or stderr); -f follows until it ends
   tun cancel <id>                    kill a job (whole process group) or drop it from the queue
@@ -47,7 +50,8 @@ environment:
 
 job objects (status, ls, cancel) have fields: id, state (queued|running|exited|failed|timeout|
 canceled), exit_code, signal, created_at, started_at, ended_at, argv, script, cwd,
-timeout_sec, workspace, sandbox, error.
+timeout_sec (0 = none), workspace, sandbox, error; services also have service: true and
+ports: [{port, host_port, ready, path, url}].
 `
 
 const runUsage = `usage: tun run [flags] -- <argv...>
@@ -163,6 +167,8 @@ func runCmd(args []string, e Env) int {
 	detach := fs.Bool("detach", false, "print the job id to stdout and exit 0 immediately")
 	jsonOut := fs.Bool("json", false, "don't stream; when the job ends print one JSON object {id, state, exit_code, signal, error,\nduration (seconds), stdout, stderr, stdout_truncated, stderr_truncated} (output: last 64KiB of each)")
 	script := fs.String("c", "", "run this `script` with bash -c instead of argv")
+	svc := serviceFlags(fs)
+	fs.Usage = func() { fmt.Fprint(e.Stderr, runUsage); fs.PrintDefaults(); fmt.Fprint(e.Stderr, serviceUsage) }
 	if err := fs.Parse(args); err != nil {
 		return flagErr(e, err)
 	}
@@ -176,6 +182,9 @@ func runCmd(args []string, e Env) int {
 		return errorf(e, "run: --timeout must be positive")
 	}
 	req.TimeoutSec = int((*timeout + time.Second - 1) / time.Second)
+	if err := svc.apply(fs, &req); err != nil {
+		return errorf(e, "%v", err)
+	}
 	for _, kv := range envs {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
@@ -218,6 +227,9 @@ func runCmd(args []string, e Env) int {
 	}
 	if !*jsonOut {
 		fmt.Fprintf(e.Stderr, "tun: job %s\n", j.ID)
+	}
+	if j.Service {
+		return waitReady(ctx, c, j, *svc.readyTimeout, *jsonOut, e)
 	}
 	return wait(ctx, cancel, c, j, *jsonOut, e)
 }
@@ -383,6 +395,7 @@ func statusCmd(args []string, e Env) int {
 	if err != nil {
 		return errorf(e, "%v", err)
 	}
+	withURLs(newClient(e), &j)
 	printJSON(e, j)
 	return 0
 }
@@ -442,6 +455,7 @@ func lsCmd(args []string, e Env) int {
 		return errorf(e, "%v", err)
 	}
 	for _, j := range js {
+		withURLs(newClient(e), &j)
 		printJSON(e, j)
 	}
 	return 0

@@ -95,8 +95,15 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if cwd == "" {
 		cwd = "."
 	}
-	if req.TimeoutSec <= 0 {
+	if err := checkService(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.TimeoutSec <= 0 && !req.Service {
 		req.TimeoutSec = 30 * 60
+	}
+	if req.TimeoutSec < 0 {
+		req.TimeoutSec = 0 // none
 	}
 	if req.Workspace != "" && !shaRE.MatchString(req.Workspace) {
 		writeErr(w, 400, "workspace must be a sha256 of an uploaded blob")
@@ -105,6 +112,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	j := &job{done: make(chan struct{}), Env: req.Env, Job: api.Job{
 		ID: newID(), State: api.Queued, CreatedAt: time.Now().UTC(), Argv: req.Argv, Script: req.Script,
 		Cwd: cwd, TimeoutSec: req.TimeoutSec, Workspace: req.Workspace, Sandbox: s.cfg.Sandbox,
+		Service: req.Service,
 	}}
 	if code, err := s.prepare(j); err != nil {
 		os.RemoveAll(s.jobDir(j.ID))
@@ -117,14 +125,30 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "server is shutting down")
 		return
 	}
+	if j.Service {
+		if code, err := s.admitService(j, req.Ports); err != nil {
+			s.mu.Unlock()
+			os.RemoveAll(s.jobDir(j.ID))
+			writeErr(w, code, err.Error())
+			return
+		}
+	}
 	if err := s.persist(j); err != nil {
+		if j.Service {
+			s.releaseService(j)
+			s.svc.running--
+		}
 		s.mu.Unlock()
 		writeErr(w, 500, err.Error())
 		return
 	}
 	s.jobs[j.ID] = j
-	s.queue = append(s.queue, j)
-	s.schedule()
+	if j.Service {
+		s.startService(j)
+	} else {
+		s.queue = append(s.queue, j)
+		s.schedule()
+	}
 	snap := j.Job
 	s.mu.Unlock()
 	writeJSON(w, 201, snap)
@@ -164,7 +188,14 @@ func (s *Server) schedule() {
 		s.queue = s.queue[1:]
 		s.running++
 		s.wg.Add(1)
-		go s.run(j)
+		go func() {
+			defer s.wg.Done()
+			s.run(j)
+			s.mu.Lock()
+			s.running--
+			s.schedule()
+			s.mu.Unlock()
+		}()
 	}
 }
 
@@ -189,6 +220,7 @@ func (s *Server) env(j *job) []string {
 	for k, v := range j.Env {
 		m[k] = v
 	}
+	portEnv(j, m)
 	env := make([]string, 0, len(m))
 	for k, v := range m {
 		env = append(env, k+"="+v)
@@ -196,15 +228,8 @@ func (s *Server) env(j *job) []string {
 	return env
 }
 
-// run executes a job that has been taken off the queue.
+// run executes a job that has been taken off the queue (or admitted as a service).
 func (s *Server) run(j *job) {
-	defer s.wg.Done()
-	defer func() {
-		s.mu.Lock()
-		s.running--
-		s.schedule()
-		s.mu.Unlock()
-	}()
 	dir := s.jobDir(j.ID)
 	argv := j.Argv
 	if j.Script != "" {
@@ -278,7 +303,11 @@ func (s *Server) run(j *job) {
 			syscall.Kill(-pid, syscall.SIGKILL)
 		}
 	}()
-	timer := time.AfterFunc(time.Duration(j.TimeoutSec)*time.Second, func() {
+	timeout := time.Duration(j.TimeoutSec) * time.Second
+	if timeout == 0 {
+		timeout = 1<<63 - 1 // none (services)
+	}
+	timer := time.AfterFunc(timeout, func() {
 		s.mu.Lock()
 		if j.kill != nil {
 			j.kill(api.Timeout)
