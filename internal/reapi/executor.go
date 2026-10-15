@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,10 +65,20 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 			}
 			defer plan.done()
 		}
-		if err = materializeContext(ctx, store, fs, ".", get(action, 2).b, 0, &inputBudget{}, plan); err != nil {
+		inputs := &inputBudget{}
+		if err = materializeContext(ctx, store, fs, ".", get(action, 2).b, 0, inputs, plan); err != nil {
 			return nil, err
 		}
 		fetched := time.Now()
+		if d := fetched.Sub(start); d >= time.Second {
+			mounted := 0
+			if plan != nil {
+				mounted = len(plan.mounts)
+			}
+			cmd := string(get(get(action, 1).b, 1).b) // the Command digest
+			log.Printf("tun: executor: command %.12s: inputs took %.1fs: %d files (%s) copied of %d (%s), %d cached trees bound",
+				cmd, d.Seconds(), inputs.copiedFiles, fmtBytes(inputs.copiedBytes), inputs.nodes, fmtBytes(inputs.bytes), mounted)
+		}
 		cwdRoot, err := fs.OpenRoot(cwd)
 		if err != nil && cwd == "" {
 			cwdRoot, err = fs.OpenRoot(".")
@@ -210,6 +221,16 @@ func LocalExecutor(store BlobStore, dataDir, mode string) func(context.Context, 
 	}
 }
 
+func fmtBytes(n uint64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1fGB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(n)/(1<<20))
+	}
+	return fmt.Sprintf("%dKB", n>>10)
+}
+
 // executionMetadata is an ExecutedActionMetadata: worker start, input fetch, execution and
 // output upload times (worker_start = input_fetch_start, execution_completed =
 // output_upload_start, output_upload_completed = worker_completed).
@@ -274,6 +295,9 @@ func capacityError() error {
 type inputBudget struct {
 	nodes int
 	bytes uint64
+	// What was copied (the rest came from the tree cache), for the slow-fetch log line.
+	copiedFiles int
+	copiedBytes uint64
 }
 
 func materialize(s BlobStore, r *os.Root, p string, d []byte, depth int) error {
@@ -326,6 +350,8 @@ func materializeContext(ctx context.Context, s BlobStore, r *os.Root, p string, 
 			case 1:
 				d := get(node, 2).b
 				budget.bytes += get(d, 2).v
+				budget.copiedFiles++
+				budget.copiedBytes += get(d, 2).v
 				if get(d, 2).v > MaxExecutorBlob || budget.bytes > 2<<30 {
 					return capacityError()
 				}
