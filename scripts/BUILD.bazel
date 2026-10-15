@@ -5,6 +5,7 @@ exports_files([
     "bazel-ci.sh",
     "ci.sh",
     "bb-ci.sh",
+    "gazelle.sh",
 ])
 
 # The real-CLI smoke suites (what scripts/ci.sh runs at the end via dev-tun.sh), against the
@@ -29,7 +30,11 @@ exports_files([
     ],
     env = env,
 ) for name, suite, env in [
-    ("e2e_test", "e2e.sh", {}),
+    (
+        "e2e_test",
+        "e2e.sh",
+        {"DEV_TUN_CLIENTS": "alice,bob"},
+    ),
     (
         "e2e_runners_test",
         "e2e-runners.sh",

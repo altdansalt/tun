@@ -20,6 +20,9 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     The wrapper builds the working tree, adds the new binary to PATH, exports TUN_URL/TUN_TOKEN,
     runs the command, and cleans up the server and temporary files. Never replace the shared server.
     Use any command, e.g. `scripts/dev-tun.sh tun run -- echo hi`.
+    Multi-client tests: `DEV_TUN_CLIENTS=alice,bob scripts/dev-tun.sh CMD` also issues client
+    tokens and exports `TUN_TOKEN_alice`, `TUN_TOKEN_bob` (`TUN_TOKEN` stays admin), e.g.
+    `TUN_TOKEN=$TUN_TOKEN_bob tun logs ID`. `TUN_DATA` is the private server's data dir.
   - CI runs the real CLI smoke suites once at the end by default (scripts/e2e.sh, and
     scripts/e2e-runners.sh: a hub without local slots plus two `tun runner` processes);
     `-e E2E=0` disables them (with `-run` they are skipped unless `-e E2E=1`).
@@ -38,9 +41,12 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     Bazel-built `//cmd/tun`). Arguments replace `//...` and go to `bazel test` as is:
     `tun run -- ./scripts/bazel-ci.sh --test_filter=TestEphemeral //internal/server:server_test`.
     `--config=race` adds the race detector (ci.sh always uses it; Bazel doesn't by default).
-  - After adding/removing Go files or imports: `bazel run //:gazelle` (in a tun job, with
-    `--out` for the BUILD files; e.g. `tun run --out internal -c 'bazel --output_user_root=$TMPDIR/b run //:gazelle'`)
-    and commit the BUILD.bazel changes. Test data/tags/size in BUILD files are kept by gazelle.
+  - After adding/removing Go files or imports, fix the BUILD files with gazelle in a tun job and
+    fetch only the ones it changed:
+    `tun run --out gazelle.tar -- ./scripts/gazelle.sh && tar xvf gazelle.tar && rm gazelle.tar`
+    (prints each changed file's diff; args go to gazelle, e.g. `internal/client`; shared caches
+    like bazel-ci.sh; `GAZELLE_CHECK=1` exits 1 on changes). Commit the BUILD.bazel changes.
+    Test data/tags/size in BUILD files are kept by gazelle.
   - Caches: output base in the job's `$TMPDIR` (deleted at exit; never let Bazel default to
     `$XDG_CACHE_HOME/bazel`), shared repository cache and disk cache in
     `$XDG_CACHE_HOME/tun-bazel/` on each tun host. The disk cache also caches test results:
