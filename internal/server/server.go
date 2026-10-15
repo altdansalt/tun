@@ -29,6 +29,12 @@ type Config struct {
 	Sandbox   string // sandbox.Bwrap or sandbox.None (already resolved)
 	MaxUpload int64  // bytes
 	KillGrace time.Duration
+
+	// Retention (see gc.go); zero keeps forever.
+	KeepWork, KeepJobs, KeepBlobs time.Duration
+	GCInterval                    time.Duration // 0: derived from the Keep* durations
+	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
+	MaxLog                        int64         // max bytes kept per stdout/stderr; 0: unlimited
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
@@ -42,6 +48,7 @@ type Server struct {
 	running int
 	closed  bool
 	wg      sync.WaitGroup
+	gc      gcState
 }
 
 type job struct {
@@ -77,6 +84,7 @@ func New(cfg Config) (*Server, error) {
 	if err := s.recover(); err != nil {
 		return nil, err
 	}
+	s.startGC()
 	return s, nil
 }
 
@@ -151,6 +159,7 @@ func (s *Server) Close() {
 		}
 	}
 	s.mu.Unlock()
+	s.stopGC()
 	s.wg.Wait()
 }
 
@@ -238,7 +247,7 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) *job {
 	j := s.jobs[r.PathValue("id")]
 	s.mu.Unlock()
 	if j == nil {
-		writeErr(w, 404, fmt.Sprintf("no such job %q", r.PathValue("id")))
+		writeErr(w, 404, s.noSuchJob(r.PathValue("id")))
 	}
 	return j
 }

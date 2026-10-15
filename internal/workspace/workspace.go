@@ -185,7 +185,22 @@ func (c *countWriter) Write(p []byte) (int, error) {
 // and device/special files. All writes go through an os.Root, so nothing can be written
 // outside dir even via symlinks. Directory modes are applied last, so a read-only directory
 // can still be filled; use RemoveAll to delete the result.
-func Unpack(r io.Reader, dir string) error {
+func Unpack(r io.Reader, dir string) error { return UnpackLimit(r, dir, 0) }
+
+// TooLargeError is returned by UnpackLimit when the files' total size exceeds the limit.
+type TooLargeError struct {
+	Limit int64
+	Entry string // the entry that crossed the limit
+}
+
+func (e *TooLargeError) Error() string {
+	return fmt.Sprintf("workspace unpacks to more than %d bytes (at entry %q)", e.Limit, e.Entry)
+}
+
+// UnpackLimit is Unpack, but fails with a *TooLargeError as soon as the total size of the
+// regular files would exceed max bytes (max <= 0: no limit). It checks each header's size
+// before writing, so a compression bomb never lands on disk.
+func UnpackLimit(r io.Reader, dir string, max int64) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("workspace is not gzip: %w", err)
@@ -198,6 +213,7 @@ func Unpack(r io.Reader, dir string) error {
 	dirModes := map[string]fs.FileMode{}
 	var links []string
 	tr := tar.NewReader(gz)
+	var total int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -226,6 +242,10 @@ func Unpack(r io.Reader, dir string) error {
 			}
 			dirModes[name] = mode
 		case tar.TypeReg:
+			if max > 0 && hdr.Size > max-total {
+				return &TooLargeError{Limit: max, Entry: name}
+			}
+			total += hdr.Size
 			f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
 				return err

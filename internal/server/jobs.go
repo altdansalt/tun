@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -30,7 +31,7 @@ func (s *Server) blobPath(sha string) string {
 
 func (s *Server) headBlob(w http.ResponseWriter, r *http.Request) {
 	sha := r.PathValue("sha")
-	if _, err := os.Stat(s.blobPath(sha)); !shaRE.MatchString(sha) || err != nil {
+	if !shaRE.MatchString(sha) || !s.useBlob(sha) {
 		w.WriteHeader(404)
 		return
 	}
@@ -184,13 +185,13 @@ func (s *Server) prepare(j *job) (int, error) {
 	if j.Workspace == "" {
 		return 0, nil
 	}
-	f, err := os.Open(s.blobPath(j.Workspace))
+	f, err := s.openBlob(j.Workspace)
 	if err != nil {
 		return 400, fmt.Errorf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", j.Workspace, j.Workspace)
 	}
 	defer f.Close()
-	if err := workspace.Unpack(f, filepath.Join(sb, "work")); err != nil {
-		return 400, fmt.Errorf("unpacking workspace: %v", err)
+	if err := workspace.UnpackLimit(f, filepath.Join(sb, "work"), s.cfg.MaxWorkspace); err != nil {
+		return s.unpackErr(err)
 	}
 	return 0, nil
 }
@@ -284,20 +285,19 @@ func (s *Server) run(j *job) {
 		fail(fmt.Sprintf("cwd %q does not exist in the workspace", j.Cwd))
 		return
 	}
-	stdout, err1 := openOwn(filepath.Join(dir, "stdout"), os.O_WRONLY|os.O_APPEND, 0)
-	stderr, err2 := openOwn(filepath.Join(dir, "stderr"), os.O_WRONLY|os.O_APPEND, 0)
-	if err := errors.Join(err1, err2); err != nil {
+	logs, err := s.openLogs(dir)
+	if err != nil {
 		fail(err.Error())
 		return
 	}
-	defer stdout.Close()
-	defer stderr.Close()
+	defer logs.close()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
-	cmd, err := sandbox.Start(spec, stdout, stderr)
+	cmd, err := sandbox.Start(spec, logs.Stdout, logs.Stderr)
+	logs.started()
 	if err != nil {
 		s.finish(j, api.Failed, nil, nil, "starting command: "+err.Error())
 		s.mu.Unlock()
@@ -346,6 +346,7 @@ func (s *Server) run(j *job) {
 	timer.Stop()
 	close(waitDone)
 	syscall.Kill(-pid, syscall.SIGKILL) // reap stragglers left in the group
+	logs.wait()
 
 	var code, sig *int
 	if ps := cmd.ProcessState; ps != nil {
@@ -404,6 +405,10 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f, err := openOwn(filepath.Join(s.jobDir(j.ID), stream), os.O_RDONLY, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeErr(w, 404, s.noSuchJob(j.ID)) // expired since the lookup
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

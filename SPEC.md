@@ -14,6 +14,7 @@ Think `bb remote --script`, without Bazel, GitHub, or BuildBuddy.
 ## CLI
 ```
 tun serve [--addr 127.0.0.1:7070] [--data DIR] [--max-jobs N] [--sandbox auto|bwrap|none]
+          [--max-upload 512MB] [--max-workspace 2GB] [--keep-work 1h] [--keep-jobs 168h] [--keep-blobs 24h]
 tun run [flags] -- <argv...>        run argv (no shell)
 tun run [flags] -c '<shell script>' run via bash -c
     -C DIR          working dir, relative to the workspace root (default: the client's cwd relative to the root)
@@ -46,6 +47,8 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
   `PUT` only if missing. Size limit (default 512MB, server flag) with a clear error.
 - Server extracts a fresh copy per job (never shared between jobs). Reject `..`, absolute paths,
   device files.
+  Total unpacked file size is capped (`--max-workspace`, default 2GB): over it, job creation fails
+  with 413 and a message naming the flag.
 
 ## Execution and isolation
 - Each job: `$DATA/jobs/<id>/` containing the server's files `stdout`, `stderr`, `job.json`
@@ -76,13 +79,22 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
 - A client disconnecting does NOT kill the job (agents' tool calls time out; they can `tun logs -f` back).
   Only explicit cancel (or the client's SIGINT handler) does.
 
+## Retention
+A sweep at server startup and then periodically (a quarter of the shortest retention, 1s..10m):
+- `work/ home/ tmp/` of jobs that ended more than `--keep-work` (1h) ago are deleted; job.json and
+  logs stay, and the job object gets `"work_deleted": true`. Status and logs keep working.
+- Whole job dirs are deleted `--keep-jobs` (7d) after the job ended; the id then 404s.
+- Blobs not referenced by a queued/running job and unused (HEAD/PUT/job creation bump the
+  file's mtime) for `--keep-blobs` (24h) are deleted; clients just re-upload.
+- A duration of 0 disables that deletion.
+
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
 - `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace}` -> job object (201).
   `timeout_sec` <= 0 means the default (1800); over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error}`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted}`.
 - `GET /v1/jobs?limit=N` -> list. `POST /v1/jobs/{id}/cancel`.
 - `GET /v1/jobs/{id}/stdout?offset=N&follow=1` (and `/stderr`): raw bytes from offset; with follow,
   streams (flush as written) until the job ends and all bytes are sent. Reattachable at any offset.
