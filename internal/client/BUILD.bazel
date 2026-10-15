@@ -29,6 +29,7 @@ go_library(
     testonly = True,
     srcs = [
         "lib_bazel_test.go",
+        "lib_runner_test.go",
         "lib_server_test.go",
         "lib_service_test.go",
         "lib_tools_test.go",
