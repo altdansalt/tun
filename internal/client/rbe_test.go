@@ -3,7 +3,6 @@ package client
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -31,9 +30,7 @@ func remoteProcs(stderr string) int {
 // in the server's slots (which the session command itself doesn't hold, or with one slot they
 // would wait forever) and on runners, and their results land in the shared action cache.
 func TestBazelRemoteExecution(t *testing.T) {
-	if _, err := exec.LookPath("bazel"); err != nil {
-		t.Skip("bazel not on PATH")
-	}
+	skipWithoutRealBazel(t)
 	if !sandbox.BwrapUsable() {
 		t.Skip("bwrap unusable (without it a Bazel server would outlive the test)")
 	}

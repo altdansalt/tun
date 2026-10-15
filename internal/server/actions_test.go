@@ -35,9 +35,7 @@ func TestActionRunnerProcess(t *testing.T) {
 	r.Run()
 }
 func TestBazelRunnerExecution(t *testing.T) {
-	if _, err := exec.LookPath("bazel"); err != nil {
-		t.Skip("bazel missing")
-	}
+	skipWithoutRealBazel(t)
 	if !sandbox.BwrapUsable() {
 		t.Skip("remote actions require bwrap")
 	}
@@ -125,5 +123,19 @@ genrule(name="bad", outs=["bad.txt"], cmd="echo runner-action-failure >&2; exit 
 	entries, err := os.ReadDir(filepath.Join(s.cfg.DataDir, "jobs"))
 	if err != nil || len(entries) != 0 {
 		t.Fatal(entries, err)
+	}
+}
+
+// skipWithoutRealBazel skips a test that runs a real Bazel unless one can run: bazel on PATH,
+// and not inside a Bazel test action (a tun bazel session or remote executor: no Bazel
+// download, no DNS) unless TUN_TEST_REAL_BAZEL is set (scripts/bazel-ci.sh sets it: in a tun
+// job the test finds bazelisk's cached Bazel).
+func skipWithoutRealBazel(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("bazel"); err != nil {
+		t.Skip("bazel not on PATH")
+	}
+	if os.Getenv("TEST_TMPDIR") != "" && os.Getenv("TUN_TEST_REAL_BAZEL") == "" {
+		t.Skip("inside a Bazel test without TUN_TEST_REAL_BAZEL=1")
 	}
 }

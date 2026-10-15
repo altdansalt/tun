@@ -73,9 +73,7 @@ func TestExecutionOperations(t *testing.T) {
 }
 
 func TestBazelExecution(t *testing.T) {
-	if _, err := exec.LookPath("bazel"); err != nil {
-		t.Skip("bazel missing")
-	}
+	skipWithoutRealBazel(t)
 	h, addr, _ := testServer(t)
 	data := t.TempDir()
 	mode := sandbox.None

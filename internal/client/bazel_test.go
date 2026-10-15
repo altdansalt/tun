@@ -585,9 +585,7 @@ func TestBazelNeedsLocalSlots(t *testing.T) {
 // TestBazelReal runs the real Bazel (skipped without bazel and bwrap): a genrule workspace
 // needs no downloads. The second command must find the server warm and its analysis cached.
 func TestBazelReal(t *testing.T) {
-	if _, err := exec.LookPath("bazel"); err != nil {
-		t.Skip("bazel not on PATH")
-	}
+	skipWithoutRealBazel(t)
 	if !sandbox.BwrapUsable() {
 		t.Skip("bwrap unusable (without it a Bazel server would outlive the test)")
 	}
@@ -653,5 +651,19 @@ func TestBazelReal(t *testing.T) {
 	r = ts.tun(ws, "bazel", "--cold", "build", "//:hello")
 	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || !strings.Contains(r.stderr, "1 remote cache hit") || out() != "two\n" {
 		t.Fatalf("--cold with a warm remote cache: %+v", r)
+	}
+}
+
+// skipWithoutRealBazel skips a test that runs a real Bazel unless one can run: bazel on PATH,
+// and not inside a Bazel test action (a tun bazel session or remote executor: no Bazel
+// download, no DNS) unless TUN_TEST_REAL_BAZEL is set (scripts/bazel-ci.sh sets it: in a tun
+// job the test finds bazelisk's cached Bazel).
+func skipWithoutRealBazel(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("bazel"); err != nil {
+		t.Skip("bazel not on PATH")
+	}
+	if os.Getenv("TEST_TMPDIR") != "" && os.Getenv("TUN_TEST_REAL_BAZEL") == "" {
+		t.Skip("inside a Bazel test without TUN_TEST_REAL_BAZEL=1")
 	}
 }

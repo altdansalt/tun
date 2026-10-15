@@ -253,9 +253,7 @@ func TestLRU(t *testing.T) {
 }
 
 func TestBazelCache(t *testing.T) {
-	if _, e := exec.LookPath("bazel"); e != nil {
-		t.Skip("bazel missing")
-	}
+	skipWithoutRealBazel(t)
 	_, addr, socket := testServer(t)
 	work := t.TempDir()
 	os.WriteFile(filepath.Join(work, "MODULE.bazel"), nil, 0600)
@@ -473,5 +471,19 @@ func TestStoreRestartBudget(t *testing.T) {
 	}
 	if _, e = os.Stat(unrelated); e != nil {
 		t.Fatalf("evicted unrelated file: %v", e)
+	}
+}
+
+// skipWithoutRealBazel skips a test that runs a real Bazel unless one can run: bazel on PATH,
+// and not inside a Bazel test action (a tun bazel session or remote executor: no Bazel
+// download, no DNS) unless TUN_TEST_REAL_BAZEL is set (scripts/bazel-ci.sh sets it: in a tun
+// job the test finds bazelisk's cached Bazel).
+func skipWithoutRealBazel(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("bazel"); err != nil {
+		t.Skip("bazel not on PATH")
+	}
+	if os.Getenv("TEST_TMPDIR") != "" && os.Getenv("TUN_TEST_REAL_BAZEL") == "" {
+		t.Skip("inside a Bazel test without TUN_TEST_REAL_BAZEL=1")
 	}
 }

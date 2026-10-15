@@ -18,7 +18,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cache=${TUN_BAZEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/tun-bazel}
-flags=(--repository_cache="$cache/repo")
+# Tests that run a real Bazel skip inside Bazel tests unless told it works (here it does: the
+# test finds bazelisk's cached Bazel; in a tun bazel session or on an executor it doesn't).
+flags=(--repository_cache="$cache/repo" --test_env=TUN_TEST_REAL_BAZEL=1)
 if [ "${BAZEL_DISK_CACHE:-1}" != 0 ]; then
   flags+=(--disk_cache="$cache/disk" --experimental_disk_cache_gc_max_size=3G)
 fi
