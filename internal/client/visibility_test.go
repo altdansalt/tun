@@ -81,6 +81,7 @@ func TestQueueVisibility(t *testing.T) {
 	if jf := ts.waitDone(f); jf.QueueSec < 0.2 || jf.RunSec != 0 || jf.QueuePosition != nil {
 		t.Errorf("canceled queued job: %+v", jf)
 	}
+	ts.waitDone(e) // cancel returns before the process has exited; it still counts as running
 
 	// Services are counted separately.
 	svc := ts.detach("", "--service", "--no-workspace", "--", "sleep", "30")
