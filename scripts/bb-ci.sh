@@ -7,5 +7,5 @@ cd "$(dirname "$0")/.."
 git remote get-url public >/dev/null 2>&1 || git remote add public https://github.com/altdansalt/tun.git
 git config buildbuddy.remote-bazel-remote-name public
 export BUILDBUDDY_API_KEY=${BUILDBUDDY_API_KEY:-$(cat ~/bb-token)}
-script=${*:-"TEST_FLAGS='${TEST_FLAGS:-}' ./scripts/ci.sh"}
+script=${*:-"TEST_FLAGS=$(printf %q "${TEST_FLAGS:-}") ./scripts/ci.sh"}
 exec bb remote --remote_runner=grpcs://remote.buildbuddy.dev --timeout=20m --script="$script"

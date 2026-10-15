@@ -36,6 +36,13 @@ func TestReview2NegativeTailRejected(t *testing.T) {
 	if r := ts.tun("", "run", "--tail", "-2", "--", "echo", "hi"); r.code != 125 || !strings.Contains(r.stderr, "tail") {
 		t.Errorf("run --tail -2: want exit 125 naming --tail, got %+v", r)
 	}
+	// -1 is the internal "unset" default, but given explicitly it's negative too.
+	if r := ts.tun("", "run", "--tail=-1", "--", "echo", "hi"); r.code != 125 || !strings.Contains(r.stderr, "tail") {
+		t.Errorf("run --tail=-1: want exit 125 naming --tail, got %+v", r)
+	}
+	if r := ts.tun("", "logs", "--tail", "0", id); r.code != 0 || r.stdout != "" {
+		t.Errorf("logs --tail 0: %+v", r)
+	}
 }
 
 // ciWorkspace is a copy of scripts/ci.sh (and the named extra scripts) with a fake go on PATH
@@ -87,6 +94,14 @@ func TestReview2CIScriptExplicitE2EWithRun(t *testing.T) {
 	r := ts.tun(ws, "run", "-e", "TEST_FLAGS=-run TestA", "-e", "E2E=1", "-c", `PATH=$PWD/bin:$PATH exec ./scripts/ci.sh`)
 	if r.code != 0 || !strings.Contains(r.stdout, "e2e-ran") {
 		t.Errorf("E2E=1 with -run should run the smoke suite: %+v", r)
+	}
+	r = ts.tun(ws, "run", "-e", "TEST_FLAGS=-run TestA", "-c", `PATH=$PWD/bin:$PATH exec ./scripts/ci.sh`)
+	if r.code != 0 || strings.Contains(r.stdout, "e2e-ran") {
+		t.Errorf("-run without E2E=1 should skip the smoke suite: %+v", r)
+	}
+	r = ts.tun(ws, "run", "-c", `PATH=$PWD/bin:$PATH exec ./scripts/ci.sh`)
+	if r.code != 0 || !strings.Contains(r.stdout, "e2e-ran") {
+		t.Errorf("full run should run the smoke suite: %+v", r)
 	}
 }
 

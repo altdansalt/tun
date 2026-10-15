@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/sandbox"
+	"github.com/altdansalt/tun/internal/workspace"
 )
 
 const serveUsage = `usage: tun serve [flags]
@@ -110,7 +111,12 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail("temporary data dir: %v", err)
 		}
-		defer os.RemoveAll(dir)
+		defer func() {
+			// workspace.RemoveAll: jobs may leave read-only dirs (chmod, Go's module cache).
+			if err := workspace.RemoveAll(dir); err != nil {
+				fmt.Fprintf(stderr, "tun: could not remove temporary data dir: %v\n", err)
+			}
+		}()
 		*data = dir
 	}
 	limit, err := parseSize(*maxUpload)
