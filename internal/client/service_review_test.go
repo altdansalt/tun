@@ -44,7 +44,9 @@ func TestReviewServiceCancelRace(t *testing.T) {
 			t.Fatalf("job %s resurrected after cancel: %+v", id, cur)
 		}
 	}
-	id, _ := ts.startService()
+	// A port keeps the helper serving until canceled; without one it exits at once and
+	// startService could see it end before it was ready.
+	id, _ := ts.startService("--port", "8080")
 	ts.tun("", "cancel", id)
 }
 
