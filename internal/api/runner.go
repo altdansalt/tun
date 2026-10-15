@@ -37,6 +37,7 @@ type RunnerPoll struct {
 	// NetworkIsolation: the runner gives each job its own network namespace (--net private).
 	NetworkIsolation bool     `json:"network_isolation"`
 	Disk             *Disk    `json:"disk,omitempty"` // the runner's data dir
+	ServiceSupport   bool     `json:"service_support,omitempty"`
 	SessionSupport   bool     `json:"session_support,omitempty"`
 	MemoryAvailable  int64    `json:"memory_available,omitempty"`
 	Load             float64  `json:"load,omitempty"`
@@ -45,9 +46,10 @@ type RunnerPoll struct {
 
 // RunnerPollResponse is the hub's answer: jobs to start and job ids to kill and drop.
 type RunnerPollResponse struct {
-	Jobs     []RunnerJob `json:"jobs"`
-	Cancel   []string    `json:"cancel"`
-	Sessions []string    `json:"sessions,omitempty"` // authoritative session leases for this instance
+	Tunnels  []ServiceTunnel `json:"tunnels,omitempty"`
+	Jobs     []RunnerJob     `json:"jobs"`
+	Cancel   []string        `json:"cancel"`
+	Sessions []string        `json:"sessions,omitempty"` // authoritative session leases for this instance
 	// Superseded is set when a newer instance took over this runner's name: this instance
 	// gets no more work, should finish the jobs it holds (polling on as its heartbeat), then
 	// exit.
@@ -63,6 +65,7 @@ type RunnerLeave struct {
 // RunnerJob is one job assignment: everything the runner needs to run it.
 type RunnerJob struct {
 	ID         string            `json:"id"`
+	Ports      []Port            `json:"ports,omitempty"`
 	Bazel      *RunnerBazel      `json:"bazel,omitempty"`
 	Argv       []string          `json:"argv,omitempty"`
 	Script     string            `json:"script,omitempty"`
@@ -126,4 +129,11 @@ type RunnerBazel struct {
 	CacheCredential string   `json:"cache_credential,omitempty"`
 	CacheReadOnly   bool     `json:"cache_read_only,omitempty"`
 	SessionIdleSec  int      `json:"session_idle_sec"`
+}
+
+// ServiceTunnel requests a runner-initiated connection for one admitted service port.
+type ServiceTunnel struct {
+	ID   string `json:"id"`
+	Job  string `json:"job"`
+	Port int    `json:"port"`
 }

@@ -80,7 +80,40 @@ if command -v bazel >/dev/null; then
   tun bazel build //:hello 2>"$tmp/bazel-warm.log" || fail "warm runner bazel"
   grep -q 'Starting local Bazel server' "$tmp/bazel-warm.log" && fail "lost warm server"
   [ "$(tun sessions | sed -n 's/.*"host":"\([^"]*\)".*/\1/p')" = "$host" ] || fail "bazel affinity"
-  echo 'e2e-runners: bazel affinity and cache socket checked'
+  id=$(tun ls --limit 1 | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  tun get -o "$tmp/bazel-got" "$id" //:hello || fail "runner session artifact"
+  [ "$(cat "$tmp/bazel-got/bazel-bin/hello.txt")" = hello ] || fail "session output content"
+  tun logs --stderr "$id" | grep -q 'tun: bazel build exit=0' || fail "retained BEP summary"
+  cat > test.bzl <<'STARLARK'
+def _impl(ctx):
+    f = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(f, "#!/bin/sh\necho runner-test-log\n", is_executable = True)
+    return [DefaultInfo(executable = f)]
+simple_test = rule(implementation = _impl, test = True)
+STARLARK
+  # Keep load statements ahead of rule declarations.
+  printf 'load(":test.bzl", "simple_test")\nsimple_test(name="smoke_test")\n' > test-build
+  cat BUILD.bazel >> test-build
+  mv test-build BUILD.bazel
+  tun bazel test //:smoke_test 2>"$tmp/test.log" || fail "runner test"
+  tid=$(tun ls --limit 1 | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  tun bazel build //:hello 2>/dev/null || fail "command after test"
+  tun get -o "$tmp/test-got" "$tid" //:smoke_test || fail "runner test logs by label"
+  grep -rq runner-test-log "$tmp/test-got/bazel-testlogs" || fail "test log contents"
+  tun get -o "$tmp/test-got" "$tid" //:smoke_test.log || fail "test log alias"
+  echo 'e2e-runners: bazel affinity, artifacts, test logs and cache socket checked'
+fi
+
+# Services use runner slots and an authenticated reverse tunnel, even with netns.
+if command -v python3 >/dev/null; then
+ service=$(tun run --service --port 8080 -- python3 -u -c 'import http.server,os; http.server.HTTPServer(("127.0.0.1",int(os.environ["PORT"])),http.server.SimpleHTTPRequestHandler).serve_forever()')
+ sid=$(head -n1 <<<"$service")
+ surl=$(awk 'NR==2 {print $2}' <<<"$service")
+ [[ "$(field "$sid" runner)" =~ ^r[12]$ ]] || fail "service ran on hub"
+ [ "$(curl -fsS -H "X-Tun-Token: $TUN_TOKEN" "$surl/input")" = data ] || fail "runner service proxy"
+ tun cancel "$sid" >/dev/null
+ wait_for "$sid" canceled
+ echo 'e2e-runners: service placement, readiness and proxy checked'
 fi
 
 # Both runners take work at once.

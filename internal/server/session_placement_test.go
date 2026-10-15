@@ -459,3 +459,27 @@ func TestFailedFirstRemoteCommandReleasesReservation(t *testing.T) {
 		t.Fatal("failed startup reservation survived acknowledgment")
 	}
 }
+
+func TestRunnerClientCacheTrimming(t *testing.T) {
+	r := &Runner{cfg: RunnerConfig{DataDir: t.TempDir(), Sandbox: "none", MaxClientCache: 1}}
+	if err := r.newSessionHost(); err != nil {
+		t.Fatal(err)
+	}
+	defer r.sessions.Close()
+	s := r.sessions
+	s.stopGC() // Drive sweeps explicitly.
+	f := &cacheFixture{t: t, s: s, data: s.cfg.DataDir}
+	client := filepath.Base(s.clientCaches("alice"))
+	rel := "bazel/" + client + "/repo/content_addressable/sha256/entry/file"
+	f.put(rel, 2*time.Hour)
+	s.mu.Lock()
+	s.sessions["lease"] = &session{Session: api.Session{ID: "lease", Client: "alice"}}
+	s.mu.Unlock()
+	s.trimSharedCaches()
+	f.want(true, rel)
+	s.mu.Lock()
+	delete(s.sessions, "lease")
+	s.mu.Unlock()
+	s.trimSharedCaches()
+	f.want(false, rel)
+}

@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -156,23 +157,72 @@ func TestRunnerSessionCacheAcrossHosts(t *testing.T) {
 	b := runner("b")
 	ts.waitRunners(2)
 	ws := bazelWS(t, map[string]string{"MODULE.bazel": "module(name=\"t\")\n", ".bazelversion": "9.3.0\n", "BUILD.bazel": "genrule(name=\"hello\",outs=[\"hello.txt\"],cmd=\"echo hello > $@\")\n"})
-	r := ts.tun(ws, "bazel", "build", "//:hello")
+	alice, err := server.IssueClientToken(ts.data, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) result { return ts.tunEnv(ws, map[string]string{"TUN_TOKEN": alice}, args...) }
+
+	r := run("bazel", "build", "//:hello")
 	if r.code != 0 {
 		t.Fatalf("seed: %+v", r)
 	}
 	before := ts.sessions()[0]
+	if before.Client != "alice" {
+		t.Fatalf("token identity lost: %+v", before)
+	}
+	original := before.LastJob
+	// The runner stages artifacts on the hub before releasing the session lock.
+	got := t.TempDir()
+	download := ts.tunEnv(ws, map[string]string{"TUN_TOKEN": alice}, "get", "-o", got, original, "//:hello")
+	if download.code != 0 {
+		t.Fatalf("artifact: %+v", download)
+	}
+	data, err := os.ReadFile(filepath.Join(got, "bazel-bin", "hello.txt"))
+	if err != nil || string(data) != "hello\n" {
+		t.Fatalf("artifact %q %v", data, err)
+	}
+
 	if before.Host == "a" {
 		a.kill()
 	} else {
 		b.kill()
 	}
 	ts.waitRunners(1)
-	r = ts.tun(ws, "bazel", "build", "//:hello")
+	r = run("bazel", "build", "//:hello")
 	if r.code != 0 || !strings.Contains(r.stderr, "1 remote cache hit") {
 		t.Fatalf("cross-host cache: %+v", r)
 	}
 	if after := ts.sessions()[0]; after.Host == before.Host || after.Commands != 1 {
 		t.Fatalf("recreated session: %+v", after)
+	}
+	bob, err := server.IssueClientToken(ts.data, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := ts.tunEnv(ws, map[string]string{"TUN_TOKEN": bob}, "get", "-o", got, original, "//:hello")
+	if denied.code == 0 {
+		t.Fatal("bob downloaded alice's artifact")
+	}
+	cold := ts.tunEnv(ws, map[string]string{"TUN_TOKEN": bob}, "bazel", "build", "//:hello")
+	if cold.code != 0 || strings.Contains(cold.stderr, "1 remote cache hit") {
+		t.Fatalf("client cache namespace: %+v", cold)
+	}
+	// The original command stays downloadable after its runner has disappeared.
+	download = ts.tunEnv(ws, map[string]string{"TUN_TOKEN": alice}, "get", "-o", got, original, "//:hello")
+	if download.code != 0 {
+		t.Fatalf("artifact after host loss: %+v", download)
+	}
+	var summary map[string]any
+	req, _ := http.NewRequest("GET", ts.url+"/v1/jobs/"+original+"/bep", nil)
+	req.Header.Set("X-Tun-Token", alice)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil || summary["success"] != true {
+		t.Fatalf("retained BEP: %v %v", summary, err)
 	}
 }
 

@@ -19,7 +19,7 @@ import (
 )
 
 func (r *Runner) newSessionHost() error {
-	s, err := New(Config{DataDir: filepath.Join(r.cfg.DataDir, "session-host"), Sandbox: r.cfg.Sandbox, PrivateNet: r.cfg.PrivateNet, MaxJobs: r.cfg.Slots, MinFree: r.cfg.MinFree, KillGrace: r.cfg.KillGrace, BazelCommand: r.cfg.BazelCommand, BazeliskSeed: r.cfg.BazeliskSeed, KeepBlobs: r.cfg.KeepBlobs, KeepJobs: time.Hour, SessionIdle: 30 * time.Minute})
+	s, err := New(Config{DataDir: filepath.Join(r.cfg.DataDir, "session-host"), Sandbox: r.cfg.Sandbox, PrivateNet: r.cfg.PrivateNet, MaxJobs: r.cfg.Slots, MinFree: r.cfg.MinFree, KillGrace: r.cfg.KillGrace, BazelCommand: r.cfg.BazelCommand, BazeliskSeed: r.cfg.BazeliskSeed, KeepBlobs: r.cfg.KeepBlobs, KeepJobs: time.Hour, SessionIdle: 30 * time.Minute, MaxClientCache: r.cfg.MaxClientCache})
 	if err != nil {
 		return err
 	}
@@ -95,6 +95,8 @@ func (r *Runner) fetchSessionBlobs(ctx context.Context, b *api.BazelJob) error {
 	return r.fetchSessionBlobsLimit(ctx, b, r.sessions.cfg.MaxUpload)
 }
 func (r *Runner) fetchSessionBlobsLimit(ctx context.Context, b *api.BazelJob, limit int64) error {
+	// The hub checked uploader ownership before admitting this command. This
+	// private CAS is an executor cache, so fetching needs no second ownership check.
 	missing := r.sessions.missingBlobs("", b.Manifest)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -117,7 +119,7 @@ func (r *Runner) fetchSessionBlobsLimit(ctx context.Context, b *api.BazelJob, li
 					if resp.StatusCode != 200 {
 						err = hubError(resp)
 					} else {
-						_, err = workspace.ReadBlobs(resp.Body, false, limit, filepath.Join(r.sessions.cfg.DataDir, "cas"))
+						_, err = workspace.ReadBlobs(resp.Body, false, limit, filepath.Join(r.sessions.cfg.DataDir, "cas"), nil)
 					}
 					resp.Body.Close()
 				}
@@ -252,9 +254,30 @@ func (r *Runner) executeBazel(rj *runnerJob) (procResult, api.RunnerDone) {
 	s.runBazel(j)
 	close(stop)
 	<-shipped
-	done = api.RunnerDone{SessionReady: sess.sb != nil, State: j.State, ExitCode: j.ExitCode, Signal: j.Signal, Error: j.Error, Summary: j.Summary}
+	done = api.RunnerDone{SessionReady: sess.sb != nil, State: j.State, ExitCode: j.ExitCode, Signal: j.Signal, Error: j.Error, Summary: j.Summary, OutputsError: j.OutError}
 	v := sess.Session
 	done.Session = &v
+	if err := r.retry(time.Minute, func() error {
+		f, err := os.Open(filepath.Join(s.jobDir(j.ID), outputsFile))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		resp, err := r.do(r.ctx, "PUT", "/v1/runner/jobs/"+spec.ID+"/outputs", f)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return hubError(resp)
+		}
+		return nil
+	}); err != nil {
+		done.OutputsError = err.Error()
+	}
 	data, _ := os.ReadFile(filepath.Join(s.jobDir(j.ID), "bep.json"))
 	if json.Valid(data) {
 		done.BEP = data

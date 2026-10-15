@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -650,5 +651,77 @@ func TestRunnerStartTimeout(t *testing.T) {
 	})
 	if j := ts.status(id); j.State != api.Queued || j.Runner != "" {
 		t.Errorf("requeued: %+v", j)
+	}
+}
+
+func TestRunnerService(t *testing.T) {
+	ts := startServer(t, hubConfig(""))
+	ts.startRunner("r", 2)
+	ts.waitRunners(1)
+	id, urls := ts.startService("--port", "8080", "--ready-timeout", "15s")
+	j := ts.status(id)
+	if j.Runner != "r" || !j.Ports[0].Ready {
+		t.Fatalf("placement/readiness: %+v", j)
+	}
+	u := urls[8080]
+	if code, body := ts.get(u+"env", true); code != 200 || !strings.Contains(body, "PORT=") {
+		t.Fatalf("proxy: %d %s", code, body)
+	}
+	if code, _ := ts.get(u, false); code != 401 {
+		t.Fatal(code)
+	}
+	// Upgrade traffic must pass both proxy layers without exposing the tun token.
+	if code, body := ts.get(u, true); code != 200 || strings.Contains(body, ts.srv.Token()) {
+		t.Fatalf("auth leak: %d %s", code, body)
+	}
+	// Streaming: the first chunk must arrive before we release the second.
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStream()
+	req, _ := http.NewRequestWithContext(streamCtx, "GET", u+"stream", nil)
+	req.Header.Set("Authorization", "Bearer "+ts.srv.Token())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamReader := bufio.NewReader(resp.Body)
+	line, err := streamReader.ReadString('\n')
+	if err != nil || line != "tick1\n" {
+		t.Fatalf("stream first chunk %q %v", line, err)
+	}
+	if code, _ := ts.get(u+"stream-release", true); code != 200 {
+		t.Fatalf("release stream: %d", code)
+	}
+	if line, err := streamReader.ReadString('\n'); err != nil || line != "tick2\n" {
+		t.Errorf("stream second chunk %q %v", line, err)
+	}
+	resp.Body.Close()
+
+	// Websocket-style upgrade passes through and is bidirectional.
+	conn, err := net.Dial("tcp", strings.TrimPrefix(ts.url, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	fmt.Fprintf(conn, "GET /v1/jobs/%s/ports/8080/ws HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", id, ts.srv.Token())
+	br := bufio.NewReader(conn)
+	wsResp, err := http.ReadResponse(br, nil)
+	if err != nil || wsResp.StatusCode != 101 {
+		t.Fatalf("upgrade: %v %+v", err, wsResp)
+	}
+	fmt.Fprint(conn, "ping\n")
+	if echo, err := br.ReadString('\n'); echo != "ping\n" {
+		t.Errorf("websocket echo %q %v", echo, err)
+	}
+
+	conn.Close()
+
+	r := ts.tun("", "cancel", id)
+	if r.code != 0 {
+		t.Fatal(r)
+	}
+	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Canceled })
+	if h := ts.health(); h.Services != 0 {
+		t.Fatalf("service admission leaked: %+v", h)
 	}
 }

@@ -498,7 +498,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "warm server") {
 		t.Fatalf("a cancel that Bazel obeyed must not end the session's server: %+v", r)
 	}
-	if r := ts.tun(ws, "get", b, "x"); r.code != 125 || !strings.Contains(r.stderr, "tun bazel job") {
+	if r := ts.tun(ws, "get", b, "x"); r.code != 1 || !strings.Contains(r.stderr, "matched nothing") {
 		t.Fatalf("tun get of a bazel job: %+v", r)
 	}
 	r := ts.tun(ws, "bazel", "--timeout", "1s", "sleep", "30")

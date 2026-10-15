@@ -42,6 +42,8 @@ type runnerState struct {
 	name, instance, sandbox, source string
 	privateNet                      bool
 	disk                            *api.Disk
+	serviceSupport                  bool
+	tunnels                         map[string]*serviceTunnel
 	sessionSupport                  bool
 	memoryAvailable                 int64
 	load                            float64
@@ -185,7 +187,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	resp.Jobs = s.takeJobs(rn, held)
 	deadline := time.NewTimer(s.cfg.RunnerPollWait)
 	defer deadline.Stop()
-	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !s.runnerNeedsRevocation(rn, p.Sessions) && !s.closed && rn.seq == seq {
+	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !rn.pendingTunnels() && !s.runnerNeedsRevocation(rn, p.Sessions) && !s.closed && rn.seq == seq {
 		rn.waiting++
 		s.mu.Unlock()
 		timedOut := false
@@ -210,6 +212,12 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.runners[name] == rn {
 		rn.lastSeen = time.Now()
+	}
+	for _, t := range rn.tunnels {
+		if !t.sent {
+			resp.Tunnels = append(resp.Tunnels, t.spec)
+			t.sent = true
+		}
 	}
 	resp.Sessions = s.runnerSessionLeases(rn)
 	s.mu.Unlock()
@@ -238,6 +246,7 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 		s.runners[name] = rn
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
+	rn.serviceSupport = p.ServiceSupport
 	rn.privateNet, rn.disk = p.NetworkIsolation, p.Disk
 	rn.sessionSupport, rn.memoryAvailable, rn.load, rn.liveSessions = p.SessionSupport, p.MemoryAvailable, p.Load, len(p.Sessions)
 	for id, sess := range s.sessions {
@@ -395,7 +404,9 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 	}
 	var out []*job
 	for free := rn.slots - busy; free > 0 && !s.closed; free-- {
-		i := slices.IndexFunc(s.queue, func(j *job) bool { return j.bz == nil || (s.sessionHost(j) == rn.name && s.claimSessionOn(j, rn.name)) })
+		i := slices.IndexFunc(s.queue, func(j *job) bool {
+			return (!j.Service || rn.serviceSupport) && (j.bz == nil || (s.sessionHost(j) == rn.name && s.claimSessionOn(j, rn.name)))
+		})
 		if i < 0 {
 			break
 		}
@@ -412,7 +423,7 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 func (s *Server) assignment(j *job) api.RunnerJob {
 	out := api.RunnerJob{
 		ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
-		Workspace: j.Workspace, Outputs: j.Outputs,
+		Workspace: j.Workspace, Outputs: j.Outputs, Ports: j.Ports,
 		MaxLog: s.cfg.MaxLog, MaxWorkspace: s.cfg.MaxWorkspace, MaxDownload: s.maxDownload(),
 	}
 	if j.bz != nil {
@@ -478,6 +489,9 @@ func (s *Server) runnerStarted(w http.ResponseWriter, r *http.Request) {
 	if j.State == api.Queued {
 		now := time.Now().UTC()
 		j.State, j.StartedAt = api.Running, &now
+		if j.Service {
+			go s.probe(j)
+		}
 		if j.rn.sandbox != "" {
 			j.Sandbox = j.rn.sandbox
 		}
@@ -790,6 +804,9 @@ func (s *Server) runnerFiles(w http.ResponseWriter, j *job, paths []string) {
 	outputs, runner, outErr, skippedAll, gone := j.Outputs, j.Runner, j.OutError, j.OutSkipped, j.WorkDeleted
 	s.mu.Unlock()
 	for _, p := range paths {
+		if j.SessionID != "" {
+			break
+		}
 		if !slices.ContainsFunc(outputs, func(o string) bool { return covers(o, p) }) {
 			declared := "none"
 			if len(outputs) > 0 {
@@ -818,7 +835,18 @@ func (s *Server) runnerFiles(w http.ResponseWriter, j *job, paths []string) {
 	if f != nil {
 		defer f.Close()
 	}
+	if j.SessionID != "" {
+		var err error
+		paths, err = resolveSessionPaths(f, paths)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	match := func(name string) bool {
+		if name == artifactIndex {
+			return false
+		}
 		return slices.ContainsFunc(paths, func(p string) bool { return under(path.Clean(p), name) })
 	}
 	// First pass: which patterns matched, so missing ones go in the headers.

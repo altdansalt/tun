@@ -47,7 +47,7 @@ type Config struct {
 	MinFree                       MinFree       // free space to keep on the data dir's filesystem (see disk.go)
 
 	// Runners (see hub.go). HubOnly: no local job slots (tun serve --local-slots 0), so
-	// non-service jobs run only on runners; MaxJobs is then ignored.
+	// jobs and services run only on runners; MaxJobs is then ignored.
 	HubOnly         bool
 	RunnerPollWait  time.Duration // how long a runner's poll waits for work; default 25s
 	RunnerDeadAfter time.Duration // a runner silent for this long is lost; default 30s
@@ -277,6 +277,15 @@ func (s *Server) recover() error {
 		if j.State == api.Running && isRunnerJob(j) {
 			s.jobs[j.ID] = j // the runner may still be running it
 			s.adopt(j)
+			if j.Service {
+				s.svc.running++
+				if s.svc.hostPorts == nil {
+					s.svc.hostPorts = map[int]bool{}
+				}
+				for _, p := range j.Ports {
+					s.svc.hostPorts[p.HostPort] = true
+				}
+			}
 			continue
 		}
 		if !api.Terminal(j.State) {
@@ -419,6 +428,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("HEAD /v1/blobs/{sha}", auth(s.headBlob))
 	mux.HandleFunc("PUT /v1/blobs/{sha}", auth(s.putBlob))
 	mux.HandleFunc("GET /v1/blobs/{sha}", auth(s.getBlob))
+	mux.HandleFunc("GET /v1/runner/jobs/{id}/tunnels/{tunnel}", auth(s.acceptServiceTunnel))
 	mux.HandleFunc("POST /v1/runner/poll", auth(s.runnerPoll))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/started", auth(s.runnerStarted))
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/done", auth(s.runnerDone))

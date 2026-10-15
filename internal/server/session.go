@@ -1051,6 +1051,12 @@ func (s *Server) bazelSummary(j *job, out string, useBEP bool, r sandbox.Result,
 	}
 	p.SetResult(code, elapsed)
 	sum := p.Snapshot()
+	if err := s.stageSessionArtifacts(j, out, sum); err != nil {
+		log.Printf("tun: job %s: staging artifacts: %v", j.ID, err)
+		s.mu.Lock()
+		j.OutError = "staging session artifacts: " + err.Error()
+		s.mu.Unlock()
+	}
 	if b, err := sum.JSON(); err == nil {
 		if err := writeOwn(filepath.Join(s.jobDir(j.ID), "bep.json"), b); err != nil {
 			log.Printf("tun: job %s: %v", j.ID, err)

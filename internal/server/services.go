@@ -167,6 +167,9 @@ func (s *Server) probe(j *job) {
 // dialService connects to a running service's port: inside its network namespace, or on the
 // host's loopback when jobs share the host network.
 func (s *Server) dialService(j *job, port int) (net.Conn, error) {
+	if isRunnerJob(j) {
+		return s.dialRunnerService(j, port)
+	}
 	if !s.cfg.PrivateNet {
 		return net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second)
 	}

@@ -32,14 +32,15 @@ import (
 
 // RunnerConfig configures a Runner.
 type RunnerConfig struct {
-	Hub          string // hub base URL
-	BazelCommand string
-	BazeliskSeed string
-	Token        string // sent as X-Tun-Token (the hub's client token, for now)
-	Name         string
-	Slots        int
-	DataDir      string // blob cache, job dirs, shared build caches
-	Sandbox      string // sandbox.Bwrap or sandbox.None (already resolved)
+	Hub            string // hub base URL
+	BazelCommand   string
+	BazeliskSeed   string
+	MaxClientCache int64
+	Token          string // sent as X-Tun-Token (the hub's client token, for now)
+	Name           string
+	Slots          int
+	DataDir        string // blob cache, job dirs, shared build caches
+	Sandbox        string // sandbox.Bwrap or sandbox.None (already resolved)
 	// PrivateNet (bwrap only): a network namespace per job, egress through an HTTP(S) proxy
 	// this runner serves (check sandbox.NetUsable first).
 	PrivateNet bool
@@ -190,6 +191,9 @@ func (r *Runner) Run() {
 		for _, id := range resp.Cancel {
 			r.cancelJob(id, api.Canceled)
 		}
+		for _, t := range resp.Tunnels {
+			go r.connectServiceTunnel(t)
+		}
 		r.sessionLeases(resp.Sessions)
 		for _, j := range resp.Jobs {
 			r.startJob(j)
@@ -280,6 +284,10 @@ func (r *Runner) do(ctx context.Context, method, p string, body io.Reader) (*htt
 	req.Header.Set(api.HeaderRunner, r.cfg.Name)
 	req.Header.Set(api.HeaderRunnerInstance, r.instance)
 	req.Header.Set("X-Tun-Client", r.host) // the hub tells a restart from a name clash by it
+	if strings.Contains(p, "/tunnels/") {
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "tun-service")
+	}
 	return r.cfg.HTTP.Do(req)
 }
 
@@ -333,6 +341,7 @@ func (r *Runner) poll() (api.RunnerPollResponse, error) {
 		req.Slots = 0
 	}
 	r.mu.Unlock()
+	req.ServiceSupport = true
 	req.SessionSupport = true
 	req.MemoryAvailable, req.Load = hostResources()
 	r.sessions.mu.Lock()
@@ -448,9 +457,11 @@ func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
 			return failed("runner %s: %v", r.cfg.Name, err), done
 		}
 	}
+	env := jobEnv(r.cfg.DataDir, spec.ID, spec.Env)
+	portEnv(&job{Job: api.Job{Ports: spec.Ports}}, env)
 	p, err := newProc(execSpec{
 		DataDir: r.cfg.DataDir, ID: spec.ID, Argv: spec.Argv, Script: spec.Script, Cwd: spec.Cwd,
-		Env: envList(jobEnv(r.cfg.DataDir, spec.ID, spec.Env)), TimeoutSec: spec.TimeoutSec,
+		Env: envList(env), TimeoutSec: spec.TimeoutSec,
 		Sandbox: r.cfg.Sandbox, PrivateNet: r.cfg.PrivateNet, MaxLog: spec.MaxLog, KillGrace: r.cfg.KillGrace,
 	})
 	if err != nil {
