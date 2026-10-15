@@ -507,7 +507,8 @@ or tagging them `manual`.
 `--remote_executor=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN
 --noremote_upload_local_results`. Client AC writes are **disabled by default**;
 only successful executor results populate the AC unless the operator explicitly
-allows client writes. Execute honors `skip_cache_lookup` and Action.do_not_cache.
+allows client writes. (Merged into feat/bazel-rbe with per-client namespaces, so the default
+is allow again: see "Automatic cache and execution".) Execute honors `skip_cache_lookup` and Action.do_not_cache.
 Failed commands return their exit code and stdout/stderr CAS digests without
 caching the result. Infrastructure errors use ExecuteResponse.status.
 

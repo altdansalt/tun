@@ -583,8 +583,13 @@ receive v0 work only). Results of successful actions run under bwrap go to the s
 cache namespace. Every `tun bazel` session uses it automatically (see the session's
 `tun.bazelrc`). healthz `execution: {slots, queued, running, executed: {local|runner: n},
 session_commands}`: executor slots (local plus action-capable runners'), actions waiting and
-running, actions completed since start by where they ran, and running session commands that
-hold no slot. Runner CAS inputs are cached in
+running, actions completed since start by where they ran, running session commands that
+hold no slot, and seconds summed over completed actions: `queue_sec` (FIFO) and, from the
+`ExecutedActionMetadata` executors put in every ActionResult, `input_fetch_sec`,
+`execution_sec`, `output_upload_sec`. An input directory of 64+ files or 4MB+ that an action
+names the second time (same digest) is kept materialized per executor data dir
+(`action-trees/`, LRU within 2GB, deleted at startup) and bound read-only into exec roots
+instead of copied (bwrap only; never a directory holding an output or the working dir). Runner CAS inputs are cached in
 `DATA/reapi-cas`; action outputs and logs are uploaded to the hub CAS. bwrap actions
 use no network or proxy and exactly the Command environment. See docs/bazel.md for
 execution limits and benchmarks.
