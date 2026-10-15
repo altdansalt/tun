@@ -30,7 +30,11 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     Bazel caches are per client on the server; dev-tun.sh seeds bazelisk from the job's cache.
     Sessions run on the hub or runners with host affinity; --max-sessions is per host.
     Sessions use the server's REAPI remote cache automatically (`tun serve --cache-dir`, on by
-    default) through a per-session socket; action results are per client.
+    default) through a per-session socket; action results are per client. Runner sockets terminate
+    gRPC locally and stream binary gRPC-Web over HTTP/1.1 to the hub, so HTTP/1-only proxies work.
+    Deploy matching hub and runner versions before re-enabling a disabled cache.
+    `DEV_TUN_SERVE_ARGS="--local-slots 0" scripts/dev-tun.sh scripts/bench-cache-proxy.sh`
+    measures cold workspace tests through an HTTP/1-only proxy (run inside a tun job).
   - Hosts have 2 CPUs; the shared hub has six runners (currently one slot each). Jobs may
     queue; use the reported runner and job ID when comparing timings.
 - **Bazel** (M0 of docs/bazel.md; `scripts/ci.sh` stays the default CI for now):

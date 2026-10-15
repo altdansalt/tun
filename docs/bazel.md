@@ -760,3 +760,49 @@ runner service readiness/proxy checks. A redundant standalone service check
 (`20261015T140920775200-6fc650c8`) stayed queued for 558.903s before cancellation;
 the full CI covered that check. A second verbose full CI was canceled once the
 complete run passed. No shared hub or runner was restarted for these checks.
+
+## Cache transport over HTTP/1 proxies (fix/cache-over-proxy)
+
+The deployed runner→exe.dev→hub path negotiates HTTP/2 at the public TLS endpoint
+(`curl --http2 -v` accepted h2 on 2026-10-15), but reaches the backend over HTTP/1.1.
+Native gRPC response trailers and the hub's HTTP/2 requirement made every runner
+session cache handshake fail with Bazel exit 34. Direct h2c fixtures missed that hop.
+
+The runner now terminates native gRPC at its local session socket and sends binary
+gRPC-Web (`application/grpc-web+proto`) over HTTP/1.1. Protobuf request frames are
+unchanged, including chunked ByteStream Write uploads. The hub writes status/message
+as the final 0x80 body frame; the runner incrementally translates it back to native
+HTTP/2 trailers. ByteStream Read and future Execute/WaitExecution response frames
+stream without buffering the entire RPC. Missing/truncated trailer frames fail the
+transport rather than becoming success. Authentication, scoped lease credentials,
+namespace selection, cancellation and RPC deadlines retain their existing paths.
+
+This follows the agreed Bazel-native direction; no milestone change. Binary gRPC-Web
+only: no browser CORS support or base64 text mode. Bazel itself still speaks native
+gRPC and requires a local bridge when a remote endpoint has an HTTP/1 backend hop.
+
+### Remote-execution branch audit
+
+At `origin/feat/bazel-rbe`, `internal/server/actions.go:executeAction` builds a
+`reapi.RemoteStore`: Fetch and Upload call `POST /v1/runner/cas` using JSON
+`casTransfer{Digest, Data, Upload}`. These transfers use the ordinary runner HTTP
+client and survive HTTP/1 proxies; they do not use the session's native gRPC hop.
+They buffer whole blobs (JSON base64, 96MiB decoded limit), an existing design limit.
+Execute/WaitExecution client streams do use the gRPC seam; the binary response-frame
+bridge added here can carry them when that branch merges.
+
+Merge note: main now uses the same `POST /v1/runner/cas` path for workspace sync
+(JSON digest list → tar response), whereas the execution branch expects a JSON
+object and response. Reconcile those schemas or give action CAS a separate route
+when merging RBE; the path collision is separate from proxy protocol compatibility.
+
+### Reproduction
+
+```sh
+tun run --timeout 20m -c 'DEV_TUN_SERVE_ARGS="--local-slots 0" scripts/dev-tun.sh scripts/bench-cache-proxy.sh'
+```
+
+This creates only private hub/runner/proxy processes. Each step uses
+`tun bazel --cold test //internal/workspace:workspace_test`: seed, warm remote cache,
+then both remote and disk caches disabled. The runner reaches the private hub through
+an HTTP/1-only httputil.ReverseProxy. All Bazel output roots remain under job TMPDIR.
