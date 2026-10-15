@@ -175,6 +175,7 @@ func TestRunnerSessionCacheAcrossHosts(t *testing.T) {
 			}
 			webCalls.Add(1)
 		}
+		http.NewResponseController(w).EnableFullDuplex()
 		proxy.ServeHTTP(w, r)
 	}))
 	defer edge.Close()

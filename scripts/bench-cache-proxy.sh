@@ -26,7 +26,7 @@ func main() {
  p.Transport=&http.Transport{Protocols:protocols}
  ln,err:=net.Listen("tcp","127.0.0.1:0");if err!=nil {panic(err)}
  fmt.Println("http://"+ln.Addr().String())
- panic(http.Serve(ln,p))
+ panic(http.Serve(ln,http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){http.NewResponseController(w).EnableFullDuplex();p.ServeHTTP(w,r)})))
 }
 GO
 go build -o "$tmp/proxy" "$tmp/proxy.go"

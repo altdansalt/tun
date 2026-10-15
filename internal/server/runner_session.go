@@ -36,6 +36,9 @@ func (r *Runner) newSessionHost() error {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Protocols = new(http.Protocols)
 	tr.Protocols.SetHTTP1(true)
+	// HTTP/1 means one connection per concurrent RPC; keep a Bazel-sized pool warm so cache
+	// bursts don't pay a TLS handshake through the proxy per call.
+	tr.MaxIdleConnsPerHost = 64
 	r.sessionTransport = tr
 	// HTTP upgrades require HTTP/1.1, including when the hub advertises h2 over TLS.
 	base := http.DefaultTransport.(*http.Transport)

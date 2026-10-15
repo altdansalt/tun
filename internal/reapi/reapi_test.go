@@ -493,7 +493,12 @@ func TestGRPCWebHTTP1Proxy(t *testing.T) {
 	target, _ := url.Parse(backend.URL)
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = &http.Transport{Protocols: http1Protocols()}
-	edge := httptest.NewServer(proxy)
+	// Full duplex, as a streaming proxy must be: otherwise Go's HTTP/1 server closes the
+	// request body once the response starts, racing the transport's post-body EOF check.
+	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NewResponseController(w).EnableFullDuplex()
+		proxy.ServeHTTP(w, r)
+	}))
 	defer edge.Close()
 	native := httptest.NewUnstartedServer(&httputil.ReverseProxy{
 		Rewrite:   func(p *httputil.ProxyRequest) { u, _ := url.Parse(edge.URL); p.SetURL(u) },
