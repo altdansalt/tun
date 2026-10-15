@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -466,5 +467,26 @@ func TestRestartRecovery(t *testing.T) {
 	}
 	if r := ts2.tun("", "run", "--", "true"); r.code != 0 {
 		t.Errorf("new job after restart: %+v", r)
+	}
+}
+
+// TestProxyErrorPage: an HTML error page from a proxy in front of tun (exe.dev's when the
+// server is down) is reduced to its text, not dumped whole.
+func TestProxyErrorPage(t *testing.T) {
+	page := `<!doctype html><html><head><title>Service unavailable</title><style>body { color: red; }</style></head>
+<body><main><h1>Port 7070 unbound.</h1>
+<p class="desc">We dialed port 7070 on this VM and nobody answered.</p></main></body></html>`
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(502)
+		io.WriteString(w, page)
+	}))
+	defer hs.Close()
+	var errb bytes.Buffer
+	code := Main([]string{"status", "x"}, Env{Stdout: io.Discard, Stderr: &errb, Cwd: t.TempDir(),
+		Getenv: func(k string) string { return map[string]string{"TUN_URL": hs.URL, "TUN_TOKEN": "t"}[k] }})
+	want := "tun: server: not tun but an HTML page (a proxy in front of tun; is the server down or restarting?): Port 7070 unbound. We dialed port 7070 on this VM and nobody answered. (HTTP 502)\n"
+	if code != 125 || errb.String() != want {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
 	}
 }
