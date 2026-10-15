@@ -108,7 +108,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	localSlots := fs.Int("local-slots", -1, "jobs run at once on this host; -1: --max-jobs; 0: none, jobs and services run on runners (tun runner)")
 	drainTimeout := fs.Duration("drain-timeout", 15*time.Minute, "finish admitted jobs before shutdown (then kill remaining work)")
 	runnerTimeout := fs.Duration("runner-timeout", 30*time.Second, "a runner that hasn't polled for this long is lost: its running jobs fail, unstarted ones are requeued")
-	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
+	maxServices := fs.Int("max-services", 4, "admitted service jobs; more are rejected (zero local slots: services hold runner slots)")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache in this directory (relative to the data dir); empty disables it")

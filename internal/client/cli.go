@@ -74,9 +74,9 @@ deleted the job's files; status and logs remain), client (who submitted it: see 
 queue_sec (seconds from creation to start, counting while queued), run_sec (seconds from start
 to end, counting while running), queue_position (only while queued: 1 = next to start),
 runner (where it runs: "local" = the server itself, else a runner's name), outputs (the --out
-paths). A job that ran on a runner keeps only its --out paths: tun get of anything else is an
-error saying so. tun bazel jobs also have session and session_id, and while they wait,
-queue_reason (e.g. their session is busy with another command).
+paths). Ordinary runner jobs keep only their --out paths; tun get of anything else is an
+error. tun bazel jobs retain outputs/test logs by label (tun get ID //pkg:target), and
+also have session and session_id, and while they wait, queue_reason (e.g. their session is busy with another command).
 Server load (no token needed): curl $TUN_URL/v1/healthz -> {running, queued, max_jobs,
 services, max_services, network_isolation, ...}.
 Services also have service: true and ports: [{port, host_port, ready, path, url}].

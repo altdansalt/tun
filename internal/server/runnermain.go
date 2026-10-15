@@ -25,8 +25,10 @@ client declared with tun run --out, then reports the exit status. Clients see no
 except the job's "runner" field (and that only declared --out paths can be fetched with
 tun get). Bazel commands reuse the same session engine as the hub, retaining a warm
 sandbox and per-client caches on this runner. The hub controls per-host session capacity
-and affinity. Cache requests forward through a per-session socket without exposing credentials
-to the sandbox. tun runners (or the hub's /v1/healthz) lists live runners.
+and affinity. Session outputs and test logs are retained on the hub for tun get ID
+//pkg:target (or //pkg:test.log). Cache requests forward through a per-session socket
+without exposing credentials to the sandbox. With a zero-slot hub, services also run on
+runners, holding slots until stopped; their authenticated port proxy uses reverse tunnels. tun runners (or the hub's /v1/healthz) lists live runners.
 
 If the hub hears nothing from a runner for its --runner-timeout (default 30s), the runner's
 running jobs fail and unstarted ones are requeued. On SIGINT/SIGTERM the runner stops taking
