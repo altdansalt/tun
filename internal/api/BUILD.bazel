@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "api",
+    srcs = [
+        "api.go",
+        "files.go",
+        "runner.go",
+        "service.go",
+    ],
+    importpath = "github.com/altdansalt/tun/internal/api",
+    visibility = ["//:__subpackages__"],
+)
