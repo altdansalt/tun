@@ -87,3 +87,51 @@ func TestTrimSharedCachesPressure(t *testing.T) {
 		t.Fatal("active session cache removed", err)
 	}
 }
+
+func TestTrimExtractedModule(t *testing.T) {
+	data := t.TempDir()
+	s, err := New(Config{DataDir: data, Sandbox: sandbox.None, MaxJobs: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	module := filepath.Join(data, "cache/gomod/example.org/mod@v1.0.0")
+	os.MkdirAll(filepath.Join(module, "pkg"), 0755)
+	for _, name := range []string{"go.mod", "pkg/source.go"} {
+		os.WriteFile(filepath.Join(module, name), make([]byte, 100), 0444)
+	}
+	tm := time.Now().Add(-2 * time.Hour)
+	filepath.WalkDir(module, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		os.Chtimes(path, tm, tm)
+		if d.IsDir() {
+			os.Chmod(path, 0555)
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		filepath.WalkDir(module, func(path string, d os.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				os.Chmod(path, 0755)
+			}
+			return nil
+		})
+	})
+	s.cfg.MaxSharedCache = 1
+	s.mu.Lock()
+	s.running = 1
+	s.mu.Unlock()
+	s.trimSharedCaches()
+	if _, err := os.Stat(filepath.Join(module, "pkg/source.go")); err != nil {
+		t.Fatal("module touched during local job", err)
+	}
+	s.mu.Lock()
+	s.running = 0
+	s.mu.Unlock()
+	s.trimSharedCaches()
+	if _, err := os.Stat(module); !os.IsNotExist(err) {
+		t.Fatal("module not evicted as a whole", err)
+	}
+}

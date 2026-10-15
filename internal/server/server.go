@@ -458,15 +458,6 @@ func (s *Server) CacheHandler() http.Handler {
 	return s.cache
 }
 
-// cacheClient is the action cache namespace of a token-authenticated gRPC request: its
-// client identity (see clientOf), as for jobs and sessions.
-func cacheClient(r *http.Request) string {
-	if c := clientOf(r); c != "" && c != "@" {
-		return c
-	}
-	return "unknown"
-}
-
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -532,10 +523,8 @@ func secs(d time.Duration) float64 {
 	return float64(max(d, 0).Milliseconds()) / 1000
 }
 
-// clientOf names who sent r: the exe.dev proxy's X-Exedev-Source-Vm header (the proxy sets it
-// and doesn't let callers forge it), else the client's self-reported X-Tun-Client (its
-// hostname), else the remote IP. Without the proxy in front, both headers are only as
-// trustworthy as the token holder: this is for visibility, not access control.
+// clientOf returns the authenticated principal. Without one (including legacy admin
+// authentication), headers select the compatibility identity and provide no isolation.
 func clientOf(r *http.Request) string {
 	if p, ok := r.Context().Value(identityKey{}).(principal); ok {
 		return p.name

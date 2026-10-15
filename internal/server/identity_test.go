@@ -10,8 +10,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/sandbox"
@@ -58,7 +60,7 @@ func TestClientTokens(t *testing.T) {
 	}
 	request(b, "GET", "/v1/jobs/"+j.ID, "", 200)
 	request(b, "GET", "/v1/jobs", "", 200)
-	for _, suffix := range []string{"stdout", "stderr", "files", "bep", "ports/1234"} {
+	for _, suffix := range []string{"stdout", "stdout?follow=1", "stderr", "files", "bep", "ports/1234"} {
 		request(b, "GET", "/v1/jobs/"+j.ID+"/"+suffix, "", 403)
 	}
 	request(b, "POST", "/v1/jobs/"+j.ID+"/cancel", "", 403)
@@ -68,14 +70,44 @@ func TestClientTokens(t *testing.T) {
 	if own.Client != "bob" {
 		t.Fatal(own.Client)
 	}
-	if got := s.cacheIdentity(func() *http.Request {
-		r, _ := http.NewRequest("POST", "http://x", nil)
-		r.Header.Set("X-Tun-Token", b)
-		r.Header.Set("X-Tun-Client", "alice")
-		return r
-	}()); got != "bob" {
-		t.Fatal(got)
+	var alice api.Job
+	json.Unmarshal(request(a, "POST", "/v1/jobs", `{"bazel":{"root":"/ws","args":["build"],"session":"same"}}`, 201), &alice)
+	if alice.SessionID == own.SessionID {
+		t.Fatal("clients shared a session")
 	}
+	for _, pair := range []struct{ token, id string }{{a, alice.ID}, {b, own.ID}} {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var job api.Job
+			json.Unmarshal(request(pair.token, "GET", "/v1/jobs/"+pair.id, "", 200), &job)
+			if api.Terminal(job.State) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("session job did not finish")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	var sessions []api.Session
+	json.Unmarshal(request(b, "GET", "/v1/sessions?client=alice", "", 200), &sessions)
+	if len(sessions) != 1 || sessions[0].Client != "bob" {
+		t.Fatalf("sessions leaked: %+v", sessions)
+	}
+	request(b, "GET", "/v1/jobs/"+alice.ID+"/stdout", "", 403)
+	request(b, "POST", "/v1/jobs/"+alice.ID+"/cancel", "", 403)
+	request(a, "GET", "/v1/jobs/"+alice.ID+"/stdout", "", 200)
+	request(b, "POST", "/v1/runner/leave", `{}`, 403)
+	var mine []api.Job
+	json.Unmarshal(request(b, "GET", "/v1/jobs?mine=1", "", 200), &mine)
+	if len(mine) != 1 || mine[0].Client != "bob" {
+		t.Fatalf("mine: %+v", mine)
+	}
+	sum := sha256.Sum256([]byte(b))
+	if err := os.Remove(filepath.Join(data, "clients", hex.EncodeToString(sum[:]))); err != nil {
+		t.Fatal(err)
+	}
+	request(b, "GET", "/v1/jobs", "", 401)
 	request("wrong", "GET", "/v1/jobs", "", 401)
 }
 
@@ -107,7 +139,7 @@ func TestClientTokenActionCache(t *testing.T) {
 	digest := append([]byte{10, 64}, []byte(hash)...)
 	digest = append(digest, 16, 6)
 	req := append([]byte{18, byte(len(digest))}, digest...)
-	call := func(token, method string, body []byte, bearer bool, want string) {
+	call := func(token, method string, body []byte, bearer bool, want string) []byte {
 		t.Helper()
 		frame := make([]byte, 5)
 		binary.BigEndian.PutUint32(frame[1:], uint32(len(body)))
@@ -125,16 +157,24 @@ func TestClientTokenActionCache(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		io.Copy(io.Discard, resp.Body)
+		out, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
 		resp.Body.Close()
 		if got := resp.Trailer.Get("grpc-status"); got != want {
 			t.Fatalf("%s: grpc %s want %s (%s)", method, got, want, resp.Trailer.Get("grpc-message"))
 		}
+		return out
 	}
 	update := append(append([]byte{}, req...), 26, 2, 32, 1) // ActionResult exit_code=1
 	call(a, "UpdateActionResult", update, false, "0")
 	call(b, "GetActionResult", req, true, "5")
-	call(b, "UpdateActionResult", update, true, "0")
-	call(a, "GetActionResult", req, false, "0")
+	other := append([]byte{}, update...)
+	other[len(other)-1] = 2
+	call(b, "UpdateActionResult", other, true, "0")
+	if got := call(a, "GetActionResult", req, false, "0"); !bytes.Equal(got, []byte{0, 0, 0, 0, 2, 32, 1}) {
+		t.Fatalf("bob overwrote alice's action result: %x", got)
+	}
 	call("wrong", "GetActionResult", req, false, "16")
 }

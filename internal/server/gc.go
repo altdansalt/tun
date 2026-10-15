@@ -72,7 +72,9 @@ func (s *Server) startGC() {
 		defer t.Stop()
 		for {
 			s.sweep(time.Now())
-			s.trimSharedCaches()
+			if !s.diskLow() {
+				s.trimSharedCaches()
+			}
 			s.reclaimDisk()
 			select {
 			case <-s.gc.stop:

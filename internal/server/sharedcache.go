@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/rand"
 	"errors"
 	"io/fs"
 	"log"
@@ -31,6 +32,8 @@ func (s *Server) trimSharedCaches() {
 		root *os.Root
 		path string
 		info fs.FileInfo
+		size int64
+		tree bool
 	}
 	var entries []entry
 	var total int64
@@ -51,6 +54,20 @@ func (s *Server) trimSharedCaches() {
 			if err != nil {
 				return nil
 			}
+			// A partially deleted extracted module looks valid to Go. Evict the
+			// entire module atomically, never individual source files.
+			if dir == dirs[1] && d.IsDir() && !strings.HasPrefix(path, "cache/") && (strings.Contains(d.Name(), "@") || strings.HasPrefix(d.Name(), ".tun-trim-")) {
+				fi, err := d.Info()
+				if err != nil {
+					return fs.SkipDir
+				}
+				size, newest, err := cacheTree(root, path)
+				total += size
+				if err == nil && newest.Before(cutoff) {
+					entries = append(entries, entry{root, path, fi, size, true})
+				}
+				return fs.SkipDir
+			}
 			clientDir, _, _ := strings.Cut(path, string(filepath.Separator))
 			protected := dir == s.cfg.BazelCaches && active[clientDir]
 			if d.Type().IsRegular() {
@@ -60,7 +77,7 @@ func (s *Server) trimSharedCaches() {
 				}
 				total += fi.Size()
 				if !protected && fi.ModTime().Before(cutoff) {
-					entries = append(entries, entry{root, path, fi})
+					entries = append(entries, entry{root, path, fi, fi.Size(), false})
 				}
 			}
 			return nil
@@ -76,24 +93,106 @@ func (s *Server) trimSharedCaches() {
 		if err != nil || !os.SameFile(fi, e.info) || fi.ModTime() != e.info.ModTime() || fi.Size() != e.info.Size() {
 			continue
 		}
-		err = e.root.Remove(e.path)
-		// Extracted Go modules have read-only directories. Temporarily restore owner
-		// write permission on the containing directory, as go clean -modcache does.
-		if errors.Is(err, fs.ErrPermission) {
-			parent := filepath.Dir(e.path)
-			if p, statErr := e.root.Stat(parent); statErr == nil && p.IsDir() {
-				if e.root.Chmod(parent, p.Mode().Perm()|0200) == nil {
-					err = e.root.Remove(e.path)
-					e.root.Chmod(parent, p.Mode().Perm())
+		if e.tree {
+			// Serialize detaching an extracted module with local job admission.
+			_, newest, scanErr := cacheTree(e.root, e.path)
+			s.mu.Lock()
+			if s.running > 0 || s.svc.running > 0 {
+				s.mu.Unlock()
+				continue
+			}
+			trash := ".tun-trim-" + rand.Text()
+			if scanErr == nil && newest.Before(cutoff) {
+				// Moving a read-only module across parents needs write permission
+				// on the directory itself to update its parent link.
+				err = e.root.Chmod(e.path, fi.Mode().Perm()|0700)
+				if err == nil {
+					err = e.root.Rename(e.path, trash)
 				}
+				if err != nil {
+					e.root.Chmod(e.path, fi.Mode().Perm())
+				}
+			} else {
+				err = fs.ErrInvalid
+			}
+			s.mu.Unlock()
+			if err == nil {
+				fs.WalkDir(e.root.FS(), trash, func(path string, d fs.DirEntry, err error) error {
+					if err == nil && d.IsDir() {
+						return e.root.Chmod(path, 0700)
+					}
+					return err
+				})
+				err = e.root.RemoveAll(trash)
+			}
+		} else {
+			// Sessions may start after the scan; unlink under the admission lock.
+			if e.root.Name() == s.cfg.BazelCaches {
+				s.mu.Lock()
+				clientDir, _, _ := strings.Cut(e.path, string(filepath.Separator))
+				busy := false
+				for _, sess := range s.sessions {
+					if filepath.Base(s.clientCaches(sess.Client)) == clientDir {
+						busy = true
+						break
+					}
+				}
+				if busy {
+					s.mu.Unlock()
+					continue
+				}
+				err = removeCacheFile(e.root, e.path)
+				s.mu.Unlock()
+			} else {
+				err = removeCacheFile(e.root, e.path)
 			}
 		}
+		if err != nil {
+			log.Printf("tun: trimming cache %s: %v", e.path, err)
+		}
 		if err == nil {
-			total -= fi.Size()
-			removed += fi.Size()
+			total -= e.size
+			removed += e.size
 		}
 	}
 	if removed > 0 {
 		log.Printf("tun: trimmed %s shared cache files; %s remain (recent files/live session caches protected)", fmtBytes(removed), fmtBytes(total))
 	}
+}
+
+// cacheTree includes directory mtimes so newly extracted empty dirs get the grace too.
+func cacheTree(root *os.Root, path string) (size int64, newest time.Time, err error) {
+	err = fs.WalkDir(root.FS(), path, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if fi.ModTime().After(newest) {
+			newest = fi.ModTime()
+		}
+		if fi.Mode().IsRegular() {
+			size += fi.Size()
+		}
+		return nil
+	})
+	return
+}
+
+// Tool cache directories may be read-only. Restore owner write permission
+// temporarily, without following paths outside the cache root.
+func removeCacheFile(root *os.Root, path string) error {
+	err := root.Remove(path)
+	if errors.Is(err, fs.ErrPermission) {
+		parent := filepath.Dir(path)
+		if p, statErr := root.Stat(parent); statErr == nil && p.IsDir() {
+			if root.Chmod(parent, p.Mode().Perm()|0200) == nil {
+				err = root.Remove(path)
+				root.Chmod(parent, p.Mode().Perm())
+			}
+		}
+	}
+	return err
 }
