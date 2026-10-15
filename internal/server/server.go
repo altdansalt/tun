@@ -32,6 +32,7 @@ type Config struct {
 	KeepWork, KeepJobs, KeepBlobs time.Duration
 	GCInterval                    time.Duration // 0: derived from the Keep* durations
 	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
+	MaxDownload int64 // max total file bytes per files request; 0 = DefaultMaxDownload
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
@@ -199,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs/{id}", auth(s.getJob))
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", auth(s.cancelJob))
 	mux.HandleFunc("GET /v1/jobs/{id}/{stream}", auth(s.logs))
+	mux.HandleFunc("GET /v1/jobs/{id}/files", auth(s.files))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, fmt.Sprintf("no such endpoint: %s %s", r.Method, r.URL.Path))
 	})

@@ -56,6 +56,7 @@ func Main(args []string, stderr io.Writer) int {
 	keepWork := fs.Duration("keep-work", time.Hour, "delete a finished job's work/home/tmp dirs this long after it ends (0: never)")
 	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
 	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
+	maxDownload := fs.String("max-download", "1GB", "max total file bytes per files request (tun run --out, tun get)")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -81,6 +82,10 @@ func Main(args []string, stderr io.Writer) int {
 	if *keepWork < 0 || *keepJobs < 0 || *keepBlobs < 0 {
 		return fail("--keep-work, --keep-jobs and --keep-blobs must not be negative")
 	}
+	dlimit, err := parseSize(*maxDownload)
+	if err != nil {
+		return fail("--max-download: %v", err)
+	}
 	switch *mode {
 	case "auto":
 		*mode = sandbox.None
@@ -95,7 +100,7 @@ func Main(args []string, stderr io.Writer) int {
 	default:
 		return fail("--sandbox must be auto, bwrap or none, got %q", *mode)
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit,
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
