@@ -159,7 +159,22 @@ func (c *countWriter) Write(p []byte) (int, error) {
 // Unpack extracts a tar.gz from r into dir (which must exist). It rejects absolute paths,
 // "..", links that are absolute or escape dir, hard links and device/special files. All
 // writes go through an os.Root, so nothing can be written outside dir even via symlinks.
-func Unpack(r io.Reader, dir string) error {
+func Unpack(r io.Reader, dir string) error { return UnpackLimit(r, dir, 0) }
+
+// TooLargeError is returned by UnpackLimit when the files' total size exceeds the limit.
+type TooLargeError struct {
+	Limit int64
+	Entry string // the entry that crossed the limit
+}
+
+func (e *TooLargeError) Error() string {
+	return fmt.Sprintf("workspace unpacks to more than %d bytes (at entry %q)", e.Limit, e.Entry)
+}
+
+// UnpackLimit is Unpack, but fails with a *TooLargeError as soon as the total size of the
+// regular files would exceed max bytes (max <= 0: no limit). It checks each header's size
+// before writing, so a compression bomb never lands on disk.
+func UnpackLimit(r io.Reader, dir string, max int64) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("workspace is not gzip: %w", err)
@@ -170,6 +185,7 @@ func Unpack(r io.Reader, dir string) error {
 	}
 	defer root.Close()
 	tr := tar.NewReader(gz)
+	var total int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -200,6 +216,10 @@ func Unpack(r io.Reader, dir string) error {
 				return err
 			}
 		case tar.TypeReg:
+			if max > 0 && hdr.Size > max-total {
+				return &TooLargeError{Limit: max, Entry: name}
+			}
+			total += hdr.Size
 			f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
 				return err

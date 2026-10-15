@@ -29,7 +29,7 @@ func (s *Server) blobPath(sha string) string {
 
 func (s *Server) headBlob(w http.ResponseWriter, r *http.Request) {
 	sha := r.PathValue("sha")
-	if _, err := os.Stat(s.blobPath(sha)); !shaRE.MatchString(sha) || err != nil {
+	if !shaRE.MatchString(sha) || !s.useBlob(sha) {
 		w.WriteHeader(404)
 		return
 	}
@@ -146,13 +146,13 @@ func (s *Server) prepare(j *job) (int, error) {
 	if j.Workspace == "" {
 		return 0, nil
 	}
-	f, err := os.Open(s.blobPath(j.Workspace))
+	f, err := s.openBlob(j.Workspace)
 	if err != nil {
 		return 400, fmt.Errorf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", j.Workspace, j.Workspace)
 	}
 	defer f.Close()
-	if err := workspace.Unpack(f, filepath.Join(dir, "work")); err != nil {
-		return 400, fmt.Errorf("unpacking workspace: %v", err)
+	if err := workspace.UnpackLimit(f, filepath.Join(dir, "work"), s.cfg.MaxWorkspace); err != nil {
+		return s.unpackErr(err)
 	}
 	return 0, nil
 }

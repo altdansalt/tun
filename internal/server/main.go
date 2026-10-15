@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/altdansalt/tun/internal/sandbox"
 )
@@ -24,6 +25,11 @@ runs each job in a fresh per-job directory and sandbox, and keeps job state and 
 the data dir. On first start it writes a bearer token to $DATA/token (0600); local clients
 using the default data dir find it automatically. Jobs left queued/running by a previous
 server process are marked failed on startup.
+
+Retention: a sweep at startup and periodically deletes finished jobs' work/home/tmp dirs after
+--keep-work (the job then shows "work_deleted": true; status and logs still work), whole job
+records (job.json + logs) after --keep-jobs, and workspace blobs not used by a queued/running
+job for --keep-blobs. A duration of 0 keeps forever.
 
 flags:
 `
@@ -46,6 +52,10 @@ func Main(args []string, stderr io.Writer) int {
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
+	maxWorkspace := fs.String("max-workspace", "2GB", "max total size of a job's unpacked workspace files (bytes, or with KB/MB/GB suffix)")
+	keepWork := fs.Duration("keep-work", time.Hour, "delete a finished job's work/home/tmp dirs this long after it ends (0: never)")
+	keepJobs := fs.Duration("keep-jobs", 7*24*time.Hour, "delete a finished job's record and logs this long after it ends (0: never)")
+	keepBlobs := fs.Duration("keep-blobs", 24*time.Hour, "delete workspace blobs unused for this long (0: never)")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -64,6 +74,13 @@ func Main(args []string, stderr io.Writer) int {
 	if err != nil {
 		return fail("--max-upload: %v", err)
 	}
+	wsLimit, err := parseSize(*maxWorkspace)
+	if err != nil {
+		return fail("--max-workspace: %v", err)
+	}
+	if *keepWork < 0 || *keepJobs < 0 || *keepBlobs < 0 {
+		return fail("--keep-work, --keep-jobs and --keep-blobs must not be negative")
+	}
 	switch *mode {
 	case "auto":
 		*mode = sandbox.None
@@ -78,7 +95,8 @@ func Main(args []string, stderr io.Writer) int {
 	default:
 		return fail("--sandbox must be auto, bwrap or none, got %q", *mode)
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit})
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit,
+		MaxWorkspace: wsLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
 	}
