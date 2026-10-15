@@ -36,6 +36,7 @@ func release(t *testing.T) (env []string, wait string, done func()) {
 
 type testRunner struct {
 	r    *server.Runner
+	dir  string // data dir
 	done chan struct{}
 }
 
@@ -53,7 +54,7 @@ func (ts *testServer) startRunnerCfg(cfg server.RunnerConfig) *testRunner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &testRunner{r: r, done: make(chan struct{})}
+	tr := &testRunner{r: r, dir: dir, done: make(chan struct{})}
 	go func() { r.Run(); close(tr.done) }()
 	t.Cleanup(tr.kill)
 	return tr

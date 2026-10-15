@@ -127,9 +127,11 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
   opens them without following symlinks (and refuses hard-linked ones). Job ids: sortable, unique
   (time prefix + random).
 - Env: a small base (`PATH`, `LANG`, `TERM=dumb`, `HOME=<job home>`, `TMPDIR=<job tmp>`, `USER`),
-  plus shared build caches (`GOCACHE`, `GOMODCACHE`, `XDG_CACHE_HOME` pointing to `$DATA/cache/...`,
-  shared across jobs because these tools are safe under concurrency), plus `-e` vars (which win).
-  Also `TUN_JOB_ID`.
+  plus shared build caches pointing to `$DATA/cache/...` (on a runner, its own `--data` dir), shared across jobs because these tools
+  are safe under concurrency: `GOCACHE` (`go-build`), `GOMODCACHE` (`gomod`), `XDG_CACHE_HOME`
+  (`xdg`: pip, uv, yarn and other XDG-aware tools) and `npm_config_cache` (`npm`), with
+  `npm_config_logs_dir=<job home>/.npm/_logs` so npm's debug logs stay private to the job.
+  Plus `-e` vars (which win). Also `TUN_JOB_ID`.
 - Sandbox `bwrap` (default when `bwrap` works, `auto`): root filesystem read-only, the job's
   `sandbox/` dir and shared cache dirs read-write, the job's home/tmp mounted at the same paths as in
   env, `/dev` `/proc` fresh, new pid namespace, `--die-with-parent`; network: see Network isolation
@@ -149,8 +151,10 @@ The workspace root diagnostic is retained. JSON mode keeps stderr free of these 
     re-executed as `tun __tun-netns-helper <argv...>`. It reads the job env from a pipe (so
     `LD_PRELOAD` etc. don't act on it), listens on `127.0.0.1:<random>` in the namespace, sets
     `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy` to it and `NO_PROXY`/`no_proxy` to
-    `localhost,127.0.0.1,::1` unless the job env has them, runs argv as its child (same
-    process group, stdio, cwd), and exits with the child's status (dying of the same signal).
+    `localhost,127.0.0.1,::1` unless the job env has them (an empty `-e http_proxy=` counts:
+    it keeps that one empty, for tests that set `HTTP_PROXY` themselves and would otherwise
+    see the lowercase copy, which e.g. Go's `x/net/http/httpproxy` prefers), runs argv as its child
+    (same process group, stdio, cwd), and exits with the child's status (dying of the same signal).
   - Over a socketpair it answers the server with file descriptors (SCM_RIGHTS): the egress
     listener, and TCP connections it dials to `127.0.0.1:<port>` inside the namespace. The
     server never enters the namespace (it can't, unprivileged and multithreaded).

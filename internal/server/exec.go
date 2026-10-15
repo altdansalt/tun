@@ -17,7 +17,23 @@ import (
 	"github.com/altdansalt/tun/internal/sandbox"
 )
 
-var cacheDirs = []string{"cache/go-build", "cache/gomod", "cache/xdg"}
+// sharedCaches are the dirs under $DATA/cache that every job gets read-write, and the env var
+// pointing tools at each. Only tools that are safe under concurrent use belong here.
+var sharedCaches = []struct{ env, dir string }{
+	{"GOCACHE", "go-build"},
+	{"GOMODCACHE", "gomod"},
+	{"XDG_CACHE_HOME", "xdg"}, // pip, uv, yarn, ...
+	{"npm_config_cache", "npm"},
+}
+
+// cacheDirs are the shared cache dirs, relative to the data dir.
+func cacheDirs() []string {
+	var dirs []string
+	for _, c := range sharedCaches {
+		dirs = append(dirs, filepath.Join("cache", c.dir))
+	}
+	return dirs
+}
 
 // prepareJobDir creates dataDir/jobs/<id> with empty stdout/stderr logs and an empty sandbox
 // (work, home, tmp). The job only ever gets sandbox/; the logs (and the server's job.json)
@@ -45,7 +61,6 @@ func prepareJobDir(dataDir, id string) error {
 // jobEnv is a job's environment: a small base, the shared caches, then the job's own vars.
 func jobEnv(dataDir, id string, extra map[string]string) map[string]string {
 	sb := filepath.Join(dataDir, "jobs", id, "sandbox")
-	cache := filepath.Join(dataDir, "cache")
 	pathEnv := os.Getenv("PATH")
 	if pathEnv == "" {
 		pathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -56,9 +71,12 @@ func jobEnv(dataDir, id string, extra map[string]string) map[string]string {
 	}
 	m := map[string]string{
 		"PATH": pathEnv, "LANG": lang, "TERM": "dumb", "USER": os.Getenv("USER"),
-		"HOME": filepath.Join(sb, "home"), "TMPDIR": filepath.Join(sb, "tmp"),
-		"GOCACHE": filepath.Join(cache, "go-build"), "GOMODCACHE": filepath.Join(cache, "gomod"),
-		"XDG_CACHE_HOME": filepath.Join(cache, "xdg"), "TUN_JOB_ID": id,
+		"HOME": filepath.Join(sb, "home"), "TMPDIR": filepath.Join(sb, "tmp"), "TUN_JOB_ID": id,
+		// npm writes its debug logs into its cache by default; keep them private to the job.
+		"npm_config_logs_dir": filepath.Join(sb, "home", ".npm", "_logs"),
+	}
+	for _, c := range sharedCaches {
+		m[c.env] = filepath.Join(dataDir, "cache", c.dir)
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -117,7 +135,7 @@ func newProc(x execSpec) (*proc, error) {
 		Mode: x.Sandbox, Argv: argv, Env: x.Env, Dir: filepath.Join(sb, "work", x.Cwd),
 		Root: sb, Tmp: filepath.Join(sb, "tmp"), DataDir: x.DataDir, PrivateNet: x.PrivateNet,
 	}}
-	for _, c := range cacheDirs {
+	for _, c := range cacheDirs() {
 		p.spec.Caches = append(p.spec.Caches, filepath.Join(x.DataDir, c))
 	}
 	p.timeout = time.Duration(x.TimeoutSec) * time.Second

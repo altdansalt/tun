@@ -118,7 +118,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	cfg.DataDir = dir
-	for _, d := range []string{"", "blobs", "jobs", "cache/go-build", "cache/gomod", "cache/xdg"} {
+	for _, d := range append([]string{"", "blobs", "jobs"}, cacheDirs()...) {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, err
 		}

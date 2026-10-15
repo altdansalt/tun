@@ -109,7 +109,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if err := workspace.RemoveAll(filepath.Join(dir, "jobs")); err != nil {
 		return nil, fmt.Errorf("cleaning old job dirs: %v", err)
 	}
-	for _, d := range append([]string{"blobs", "jobs"}, cacheDirs...) {
+	for _, d := range append([]string{"blobs", "jobs"}, cacheDirs()...) {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, err
 		}
