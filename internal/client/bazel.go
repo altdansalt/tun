@@ -37,6 +37,15 @@ built before. Action results you upload are yours: other clients don't see them.
 session's first line says "remote cache: tun's, ..." when it is on. To build without it for
 one command, pass --remote_cache= (empty) like any Bazel flag.
 
+Remote execution: when the server executes actions (it does whenever it has the remote
+cache), the rc file also sets --remote_executor (the same socket), --jobs (twice the
+server's executor slots: its own job slots plus its runners') and --remote_local_fallback.
+Actions then run in the server's job slots and on its runners, in the same FIFO as tun run
+jobs, and their results are shared by every client; the session's Bazel server only
+analyzes and schedules, so its command holds no job slot. The first line then adds "remote
+execution on N slots", and Bazel's "processes: ... N remote" line counts them. To run
+actions in the session for one command, pass --remote_executor= (empty).
+
 A session is (this client, this workspace, NAME): a persistent copy of the workspace on the
 server at a fixed path (/work), Bazel's output base, and a Bazel server that stays up between
 commands, so the second command skips Bazel's startup and reuses its analysis cache. Commands

@@ -360,8 +360,12 @@ First step of docs/bazel.md (M1, hub-local only). `tun bazel [--session NAME] [-
 on the server and streams its output; the exit status is Bazel's (124 on timeout, 125 for
 tun's errors). The agent's args pass through unchanged; anything flag-like before the bazel
 command other than tun's flags (a Bazel startup option) is a usage error.
-- **Session** = (client, workspace root path on the client, name; default `default`), id =
-  first 20 hex of sha256(client NUL root NUL name). It lives in `$DATA/sessions/<id>/`:
+- **Session** = (client identity, workspace root path on the client, name; default
+  `default`), id = first 20 hex of sha256(identity NUL root NUL name). The identity is the
+  request's `client` (see Visibility) prefixed with where it came from: `vm:` (the exe.dev
+  proxy's `X-Exedev-Source-Vm`), `self:` (`X-Tun-Client`) or `addr:` (the remote address), so
+  a self-reported name never equals a proxy-attested one; sessions show it as `identity`.
+  Session dirs without one (from an older tun) are deleted at startup. It lives in `$DATA/sessions/<id>/`:
   `session.json`, `sync.json` (the last applied manifest plus the stat of each file tun
   wrote), `tun.bazelrc`, `agent.log` (the sandbox's own output: the server copies it from a
   pipe, capped at `--max-log` and at most 8MB, so the sandbox never holds a descriptor of a
@@ -370,7 +374,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   top-level directories bound read-only (so new top-level paths can exist), and binds
   `work` at `/work`, `home` at `/tun/home` (HOME), `tmp` at `/tmp` (TMPDIR), `out` at
   `/tun/out` (Bazel's `--output_user_root`, output base `/tun/out/base`), and the client's
-  own Bazel caches from `$DATA/bazel/<sha256(client)[:16 hex]>/`: `repo` at `/tun/cache/repo`
+  own Bazel caches from `$DATA/bazel/<sha256(identity)[:16 hex]>/`: `repo` at `/tun/cache/repo`
   (`--repository_cache`; Bazel 8+ keep the repository contents cache, fetched repository
   trees, in its `contents/` by default), `disk` at `/tun/cache/disk` (`--disk_cache`),
   `bazelisk` at `/tun/cache/bazelisk` (BAZELISK_HOME; a new one is seeded with a copy of
@@ -386,8 +390,14 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   planted where a sandbox can write never redirects a mount. The caches are per client
   because none can be trusted once a sandbox wrote it (bazelisk runs a cached Bazel without
   checking it again; Bazel trusts its repository contents and disk caches): a client can
-  only poison its own. Clients are told apart by the identity in `client` (see visibility):
-  behind exe.dev's proxy it can't be forged; otherwise it is self-reported.
+  only poison its own. Clients are told apart by their identity: behind exe.dev's proxy
+  (`vm:`) it can't be forged; otherwise it is self-reported.
+  bwrap creates a missing mount point with mkdir on the host (following symlinks) when its
+  parent is a bind mount, so every hiding tmpfs (home, data dir) comes before the first bind
+  a job can write (with the data dir under /tmp, e.g. `--ephemeral`, the session's /tmp would
+  otherwise hold the data dir's mount point), and a session sandbox refuses a mount whose
+  destination lies under an earlier writable one. (A job's tree and tmp are new and empty
+  when its sandbox starts, so mount points in them can't have been prepared.)
 - **Long-lived sandbox.** The session sandbox's first process is an agent
   (`tun __tun-session-agent`, under the network helper when isolated) that runs one command
   at a time on request over a socketpair (fd 7): the server sends a `run` message with the
@@ -396,10 +406,15 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   in its own process group, reports `started` and later the exit code or signal, delivers
   `signal` requests to the group, and kills stragglers in the group when the command ends.
   Under bwrap it then also kills every other process left in the sandbox (setsid'd or
-  daemonized leftovers) except itself, its ancestors and the Bazel server (the pid in
-  `out/base/server/server.pid.txt`) with its descendants, so nothing a command started can
-  read or forge a later command's output or modify `/work` during a sync. (A command can
-  still protect a process by writing its pid there; without bwrap there is no sweep.) Bazel's
+  daemonized leftovers) except itself, its ancestors and the Bazel server with its
+  descendants, so nothing a command started can read or forge a later command's output or
+  modify `/work` during a sync. The Bazel server is the process named by
+  `out/base/server/server.pid.txt` when a command of this sandbox first ends with a live one
+  there: the agent records its pid and start time then and never reads the file again (the
+  sandbox can write it). If that process is gone after a later command (`bazel shutdown`, a
+  crash, a startup option change), the sweep spares nothing and the server stops the sandbox,
+  so the next command starts a new one. (So only a session's first command can make a
+  process survive by writing its pid there; without bwrap there is no sweep.) Bazel's
   server daemonizes into its own session inside the sandbox (its pid and network namespace),
   so it survives
   between commands. The sandbox is started by the first command of a session (output: "tun:
@@ -414,13 +429,20 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `common --experimental_disk_cache_gc_max_size=5G`, or (remote cache, no disk cache: it would
   be a second copy on the same host) `common --remote_cache=grpc://tun`, `common --remote_proxy=unix:/tun/sock/cache.sock`, `common
   --experimental_build_event_upload_strategy=local` (BEP keeps local file URIs) and, if the
-  server denies action writes, `common --noremote_upload_local_results`; it is the "user" rc,
+  server denies action writes, `common --noremote_upload_local_results`, and when the
+  server executes actions (see Remote execution) `common --remote_executor=grpc://tun` (the
+  same socket), `common --jobs=<2 x executor slots>`, `common --remote_local_fallback`; it is the "user" rc,
   so the workspace's own `.bazelrc` still applies, and an agent's flags (e.g.
   `--remote_cache=`) override it. The first command of a sandbox says "started a new session
-  sandbox ...; remote cache: tun's, through /tun/sock/cache.sock" (or why there is none).
+  sandbox ...; remote cache: tun's, through /tun/sock/cache.sock[; remote execution on N
+  slots]" (or why there is none).
 - **Jobs.** Each command is a job (`POST /v1/jobs` with `bazel`, see the API) in the normal
-  FIFO; it needs a hub-local slot (a hub with `--local-slots 0` answers 409) and is never
-  given to a runner. It also needs its session: a session runs one command at a time, so the
+  FIFO; it runs on the hub (a hub with `--local-slots 0` answers 409) and is never
+  given to a runner. It takes a local job slot, unless its session executes remotely: then
+  its Bazel server only analyzes and waits for actions, which take the slots, so the command
+  holds none (with as many busy sessions as slots, their actions could otherwise never
+  start); such commands are bounded by `--max-sessions` (healthz
+  `execution.session_commands`). It also needs its session: a session runs one command at a time, so the
   scheduler skips a bazel job whose session is busy (later jobs may start first) and sets
   `queue_reason` on it (tun prints it with the queued line). The job object has `session`,
   `session_id`, and `argv` = `["bazel", args...]`. Once it has a slot and its session, the job
@@ -469,7 +491,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   evicts the least recently used idle one (one eviction at a time) and waits for it. Sessions
   survive a server restart on disk (`bazel_server: false` until the next command starts a new
   sandbox).
-- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root,
+- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, identity, root,
   created_at, last_used, commands, last_job, state (idle|busy|stopping), job, bazel_server,
   expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.
 
@@ -519,7 +541,7 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   is not protected from other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, remote_cache, disk}`:
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, network_isolation, max_jobs, max_services, running, queued, services, local_slots, runners, sessions, max_sessions, remote_cache, execution, disk}`:
   `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 - `/v1/runner/...`: the runner protocol (see Runners).
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
@@ -542,9 +564,9 @@ are 0600. See docs/bazel.md for protocol limits and Bazel flags.
   results are not: an UpdateActionResult is stored in the namespace of the request's client
   and answers only that client's GetActionResult; a lookup tries the client's own namespace,
   then the shared one, which only tun's executors write (no gRPC request can).
-  The client is the server's identity of the request (as `client` for jobs: the exe.dev
-  source VM header, else `X-Tun-Client`, else the remote address); REAPI `instance_name` is
-  ignored. Capabilities advertise action updates only to requests with a namespace.
+  The client is the server's identity of the request (as for sessions: `vm:` plus the exe.dev
+  source VM header, else `self:` plus `X-Tun-Client`, else `addr:` plus the remote address);
+  REAPI `instance_name` is ignored. Capabilities advertise action updates only to requests with a namespace.
 - **Sessions.** Every `tun bazel` session gets the cache without asking: while its sandbox
   lives, the server listens on the session's own socket `sessions/<id>/sock/cache.sock`
   (opened through the dir's descriptor, so long data dir paths work), whose dir is bound
@@ -554,8 +576,15 @@ are 0600. See docs/bazel.md for protocol limits and Bazel flags.
   expiry, eviction, server exit). With sandbox `none` the bazelrc uses the host path,
   and if that is longer than a unix socket address allows the session has no remote cache.
 
-REAPI actions use the same FIFO and slots as v0 jobs. Runners advertise action support
-in their polls; older runners receive v0 work only. Runner CAS inputs are cached in
+### Remote execution
+REAPI actions use the same FIFO and slots as v0 jobs: the hub's local slots and the slots of
+runners that advertise action support in their polls (bwrap runners only; older runners
+receive v0 work only). Results of successful actions run under bwrap go to the shared action
+cache namespace. Every `tun bazel` session uses it automatically (see the session's
+`tun.bazelrc`). healthz `execution: {slots, queued, running, executed: {local|runner: n},
+session_commands}`: executor slots (local plus action-capable runners'), actions waiting and
+running, actions completed since start by where they ran, and running session commands that
+hold no slot. Runner CAS inputs are cached in
 `DATA/reapi-cas`; action outputs and logs are uploaded to the hub CAS. bwrap actions
 use no network or proxy and exactly the Command environment. See docs/bazel.md for
 execution limits and benchmarks.

@@ -28,7 +28,12 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     It ends with a BEP summary line; `tun bazel --json ...` prints the result as one object.
     Bazel caches are per client on the server; dev-tun.sh seeds bazelisk from the job's cache.
     Sessions use the server's REAPI remote cache automatically (`tun serve --cache-dir`, on by
-    default) through a per-session socket; action results are per client.
+    default) through a per-session socket; action results are per client. With the cache the
+    server also executes actions (its local slots plus action-capable runners), and sessions
+    use it automatically (`--remote_executor` over the same socket; executors' results are
+    shared). TestBazelRemoteExecution runs real Bazel through that with an in-process runner.
+    `scripts/bench-rbe.sh genrules|tree` (in `scripts/dev-tun.sh`, starts one-slot runners)
+    and `scripts/bench-starvation.sh` measure it.
   - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
 - **Bazel** (M0 of docs/bazel.md; `scripts/ci.sh` stays the default CI for now):
   - `tun run -- ./scripts/bazel-ci.sh` — checks that every Go file is in a BUILD.bazel
