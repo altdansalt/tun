@@ -51,10 +51,29 @@ func bazelCmd(args []string, e Env) int {
 	session := fs.String("session", "default", "run in session `NAME` (letters, digits, '.', '_', '-')")
 	cold := fs.Bool("cold", false, "start the session afresh: discard its Bazel server, output base and workspace copy")
 	timeout := fs.Duration("timeout", 30*time.Minute, "cancel the bazel command after this long (exit 124; max 168h)")
-	if err := fs.Parse(args); err != nil {
+	// tun's flags end at the bazel command; anything else that looks like a flag before it
+	// is a Bazel startup option, which tun doesn't pass on.
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") && args[i] != "--" {
+		name, _, hasValue := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
+		switch {
+		case name == "h" || name == "help" || name == "cold":
+		case name == "session" || name == "timeout":
+			if !hasValue {
+				i++
+			}
+		default:
+			return errorf(e, "bazel: %q: put tun's flags (--session, --cold, --timeout) first, then the bazel command; Bazel startup options are not supported (tun sets its own)", args[i])
+		}
+		i++
+	}
+	if err := fs.Parse(args[:min(i, len(args))]); err != nil {
 		return flagErr(e, err)
 	}
-	bargs := fs.Args()
+	bargs := args[min(i, len(args)):]
+	if len(bargs) > 0 && bargs[0] == "--" {
+		bargs = bargs[1:]
+	}
 	switch {
 	case len(bargs) == 0:
 		return errorf(e, "bazel: no bazel command; usage: tun bazel [--session NAME] [--cold] <bazel command> [args...]")
