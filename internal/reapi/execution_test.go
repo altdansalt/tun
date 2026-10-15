@@ -121,7 +121,7 @@ tree_rule = rule(implementation=_tree)
 		t.Fatalf("output %q %v", b, err)
 	}
 	out = run("//:top", true)
-	if !strings.Contains(out, "remote cache hit") {
+	if mode == sandbox.Bwrap && !strings.Contains(out, "remote cache hit") {
 		t.Fatal(out)
 	}
 	out = run("//:bad", false)

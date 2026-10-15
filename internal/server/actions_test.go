@@ -38,10 +38,10 @@ func TestBazelRunnerExecution(t *testing.T) {
 	if _, err := exec.LookPath("bazel"); err != nil {
 		t.Skip("bazel missing")
 	}
-	mode := sandbox.None
-	if sandbox.BwrapUsable() {
-		mode = sandbox.Bwrap
+	if !sandbox.BwrapUsable() {
+		t.Skip("remote actions require bwrap")
 	}
+	mode := sandbox.Bwrap
 	s, err := New(Config{DataDir: t.TempDir(), HubOnly: true, Sandbox: mode, RunnerPollWait: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
@@ -116,12 +116,14 @@ genrule(name="bad", outs=["bad.txt"], cmd="echo runner-action-failure >&2; exit 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.jobs) == 0 {
-		t.Fatal("no actions scheduled")
+	if len(s.jobs) != 0 {
+		t.Fatalf("retained %d action jobs", len(s.jobs))
 	}
-	for _, j := range s.jobs {
-		if j.Runner != "action-test" {
-			t.Fatalf("action on %s", j.Runner)
-		}
+	if rn := s.runners["action-test"]; rn == nil || !rn.actions {
+		t.Fatal("missing sandboxed action runner")
+	}
+	entries, err := os.ReadDir(filepath.Join(s.cfg.DataDir, "jobs"))
+	if err != nil || len(entries) != 0 {
+		t.Fatal(entries, err)
 	}
 }
