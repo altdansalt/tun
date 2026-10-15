@@ -202,7 +202,11 @@ func (s *Server) Handler() http.Handler {
 	})
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			// X-Tun-Token first: proxies in front of tun (e.g. exe.dev's) may consume Authorization.
+			got, ok := r.Header.Get("X-Tun-Token"), true
+			if got == "" {
+				got, ok = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			}
 			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
 				writeErr(w, 401, "missing or wrong bearer token (the server's token is in its $DATA/token)")
 				return

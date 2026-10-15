@@ -26,7 +26,7 @@ tun run [flags] -c '<shell script>' run via bash -c
 tun status <id>   (JSON)          tun logs [-f] <id> [--stderr]       tun cancel <id>
 tun ls            (JSON lines: recent jobs, newest first)
 ```
-Server address: `$TUN_URL` (default `http://127.0.0.1:7070`). Auth: bearer token. The server
+Server address: `$TUN_URL` (default `http://127.0.0.1:7070`). Auth: bearer token, sent as `X-Tun-Token: <token>` (also accepted: `Authorization: Bearer <token>`; some proxies, e.g. exe.dev's, consume Authorization). The server
 creates `$DATA/token` on first start (0600) if absent; clients read `$TUN_TOKEN`, else
 `~/.config/tun/token`, else `$DATA/token` for the default data dir (`~/.local/share/tun`), so a local
 client works with zero config.

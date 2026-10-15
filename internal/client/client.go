@@ -45,6 +45,7 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 		req.ContentLength = size
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-Tun-Token", c.Token) // survives proxies that consume Authorization
 	hc := c.HTTP
 	if hc == nil {
 		hc = http.DefaultClient
