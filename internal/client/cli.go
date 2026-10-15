@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,7 +32,8 @@ usage:
   tun status <id>                    print the job as one JSON object
   tun logs [-f] [--stderr] <id>      print a job's stdout (or stderr); -f follows until it ends
   tun cancel <id>                    kill a job (whole process group) or drop it from the queue
-  tun ls [--limit N]                 recent jobs as JSON lines, newest first
+  tun ls [--limit N] [--state S] [--client NAME | --mine]
+                                     recent jobs as JSON lines, newest first
   tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
   tun serve [flags]                  run the server (tun serve -h)
   tun help                           this text; 'tun <cmd> -h' for per-command flags
@@ -52,7 +54,11 @@ environment:
 job objects (status, ls, cancel) have fields: id, state (queued|running|exited|failed|timeout|
 canceled), exit_code, signal, created_at, started_at, ended_at, argv, script, cwd,
 timeout_sec (0 = none), workspace, sandbox, error, work_deleted (true once the server's retention
-deleted the job's files; status and logs remain).
+deleted the job's files; status and logs remain), client (who submitted it: see tun ls -h),
+queue_sec (seconds from creation to start, counting while queued), run_sec (seconds from start
+to end, counting while running), queue_position (only while queued: 1 = next to start).
+Server load (no token needed): curl $TUN_URL/v1/healthz -> {running, queued, max_jobs,
+services, max_services, ...}.
 Services also have service: true and ports: [{port, host_port, ready, path, url}].
 `
 
@@ -65,6 +71,9 @@ its exit code; 128+N if killed by signal N; 124 on timeout; 125 for tun errors.
 The job id is printed to stderr first as "tun: job <id>"; if this client is killed without a
 chance to cancel, the job keeps running and 'tun logs -f <id>' reattaches. SIGINT/SIGTERM
 cancel the job and exit 128+signal.
+If the server is busy (it runs --max-jobs jobs at once, FIFO), tun run prints once
+"tun: queued (N ahead, M running)" and, when the job starts, "tun: started after Xs in queue".
+The job object's queue_sec and run_sec (tun status, and in --json) show where time went.
 
 The job's environment is minimal: PATH, LANG, TERM=dumb, USER, HOME and TMPDIR (private to
 the job), GOCACHE/GOMODCACHE/XDG_CACHE_HOME (caches shared across jobs), TUN_JOB_ID, plus -e.
@@ -128,7 +137,8 @@ func newClient(e Env) *Client {
 			}
 		}
 	}
-	return &Client{URL: url, Token: token}
+	name, _ := os.Hostname()
+	return &Client{URL: url, Token: token, Name: name}
 }
 
 func newFlags(name, usage string, e Env) *flag.FlagSet {
@@ -333,8 +343,55 @@ func (t *tail) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// cancelOnSignal cancels job id because this client got sig, and returns tun run's exit code.
+func cancelOnSignal(c *Client, id string, sig os.Signal, e Env) int {
+	cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer ccancel()
+	if _, err := c.Cancel(cctx, id); err != nil {
+		return errorf(e, "received %v but could not cancel job %s: %v", sig, id, err)
+	}
+	fmt.Fprintf(e.Stderr, "tun: received %v; canceled job %s\n", sig, id)
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 125
+}
+
+// queuePoll is how often tun run checks whether its queued job has started.
+var queuePoll = 500 * time.Millisecond
+
+// waitQueued reports on stderr that job j is queued, then polls until it leaves the queue
+// and reports how long it waited. done is true if a signal canceled the job meanwhile.
+func waitQueued(ctx context.Context, c *Client, j api.Job, e Env) (code int, done bool) {
+	msg := fmt.Sprintf("%d ahead", *j.QueuePosition-1)
+	if h, err := c.Health(ctx); err == nil {
+		msg += fmt.Sprintf(", %d running", h.Running)
+	}
+	fmt.Fprintf(e.Stderr, "tun: queued (%s)\n", msg)
+	for j.State == api.Queued {
+		select {
+		case sig := <-e.Signals:
+			return cancelOnSignal(c, j.ID, sig, e), true
+		case <-time.After(queuePoll):
+		}
+		var err error
+		if j, err = c.Get(ctx, j.ID); err != nil {
+			return 0, false // the log streams retry and report errors
+		}
+	}
+	if j.StartedAt != nil {
+		fmt.Fprintf(e.Stderr, "tun: started after %.1fs in queue\n", j.QueueSec)
+	}
+	return 0, false
+}
+
 // wait streams (or collects) the job's output until it ends and maps the result to an exit code.
 func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, jsonOut bool, e Env) int {
+	if j.QueuePosition != nil && !jsonOut {
+		if code, done := waitQueued(ctx, c, j, e); done {
+			return code
+		}
+	}
 	var out, errw io.Writer = e.Stdout, e.Stderr
 	tOut, tErr := &tail{max: 64 << 10}, &tail{max: 64 << 10}
 	if jsonOut {
@@ -352,16 +409,7 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 	case sig := <-e.Signals:
 		cancel()
 		<-done
-		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer ccancel()
-		if _, err := c.Cancel(cctx, j.ID); err != nil {
-			return errorf(e, "received %v but could not cancel job %s: %v", sig, j.ID, err)
-		}
-		fmt.Fprintf(e.Stderr, "tun: received %v; canceled job %s\n", sig, j.ID)
-		if s, ok := sig.(syscall.Signal); ok {
-			return 128 + int(s)
-		}
-		return 125
+		return cancelOnSignal(c, j.ID, sig, e)
 	}
 	if err := errors.Join(errOut, errErr); err != nil {
 		return errorf(e, "%v; job %s may still be running: reattach with 'tun logs -f %s'", err, j.ID, j.ID)
@@ -374,7 +422,7 @@ func wait(ctx context.Context, cancel context.CancelFunc, c *Client, j api.Job, 
 	if jsonOut {
 		res := map[string]any{
 			"id": final.ID, "state": final.State, "exit_code": final.ExitCode, "signal": final.Signal,
-			"error": final.Error, "tun_exit": code,
+			"error": final.Error, "tun_exit": code, "queue_sec": final.QueueSec, "run_sec": final.RunSec,
 			"stdout": string(tOut.buf), "stderr": string(tErr.buf),
 			"stdout_truncated": tOut.n > int64(len(tOut.buf)), "stderr_truncated": tErr.n > int64(len(tErr.buf)),
 		}
@@ -480,22 +528,48 @@ func logsCmd(args []string, e Env) int {
 	return 0
 }
 
+const lsUsage = `usage: tun ls [--limit N] [--state S] [--client NAME | --mine]
+
+Print recent jobs, newest first, one JSON object per line. Filters apply before --limit.
+Each job's "client" is who submitted it: the exe.dev source VM when the request came through
+the exe.dev proxy, else the submitting host's name, else its IP address.
+
+flags:
+`
+
 func lsCmd(args []string, e Env) int {
-	fs := newFlags("ls", "usage: tun ls [--limit N]\n\nPrint recent jobs, newest first, one JSON object per line.\n\nflags:\n", e)
+	fs := newFlags("ls", lsUsage, e)
 	limit := fs.Int("limit", 20, "max jobs to list")
+	state := fs.String("state", "", "only jobs in state `S` (queued|running|exited|failed|timeout|canceled; comma-separated for several)")
+	client := fs.String("client", "", "only jobs submitted by `NAME` (a job's \"client\" field)")
+	mine := fs.Bool("mine", false, "only jobs submitted from this host (as the server identifies it; see above)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return flagErr(e, err)
 	}
-	if len(pos) > 0 {
-		return errorf(e, "usage: tun ls [--limit N]")
+	switch {
+	case len(pos) > 0:
+		return errorf(e, "usage: tun ls [--limit N] [--state S] [--client NAME | --mine]")
+	case *mine && *client != "":
+		return errorf(e, "ls: give --client or --mine, not both")
 	}
-	js, err := newClient(e).List(context.Background(), *limit)
+	filter := url.Values{}
+	if *state != "" {
+		filter.Set("state", *state)
+	}
+	if *client != "" {
+		filter.Set("client", *client)
+	}
+	if *mine {
+		filter.Set("mine", "1")
+	}
+	c := newClient(e)
+	js, err := c.List(context.Background(), *limit, filter)
 	if err != nil {
 		return errorf(e, "%v", err)
 	}
 	for _, j := range js {
-		withURLs(newClient(e), &j)
+		withURLs(c, &j)
 		printJSON(e, j)
 	}
 	return 0

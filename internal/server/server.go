@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -216,7 +218,11 @@ func newID() string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"ok": true, "sandbox": s.cfg.Sandbox, "max_jobs": s.cfg.MaxJobs, "max_services": s.cfg.MaxServices})
+		s.mu.Lock()
+		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, MaxJobs: s.cfg.MaxJobs, MaxServices: s.cfg.MaxServices,
+			Running: s.running, Queued: len(s.queue), Services: s.svc.running}
+		s.mu.Unlock()
+		writeJSON(w, 200, h)
 	})
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -268,11 +274,70 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) *job {
 	return j
 }
 
-// snapshot copies the public part of j under the lock.
+// snapshot copies the public part of j, with computed fields, under the lock.
 func (s *Server) snapshot(j *job) api.Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return j.Job
+	return s.view(j, time.Now())
+}
+
+// view is j's public job object with the computed timing and queue fields. Caller holds s.mu.
+func (s *Server) view(j *job, now time.Time) api.Job {
+	v := j.Job
+	end := now
+	if v.EndedAt != nil {
+		end = *v.EndedAt
+	}
+	if v.StartedAt != nil {
+		v.QueueSec, v.RunSec = secs(v.StartedAt.Sub(v.CreatedAt)), secs(end.Sub(*v.StartedAt))
+	} else {
+		v.QueueSec = secs(end.Sub(v.CreatedAt))
+	}
+	if v.State == api.Queued {
+		for i, q := range s.queue {
+			if q == j {
+				p := i + 1
+				v.QueuePosition = &p
+				break
+			}
+		}
+	}
+	return v
+}
+
+// secs is d in seconds, to the millisecond.
+func secs(d time.Duration) float64 {
+	return float64(max(d, 0).Milliseconds()) / 1000
+}
+
+// clientOf names who sent r: the exe.dev proxy's X-Exedev-Source-Vm header (the proxy sets it
+// and doesn't let callers forge it), else the client's self-reported X-Tun-Client (its
+// hostname), else the remote IP. Without the proxy in front, both headers are only as
+// trustworthy as the token holder: this is for visibility, not access control.
+func clientOf(r *http.Request) string {
+	for _, h := range []string{"X-Exedev-Source-Vm", "X-Tun-Client"} {
+		if v := cleanName(r.Header.Get(h)); v != "" {
+			return v
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// cleanName trims a header value to at most 128 printable ASCII characters.
+func cleanName(v string) string {
+	v = strings.Map(func(r rune) rune {
+		if r <= ' ' || r > '~' {
+			return -1
+		}
+		return r
+	}, v)
+	if len(v) > 128 {
+		v = v[:128]
+	}
+	return v
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
@@ -281,19 +346,49 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// listJobs serves GET /v1/jobs?limit=N&state=S[,S...]&client=NAME|mine=1, newest first.
+// mine=1 means client = clientOf(this request).
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := q.Get("limit"); v != "" {
 		var err error
 		if limit, err = strconv.Atoi(v); err != nil || limit < 1 {
 			writeErr(w, 400, fmt.Sprintf("limit %q must be a positive integer", v))
 			return
 		}
 	}
+	states := map[string]bool{}
+	if v := q.Get("state"); v != "" {
+		for _, st := range strings.Split(v, ",") {
+			if !slices.Contains(api.States, st) {
+				writeErr(w, 400, fmt.Sprintf("state %q must be one of %s (comma-separated for several)", st, strings.Join(api.States, ",")))
+				return
+			}
+			states[st] = true
+		}
+	}
+	client := q.Get("client")
+	if v := q.Get("mine"); v != "" {
+		mine, err := strconv.ParseBool(v)
+		switch {
+		case err != nil:
+			writeErr(w, 400, fmt.Sprintf("mine %q must be 1, 0, true or false", v))
+			return
+		case mine && client != "":
+			writeErr(w, 400, "give client or mine, not both")
+			return
+		case mine:
+			client = clientOf(r)
+		}
+	}
+	now := time.Now()
 	s.mu.Lock()
 	list := make([]api.Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		list = append(list, j.Job)
+		if (len(states) == 0 || states[j.State]) && (client == "" || j.Client == client) {
+			list = append(list, s.view(j, now))
+		}
 	}
 	s.mu.Unlock()
 	sort.Slice(list, func(a, b int) bool { return list[a].ID > list[b].ID })

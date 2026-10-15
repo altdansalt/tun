@@ -127,7 +127,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	j := &job{done: make(chan struct{}), Env: req.Env, Job: api.Job{
 		ID: newID(), State: api.Queued, CreatedAt: time.Now().UTC(), Argv: req.Argv, Script: req.Script,
 		Cwd: cwd, TimeoutSec: req.TimeoutSec, Workspace: req.Workspace, Sandbox: s.cfg.Sandbox,
-		Service: req.Service,
+		Service: req.Service, Client: clientOf(r),
 	}}
 	if j.Service {
 		// Cheap early check so a full server doesn't unpack a workspace it will reject.
@@ -174,7 +174,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		s.queue = append(s.queue, j)
 		s.schedule()
 	}
-	snap := j.Job
+	snap := s.view(j, time.Now())
 	s.mu.Unlock()
 	writeJSON(w, 201, snap)
 }

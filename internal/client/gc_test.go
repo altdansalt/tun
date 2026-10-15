@@ -192,7 +192,7 @@ func TestMaxLog(t *testing.T) {
 
 func (ts *testServer) lastID() string {
 	ts.t.Helper()
-	js, err := ts.client().List(context.Background(), 1)
+	js, err := ts.client().List(context.Background(), 1, nil)
 	if err != nil || len(js) == 0 {
 		ts.t.Fatalf("list: %v %v", js, err)
 	}

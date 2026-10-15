@@ -317,7 +317,7 @@ func TestCancel(t *testing.T) {
 	}()
 	var jid string
 	for deadline := time.Now().Add(20 * time.Second); jid == ""; {
-		js, _ := ts.client().List(context.Background(), 1)
+		js, _ := ts.client().List(context.Background(), 1, nil)
 		if len(js) > 0 && js[0].ID != id && js[0].State == api.Running {
 			jid = js[0].ID
 		}

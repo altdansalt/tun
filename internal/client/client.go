@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 type Client struct {
 	URL   string // e.g. http://127.0.0.1:7070
 	Token string
+	Name  string // sent as X-Tun-Client: who is asking (the server records it on jobs)
 	HTTP  *http.Client
 }
 
@@ -46,6 +49,9 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("X-Tun-Token", c.Token) // survives proxies that consume Authorization
+	if c.Name != "" {
+		req.Header.Set("X-Tun-Client", c.Name)
+	}
 	hc := c.HTTP
 	if hc == nil {
 		hc = http.DefaultClient
@@ -140,10 +146,22 @@ func (c *Client) Get(ctx context.Context, id string) (api.Job, error) {
 	return j, err
 }
 
-func (c *Client) List(ctx context.Context, limit int) ([]api.Job, error) {
+// List returns up to limit jobs, newest first, matching filter (state, client, mine; may be nil).
+func (c *Client) List(ctx context.Context, limit int, filter url.Values) ([]api.Job, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	for k, v := range filter {
+		q[k] = v
+	}
 	var js []api.Job
-	err := c.doJSON(ctx, "GET", fmt.Sprintf("/v1/jobs?limit=%d", limit), nil, &js)
+	err := c.doJSON(ctx, "GET", "/v1/jobs?"+q.Encode(), nil, &js)
 	return js, err
+}
+
+// Health returns the server's config and current load.
+func (c *Client) Health(ctx context.Context) (api.Health, error) {
+	var h api.Health
+	err := c.doJSON(ctx, "GET", "/v1/healthz", nil, &h)
+	return h, err
 }
 
 func (c *Client) Cancel(ctx context.Context, id string) (api.Job, error) {

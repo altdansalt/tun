@@ -28,7 +28,7 @@ tun run [flags] -c '<shell script>' run via bash -c
     --port N        with --service: expose port N (repeatable)
     --ready-timeout DUR  with --service: default 2m
 tun status <id>   (JSON)          tun logs [-f] <id> [--stderr]       tun cancel <id>
-tun ls            (JSON lines: recent jobs, newest first)
+tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 ```
 `tun run --out PATH` (repeatable): after the job ends (any state), download PATH (relative to the
@@ -46,6 +46,26 @@ client works with zero config.
 Exit status of `tun run`: the command's exit code; 128+signal if killed by a signal; 124 on timeout;
 125 for tun's own errors (can't reach server, upload failed, bad flags) with a one-line message on
 stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and then exits.
+
+Queueing is visible: if the created job is waiting in the FIFO (`queue_position` set), `tun run`
+(not `--json`) prints once to stderr `tun: queued (N ahead, M running)` (N = position - 1, M =
+`running` from healthz), polls the job every 500ms, and when it starts prints
+`tun: started after Xs in queue` before streaming output. SIGINT/SIGTERM while queued cancel it.
+`tun run --json` adds `queue_sec` and `run_sec` to its object.
+
+## Visibility
+- Every job object has `queue_sec` (creation to start; to now while queued, to end if it never
+  started) and `run_sec` (start to end; to now while running; 0 if never started), in seconds
+  with millisecond resolution, computed when served. While queued in the FIFO it also has
+  `queue_position` (1 = next to start); omitted otherwise.
+- `client`: who submitted the job, recorded at creation: the `X-Exedev-Source-Vm` request header
+  (set by the exe.dev proxy, which callers can't forge through it), else the client-sent
+  `X-Tun-Client` (the CLI sends its hostname on every request), else the remote IP. Values are
+  stripped to printable non-space ASCII, at most 128 bytes. Without the exe.dev proxy in front
+  any token holder can claim any name: it is for visibility, not access control.
+- `tun ls --state S` (comma-separated for several), `--client NAME`, `--mine` filter on the
+  server before `--limit`. `--mine` means "client = what the server would record for this
+  request", so it matches the source VM behind the exe.dev proxy and the hostname otherwise.
 
 ## Workspace
 - Root = `git rev-parse --show-toplevel` of the client's cwd; if not in git, the cwd itself.
@@ -136,8 +156,10 @@ database, test fixture):
   `timeout_sec` <= 0 means the default (1800), except for services where 0 (or less) means none; over 604800 (7 days) is a 400. NUL bytes in
   argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
   exactly one JSON object.
-- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted}`.
-- `GET /v1/jobs?limit=N` -> list. `POST /v1/jobs/{id}/cancel`.
+- `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error, work_deleted, client, queue_sec, run_sec, queue_position}`.
+- `GET /v1/jobs?limit=N&state=S[,S...]&client=NAME&mine=1` -> list, newest first, filtered
+  before the limit (`mine=1`: client = this request's client identity; with `client` it's a 400;
+  unknown states are a 400). `POST /v1/jobs/{id}/cancel`.
 - `GET /v1/jobs/{id}/stdout?offset=N&follow=1` (and `/stderr`): raw bytes from offset; with follow,
   streams (flush as written) until the job ends and all bytes are sent. Reattachable at any offset.
 - `GET /v1/jobs/{id}/files?path=P&path=Q...` -> `application/x-tar` of those paths (dirs recursive)
@@ -160,7 +182,8 @@ database, test fixture):
   other jobs on the host; see Services.) Responses are flushed as they stream; protocol
   upgrades (websockets) are passed through. 404 if the job has no port N, 409 if the job is not
   running, 502 (JSON error) if nothing accepts on the host port.
-- `GET /v1/healthz` (no auth).
+- `GET /v1/healthz` (no auth) -> `{ok, sandbox, max_jobs, max_services, running, queued, services}`:
+  `running` non-service jobs (<= max_jobs), `queued` jobs waiting for a slot, `services` running.
 Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
 `offset` must be plain decimal integers, `follow` a boolean) are a 400.
 

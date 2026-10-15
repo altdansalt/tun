@@ -286,7 +286,7 @@ func TestServiceFailures(t *testing.T) {
 	if r.code != 125 || !strings.Contains(r.stderr, "not accepting connections on port(s) 80") || !strings.Contains(r.stdout, "waiting") {
 		t.Errorf("ready timeout: %+v", r)
 	}
-	js, _ := ts.client().List(context.Background(), 1)
+	js, _ := ts.client().List(context.Background(), 1, nil)
 	if j := ts.waitDone(js[0].ID); j.State != api.Canceled {
 		t.Errorf("not canceled after ready timeout: %+v", j)
 	}
