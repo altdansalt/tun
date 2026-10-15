@@ -65,6 +65,13 @@ memory): a new one evicts the least recently used idle one. tun bazel commands t
 slots like other jobs. Each client has its own Bazel caches (bazelisk downloads, repository
 cache, disk cache) in $DATA/bazel.
 
+Remote cache (--cache-dir, default "reapi" in the data dir; --cache-dir= disables it): Bazel's
+remote cache protocol (REAPI gRPC over h2c) on this listener and on $DATA/cache.sock, both
+with the token (Bazel: --remote_cache=grpc://HOST:PORT --remote_header=x-tun-token=TOKEN).
+Every tun bazel session uses it without asking: tun's bazelrc points Bazel at the session's
+own socket, which needs no token. File contents are shared (they are verified); action
+results are per client: what a client uploads answers only its own lookups.
+
 flags:
 `
 
@@ -95,7 +102,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
-	cacheDir := fs.String("cache-dir", "", "enable REAPI gRPC cache in this directory (relative to data dir); disabled if empty")
+	cacheDir := fs.String("cache-dir", "reapi", "REAPI gRPC remote cache in this directory (relative to the data dir); empty disables it")
 	cacheMax := fs.String("cache-max-size", "10GB", "REAPI cache LRU size limit")
 	cacheWrites := fs.Bool("cache-action-writes", true, "allow clients to update the REAPI action cache")
 	cacheSocket := fs.String("cache-socket", "", "REAPI unix socket path (default DATA/cache.sock when enabled)")
