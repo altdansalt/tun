@@ -43,7 +43,8 @@ done
 
 mkdir "$tmp/ws" && cd "$tmp/ws"
 echo data > input
-[ "$(tun run -- cat input)" = data ] || fail "workspace"
+[ "$(tun run -- cat input 2>"$tmp/where")" = data ] || fail "workspace"
+grep -Eq "^tun: running on runner r[12]$" "$tmp/where" || fail "no running-on line: $(cat "$tmp/where")"
 code=0
 tun run -- sh -c 'exit 7' || code=$?
 [ "$code" -eq 7 ] || fail "exit code $code"
