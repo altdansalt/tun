@@ -27,7 +27,7 @@ tun get). tun runners (or the hub's /v1/healthz) lists live runners.
 
 If the hub hears nothing from a runner for its --runner-timeout (default 30s), the runner's
 running jobs fail and unstarted ones are requeued. On SIGINT/SIGTERM the runner stops taking
-work, kills its jobs, reports them failed and tells the hub it left.
+work, finishes its jobs (up to --drain-timeout, default 15m) and tells the hub it left.
 
 Names: the newest runner with a given --name wins. When another runner process starts with
 the same name, the hub stops giving this one work; it finishes the jobs it has and exits
@@ -104,6 +104,7 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	hub := fs.String("hub", os.Getenv("TUN_URL"), "hub URL (default $TUN_URL)")
 	tokenFile := fs.String("token-file", "", "file with the hub's token (default $TUN_TOKEN, else ~/.config/tun/token)")
+	drainTimeout := fs.Duration("drain-timeout", 15*time.Minute, "finish running jobs before shutdown (then kill remaining work)")
 	slots := fs.Int("slots", runtime.NumCPU(), "jobs run at once")
 	host, _ := os.Hostname()
 	name := fs.String("name", host, "runner name, unique per hub (shown as the job's \"runner\")")
@@ -171,13 +172,21 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)
+	stopping, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
 		sig := <-sigs
-		logf("tun runner: %v: killing jobs and reporting them failed (again to quit at once)", sig)
+		close(stopping)
+		logf("tun runner: %v: draining running jobs (again to quit at once)", sig)
 		go func() { <-sigs; r.Kill() }()
-		r.Shutdown(30 * time.Second)
+		r.Shutdown(*drainTimeout)
+		close(stopped)
 	}()
 	r.Run()
+	select {
+	case <-stopping:
+		<-stopped
+	default:
+	}
 	if msg := r.Superseded(); msg != "" {
 		fmt.Fprintf(stderr, "tun: runner: %s; exiting\n", msg)
 		return 1

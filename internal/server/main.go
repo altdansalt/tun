@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,6 +53,10 @@ the data dir's filesystem is under --min-free, finished jobs' work dirs are dele
 before each job starts and every minute; healthz "disk" reports it). Each job's stdout and
 stderr are capped at --max-log; the workspace's unpacked size at --max-workspace.
 
+Shutdown: SIGINT/SIGTERM reject new submissions with retryable 503 responses and finish
+admitted jobs, including the queue, for up to --drain-timeout (default 15m). Then unfinished
+work is killed. Under systemd use KillMode=mixed and TimeoutStopSec=17min; see docs/deploy.md.
+
 Runners: other machines can run this server's jobs with 'tun runner --hub URL' (they poll
 it; it never connects to them). Queued jobs go FIFO to any free slot: one of the
 --local-slots or a runner's. --local-slots 0 makes a pure hub. Services always run here.
@@ -91,6 +96,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once on this host; the rest queue FIFO (same as --local-slots)")
 	localSlots := fs.Int("local-slots", -1, "jobs run at once on this host; -1: --max-jobs; 0: none, every non-service job runs on a runner (tun runner)")
+	drainTimeout := fs.Duration("drain-timeout", 15*time.Minute, "finish admitted jobs before shutdown (then kill remaining work)")
 	runnerTimeout := fs.Duration("runner-timeout", 30*time.Second, "a runner that hasn't polled for this long is lost: its running jobs fail, unstarted ones are requeued")
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
@@ -300,7 +306,14 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	select {
 	case <-eof:
 	case sig := <-sigs:
-		fmt.Fprintf(stderr, "tun: %v: shutting down; running jobs are killed and will show as failed\n", sig)
+		fmt.Fprintf(stderr, "tun: %v: draining admitted jobs (limit %s)\n", sig, *drainTimeout)
+		if !s.Drain(*drainTimeout) {
+			fmt.Fprintln(stderr, "tun: drain timeout; unfinished jobs will fail")
+		}
+		// Allow final status/log responses to finish before closing HTTP.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		hs.Shutdown(ctx)
+		cancel()
 	case err := <-errc:
 		fmt.Fprintf(stderr, "tun: serve: %v\n", err)
 	}

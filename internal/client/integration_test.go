@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -186,10 +189,10 @@ func TestExitCodes(t *testing.T) {
 			t.Errorf("tun %q = %d, stderr %q; want %d with %q", c.args, r.code, r.stderr, c.code, c.msg)
 		}
 	}
-	r := Main([]string{"run", "--", "true"}, Env{Stdout: io.Discard, Stderr: &bytes.Buffer{}, Cwd: t.TempDir(),
-		Getenv: func(k string) string { return map[string]string{"TUN_URL": "http://127.0.0.1:1"}[k] }})
-	if r != 125 {
-		t.Errorf("unreachable server: exit %d, want 125", r)
+	// A sustained outage has a bounded retry window.
+	c := &Client{URL: "http://127.0.0.1:1", RetryTimeout: 50 * time.Millisecond}
+	if _, err := c.Health(context.Background()); err == nil {
+		t.Fatal("unreachable server succeeded")
 	}
 	var errb bytes.Buffer
 	Main([]string{"ls"}, Env{Stdout: io.Discard, Stderr: &errb, Cwd: t.TempDir(),
@@ -463,5 +466,101 @@ func TestRestartRecovery(t *testing.T) {
 	}
 	if r := ts2.tun("", "run", "--", "true"); r.code != 0 {
 		t.Errorf("new job after restart: %+v", r)
+	}
+}
+
+// Admission closes before Drain waits; all already admitted jobs, including the
+// FIFO, finish through the normal HTTP API with their original exit statuses.
+func TestDrainAdmittedQueue(t *testing.T) {
+	ts := startServer(t, server.Config{MaxJobs: 1})
+	c := ts.client()
+	ctx := context.Background()
+	a, err := c.Create(ctx, api.CreateJob{Script: "echo before; sleep .3; echo after; exit 7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.Create(ctx, api.CreateJob{Script: "echo queued"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drained := make(chan bool, 1)
+	go func() { drained <- ts.srv.Drain(5 * time.Second) }()
+	eventually(t, "admission closed", func() bool {
+		resp, err := c.request(ctx, "POST", "/v1/jobs", strings.NewReader("{}"), 2)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		var se *StatusError
+		return errors.As(err, &se) && se.Code == 503
+	})
+	if !<-drained {
+		t.Fatal("drain timed out")
+	}
+	for _, want := range []struct {
+		id, output string
+		code       int
+	}{
+		{a.ID, "before\nafter\n", 7}, {b.ID, "queued\n", 0},
+	} {
+		j, err := c.Get(ctx, want.id)
+		if err != nil || j.ExitCode == nil || *j.ExitCode != want.code {
+			t.Fatalf("result: %+v %v", j, err)
+		}
+		var out bytes.Buffer
+		if _, err := c.Logs(ctx, want.id, "stdout", 0, true, &out); err != nil || out.String() != want.output {
+			t.Fatalf("logs %q: %v", out.String(), err)
+		}
+	}
+}
+
+func TestDrainTimeout(t *testing.T) {
+	ts := startServer(t, server.Config{})
+	id := ts.detach("", "--no-workspace", "-c", "sleep 60")
+	ts.waitFor(id, func(j api.Job) bool { return j.State == api.Running })
+	start := time.Now()
+	if ts.srv.Drain(30*time.Millisecond) || time.Since(start) > time.Second {
+		t.Fatal("drain did not respect timeout")
+	}
+	if _, err := ts.client().Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetryUnavailable(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var req api.CreateJob
+		if json.Unmarshal(b, &req) != nil || req.Script != "true" {
+			t.Errorf("replayed body: %q", b)
+		}
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(502)
+		case 2:
+			w.WriteHeader(503)
+		default:
+			fmt.Fprint(w, "{}")
+		}
+	}))
+	defer ts.Close()
+	var notices int
+	c := &Client{URL: ts.URL, RetryTimeout: 3 * time.Second, RetryLog: func() { notices++ }}
+	if _, err := c.Create(context.Background(), api.CreateJob{Script: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 || notices != 1 {
+		t.Fatalf("calls=%d notices=%d", calls.Load(), notices)
+	}
+}
+
+func TestRetryCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	defer ts.Close()
+	c := &Client{URL: ts.URL, RetryTimeout: time.Minute}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.Health(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error: %v", err)
 	}
 }

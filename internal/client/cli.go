@@ -53,6 +53,9 @@ non-ignored files, no .git) to the server, runs the command there in the same re
 directory, streams stdout/stderr, and exits with the command's exit status.
 Stderr reports compressed workspace bytes (uploaded or cached) and final job run/queue times.
 
+Requests retry connection failures and HTTP 502/503 for up to 16m with backoff,
+printing "tun: server unavailable, retrying". Deploys can delay submissions while draining.
+
 exit status of tun run: the command's exit code; 128+N if it was killed by signal N;
 124 if it hit --timeout; 125 for tun's own errors (bad flags, server unreachable, upload
 failed, job failed to start), always with a one-line message on stderr starting "tun:".
@@ -171,7 +174,7 @@ func newClient(e Env) *Client {
 		}
 	}
 	name, _ := os.Hostname()
-	return &Client{URL: url, Token: token, Name: name}
+	return &Client{URL: url, Token: token, Name: name, RetryTimeout: 16 * time.Minute, RetryLog: func() { fmt.Fprintln(e.Stderr, "tun: server unavailable, retrying") }}
 }
 
 func newFlags(name, usage string, e Env) *flag.FlagSet {

@@ -49,7 +49,7 @@ type RunnerConfig struct {
 }
 
 // Runner is a running tun runner. Create with NewRunner, run with Run; stop with Shutdown
-// (graceful: running jobs are killed and reported failed) or Kill (like a crash).
+// (graceful: running jobs finish within a deadline) or Kill (like a crash).
 type Runner struct {
 	cfg      RunnerConfig
 	instance string
@@ -223,24 +223,17 @@ func (r *Runner) Kill() {
 	r.mu.Unlock()
 }
 
-// Shutdown stops taking work, kills running jobs and reports them failed, waiting at most
-// timeout for that before giving up like Kill.
+// Shutdown advertises zero slots while jobs finish, retaining heartbeats and cancellation.
+// After timeout it gives up like Kill.
 func (r *Runner) Shutdown(timeout time.Duration) {
-	r.stopPoll()
 	r.mu.Lock()
 	r.draining = true
-	ids := make([]string, 0, len(r.jobs))
-	for id := range r.jobs {
-		ids = append(ids, id)
-	}
 	r.mu.Unlock()
-	for _, id := range ids {
-		r.cancelJob(id, api.Failed)
-	}
 	done := make(chan struct{})
 	go func() { r.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		r.stopPoll()
 		// Tell the hub, so it stops counting this runner's slots now rather than once it is
 		// overdue.
 		ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
@@ -250,6 +243,7 @@ func (r *Runner) Shutdown(timeout time.Duration) {
 		r.Kill()
 		<-done
 	}
+	r.stopPoll()
 	r.kill()
 }
 

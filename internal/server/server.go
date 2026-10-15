@@ -81,6 +81,8 @@ type Server struct {
 	runners  map[string]*runnerState // the current instance of each runner name
 	retired  map[string]*runnerState // by instance id: superseded or dropped instances
 	sessions map[string]*session     // tun bazel sessions by id
+	drainMu  sync.RWMutex
+	draining bool
 	closed   bool
 	quit     chan struct{} // closed by Close
 	wg       sync.WaitGroup
@@ -285,6 +287,37 @@ func (s *Server) Close() {
 	s.closeSessions() // any a stopping session's goroutine started meanwhile
 }
 
+// Drain refuses new submissions and finishes all admitted work, including the queue.
+// HTTP stays live for logs, status, cancellation and runner heartbeats.
+func (s *Server) Drain(timeout time.Duration) bool {
+	s.drainMu.Lock()
+	s.draining = true
+	s.drainMu.Unlock()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		s.mu.Lock()
+		pending := false
+		for _, j := range s.jobs {
+			if !api.Terminal(j.State) {
+				pending = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if !pending {
+			return true
+		}
+		select {
+		case <-timer.C:
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
 // jobDir holds the server's files for a job (job.json, stdout, stderr) and its sandbox dir.
 // The job itself can write only inside sandboxDir.
 func (s *Server) jobDir(id string) string { return filepath.Join(s.cfg.DataDir, "jobs", id) }
@@ -366,7 +399,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runner/jobs/{id}/{stream}", auth(s.runnerLog))
 	mux.HandleFunc("POST /v1/cas", auth(s.putCAS))
 	mux.HandleFunc("GET /v1/sessions", auth(s.listSessions))
-	mux.HandleFunc("POST /v1/jobs", auth(s.createJob))
+	mux.HandleFunc("POST /v1/jobs", auth(func(w http.ResponseWriter, r *http.Request) {
+		s.drainMu.RLock()
+		defer s.drainMu.RUnlock()
+		if s.draining {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, 503, "server draining for restart; retry submission")
+			return
+		}
+		s.createJob(w, r)
+	}))
 	mux.HandleFunc("GET /v1/jobs", auth(s.listJobs))
 	mux.HandleFunc("GET /v1/jobs/{id}", auth(s.getJob))
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", auth(s.cancelJob))
