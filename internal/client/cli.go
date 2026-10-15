@@ -38,7 +38,9 @@ usage:
   tun ls [--limit N] [--state S] [--client NAME | --mine]
                                      recent jobs as JSON lines, newest first
   tun get [-o DIR] <id> PATH...      download files/dirs from a finished job's work dir
+  tun runners                        live runners of the server as JSON lines
   tun serve [flags]                  run the server (tun serve -h; --ephemeral for testing)
+  tun runner --hub URL [flags]       run jobs for a server from another machine (tun runner -h)
   tun help                           this text; 'tun <cmd> -h' for per-command flags
 
 tun run ships the workspace (the git toplevel of the cwd, else the cwd; tracked + untracked
@@ -60,7 +62,10 @@ canceled), exit_code, signal, created_at, started_at, ended_at, argv, script, cw
 timeout_sec (0 = none), workspace, sandbox, error, work_deleted (true once the server's retention
 deleted the job's files; status and logs remain), client (who submitted it: see tun ls -h),
 queue_sec (seconds from creation to start, counting while queued), run_sec (seconds from start
-to end, counting while running), queue_position (only while queued: 1 = next to start).
+to end, counting while running), queue_position (only while queued: 1 = next to start),
+runner (where it runs: "local" = the server itself, else a runner's name), outputs (the --out
+paths). A job that ran on a runner keeps only its --out paths: tun get of anything else is an
+error saying so.
 Server load (no token needed): curl $TUN_URL/v1/healthz -> {running, queued, max_jobs,
 services, max_services, network_isolation, ...}.
 Services also have service: true and ports: [{port, host_port, ready, path, url}].
@@ -98,7 +103,8 @@ job left there: '--out .' also pulls job-created files such as .git/hooks into y
 so name the outputs you want. A PATH that matched
 nothing is a "tun: warning:" on stderr and the exit status stays the command's; if the
 download itself fails (e.g. over the server's size limit), a 0 exit becomes 125.
-Later, or for other paths: tun get <id> PATH...
+Later: tun get <id> PATH... (for any path if the job ran on the server itself; if it ran on
+a runner, only paths within the --out paths given here exist).
 
 --tail N streams nothing while the job runs; when it ends, tun prints the last N lines of its
 stdout (to stdout) and of its stderr (to stderr), then a "tun: job <id>: showed the last ..."
@@ -124,7 +130,7 @@ func Main(args []string, e Env) int {
 	}
 	cmd, args := args[0], args[1:]
 	run := map[string]func([]string, Env) int{
-		"run": runCmd, "status": statusCmd, "logs": logsCmd, "cancel": cancelCmd, "ls": lsCmd, "get": getCmd,
+		"run": runCmd, "status": statusCmd, "logs": logsCmd, "cancel": cancelCmd, "ls": lsCmd, "get": getCmd, "runners": runnersCmd,
 	}[cmd]
 	switch {
 	case cmd == "help" || cmd == "-h" || cmd == "--help":
@@ -242,6 +248,7 @@ func runCmd(args []string, e Env) int {
 		}
 	}
 	req.TimeoutSec = int((*timeout + time.Second - 1) / time.Second)
+	req.Outputs = outs // a runner uploads exactly these when the job ends
 	if err := svc.apply(fs, &req); err != nil {
 		return errorf(e, "%v", err)
 	}

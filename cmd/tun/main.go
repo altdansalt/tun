@@ -15,6 +15,9 @@ func main() {
 	if len(args) > 0 && args[0] == "serve" {
 		os.Exit(server.Main(args[1:], os.Stderr))
 	}
+	if len(args) > 0 && args[0] == "runner" {
+		os.Exit(server.RunnerMain(args[1:], os.Stderr))
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		os.Stderr.WriteString("tun: cannot determine working directory: " + err.Error() + "\n")

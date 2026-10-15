@@ -34,6 +34,9 @@ type CreateJob struct {
 	Workspace  string            `json:"workspace,omitempty"` // sha256 of an uploaded tar.gz blob; empty = empty dir
 	Service    bool              `json:"service,omitempty"`   // long-running service: see service.go
 	Ports      []int             `json:"ports,omitempty"`     // ports to expose (service only)
+	// Outputs are the paths (files, dirs, globs) the client will fetch when the job ends
+	// (tun run --out). A runner uploads exactly these; see Job.Runner.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // Job is the job object returned by the API.
@@ -59,6 +62,10 @@ type Job struct {
 	// Client is who submitted the job: the exe.dev proxy's X-Exedev-Source-Vm header, else
 	// the client's X-Tun-Client header (its hostname), else the remote address.
 	Client string `json:"client,omitempty"`
+	// Runner is where the job runs or ran: "local" (the hub itself) or a runner's name. Set
+	// when the job leaves the queue. Files of a runner job are only its declared Outputs.
+	Runner  string   `json:"runner,omitempty"`
+	Outputs []string `json:"outputs,omitempty"`
 
 	// Computed each time the job is served. QueueSec is the time from creation to
 	// start (or to now/end if it never started); RunSec the time from start to end (or now).
@@ -74,12 +81,14 @@ type Health struct {
 	Sandbox string `json:"sandbox"`
 	// NetworkIsolation: each job has its own network namespace (egress via an HTTP proxy;
 	// services reachable only through the server's proxy). False: jobs share the host network.
-	NetworkIsolation bool `json:"network_isolation"`
-	MaxJobs          int  `json:"max_jobs"`
-	MaxServices      int  `json:"max_services"`
-	Running          int  `json:"running"`  // non-service jobs running (at most max_jobs)
-	Queued           int  `json:"queued"`   // jobs waiting for a slot
-	Services         int  `json:"services"` // service jobs running (at most max_services)
+	NetworkIsolation bool         `json:"network_isolation"`
+	MaxJobs          int          `json:"max_jobs"` // job slots: local_slots plus every live runner's slots
+	MaxServices      int          `json:"max_services"`
+	Running          int          `json:"running"`  // non-service jobs running (at most max_jobs)
+	Queued           int          `json:"queued"`   // jobs waiting for a slot
+	Services         int          `json:"services"` // service jobs running (at most max_services)
+	LocalSlots       int          `json:"local_slots"`
+	Runners          []RunnerInfo `json:"runners"`
 }
 
 // Error is the body of every non-2xx response.

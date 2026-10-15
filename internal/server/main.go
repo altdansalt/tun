@@ -46,6 +46,11 @@ work), whole job records (job.json + logs) after --keep-jobs, and workspace blob
 a queued/running job for --keep-blobs. A duration of 0 keeps forever. Each job's stdout and
 stderr are capped at --max-log; the workspace's unpacked size at --max-workspace.
 
+Runners: other machines can run this server's jobs with 'tun runner --hub URL' (they poll
+it; it never connects to them). Queued jobs go FIFO to any free slot: one of the
+--local-slots or a runner's. --local-slots 0 makes a pure hub. Services always run here.
+A runner job keeps only the files declared with tun run --out (uploaded when it ends).
+
 flags:
 `
 
@@ -70,7 +75,9 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	exitOnEOF := fs.Bool("exit-on-eof", false, "shut down when stdin closes")
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
-	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
+	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once on this host; the rest queue FIFO (same as --local-slots)")
+	localSlots := fs.Int("local-slots", -1, "jobs run at once on this host (default --max-jobs); 0: none, every non-service job runs on a runner (tun runner)")
+	runnerTimeout := fs.Duration("runner-timeout", 30*time.Second, "a runner that hasn't polled for this long is lost: its running jobs fail, unstarted ones are requeued")
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
@@ -132,19 +139,8 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *keepWork < 0 || *keepJobs < 0 || *keepBlobs < 0 {
 		return fail("--keep-work, --keep-jobs and --keep-blobs must not be negative")
 	}
-	switch *mode {
-	case "auto":
-		*mode = sandbox.None
-		if sandbox.BwrapUsable() {
-			*mode = sandbox.Bwrap
-		}
-	case sandbox.Bwrap:
-		if !sandbox.BwrapUsable() {
-			return fail("--sandbox bwrap: bwrap is not installed or cannot create namespaces here (try --sandbox none)")
-		}
-	case sandbox.None:
-	default:
-		return fail("--sandbox must be auto, bwrap or none, got %q", *mode)
+	if *mode, err = resolveSandbox(*mode); err != nil {
+		return fail("%v", err)
 	}
 	if *mode == sandbox.None {
 		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
@@ -173,7 +169,15 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default:
 		return fail("--net must be auto, private or host, got %q", *netMode)
 	}
-	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
+	if *localSlots >= 0 {
+		*maxJobs = *localSlots
+	} else if *maxJobs < 1 {
+		return fail("--max-jobs must be at least 1 (for a hub that only dispatches to runners: --local-slots 0)")
+	}
+	if *runnerTimeout < time.Second {
+		return fail("--runner-timeout must be at least 1s")
+	}
+	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, HubOnly: *maxJobs == 0, RunnerDeadAfter: *runnerTimeout, MaxServices: *maxServices, Sandbox: *mode, PrivateNet: private, MaxUpload: limit, MaxDownload: dlimit,
 		MaxWorkspace: wsLimit, MaxLog: logLimit, KeepWork: *keepWork, KeepJobs: *keepJobs, KeepBlobs: *keepBlobs})
 	if err != nil {
 		return fail("opening data dir %s: %v", *data, err)
@@ -188,7 +192,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if private {
 		netDesc = "private"
 	}
-	fmt.Fprintf(stderr, "tun: serving on http://%s (data %s, sandbox %s, net %s, max-jobs %d)\n", ln.Addr(), s.cfg.DataDir, *mode, netDesc, *maxJobs)
+	fmt.Fprintf(stderr, "tun: serving on http://%s (data %s, sandbox %s, net %s, local slots %d)\n", ln.Addr(), s.cfg.DataDir, *mode, netDesc, *maxJobs)
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)

@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
-	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
 )
 
@@ -120,6 +119,16 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Sprintf("timeout_sec %d is over the maximum of %d (7 days)", req.TimeoutSec, api.MaxTimeoutSec))
 		return
 	}
+	if len(req.Outputs) > api.MaxOutputs {
+		writeErr(w, 400, fmt.Sprintf("at most %d outputs, got %d", api.MaxOutputs, len(req.Outputs)))
+		return
+	}
+	for _, p := range req.Outputs {
+		if err := api.ValidFilePath(p); err != nil {
+			writeErr(w, 400, "outputs: "+err.Error())
+			return
+		}
+	}
 	if req.Workspace != "" && !shaRE.MatchString(req.Workspace) {
 		writeErr(w, 400, "workspace must be a sha256 of an uploaded blob")
 		return
@@ -127,9 +136,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	j := &job{done: make(chan struct{}), Env: req.Env, Job: api.Job{
 		ID: newID(), State: api.Queued, CreatedAt: time.Now().UTC(), Argv: req.Argv, Script: req.Script,
 		Cwd: cwd, TimeoutSec: req.TimeoutSec, Workspace: req.Workspace, Sandbox: s.cfg.Sandbox,
-		Service: req.Service, Client: clientOf(r),
+		Service: req.Service, Client: clientOf(r), Outputs: req.Outputs,
 	}}
 	if j.Service {
+		j.Runner = api.LocalRunner // services always run on the hub
 		// Cheap early check so a full server doesn't unpack a workspace it will reject.
 		s.mu.Lock()
 		err := s.serviceSlotFree()
@@ -197,26 +207,19 @@ func checkStrings(req api.CreateJob) error {
 	return nil
 }
 
-// prepare creates the job dir and extracts the workspace into sandbox/work. The job only
-// ever gets sandbox/ (see sandboxDir); stdout, stderr and job.json live beside it.
+// prepare creates the job dir and extracts the workspace into sandbox/work. A hub without
+// local slots only checks the blob exists: the runner unpacks it (and enforces the limit).
 func (s *Server) prepare(j *job) (int, error) {
-	dir, sb := s.jobDir(j.ID), s.sandboxDir(j.ID)
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := prepareJobDir(s.cfg.DataDir, j.ID); err != nil {
 		return 500, err
 	}
-	for _, d := range []string{"", "work", "home", "tmp"} {
-		if err := os.Mkdir(filepath.Join(sb, d), 0o700); err != nil {
-			return 500, err
-		}
-	}
-	for _, f := range []string{"stdout", "stderr"} {
-		f, err := openOwn(filepath.Join(dir, f), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			return 500, err
-		}
-		f.Close()
-	}
 	if j.Workspace == "" {
+		return 0, nil
+	}
+	if s.cfg.HubOnly && !j.Service {
+		if !s.useBlob(j.Workspace) {
+			return 400, fmt.Errorf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", j.Workspace, j.Workspace)
+		}
 		return 0, nil
 	}
 	f, err := s.openBlob(j.Workspace)
@@ -224,7 +227,7 @@ func (s *Server) prepare(j *job) (int, error) {
 		return 400, fmt.Errorf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", j.Workspace, j.Workspace)
 	}
 	defer f.Close()
-	if err := workspace.UnpackLimit(f, filepath.Join(sb, "work"), s.cfg.MaxWorkspace); err != nil {
+	if err := workspace.UnpackLimit(f, filepath.Join(s.sandboxDir(j.ID), "work"), s.cfg.MaxWorkspace); err != nil {
 		return s.unpackErr(err)
 	}
 	return 0, nil
@@ -251,11 +254,13 @@ func openOwn(name string, flag int, perm os.FileMode) (*os.File, error) {
 	return f, nil
 }
 
-// schedule starts queued jobs while there is capacity. Caller holds s.mu.
+// schedule starts queued jobs while there are free local slots, and wakes runners waiting
+// for work. Caller holds s.mu.
 func (s *Server) schedule() {
 	for !s.closed && s.running < s.cfg.MaxJobs && len(s.queue) > 0 {
 		j := s.queue[0]
 		s.queue = s.queue[1:]
+		j.Runner = api.LocalRunner
 		s.running++
 		s.wg.Add(1)
 		go func() {
@@ -267,164 +272,61 @@ func (s *Server) schedule() {
 			s.mu.Unlock()
 		}()
 	}
+	if len(s.queue) > 0 {
+		s.wakeRunners()
+	}
 }
 
 func (s *Server) env(j *job) []string {
-	dir := s.sandboxDir(j.ID)
-	cache := filepath.Join(s.cfg.DataDir, "cache")
-	pathEnv := os.Getenv("PATH")
-	if pathEnv == "" {
-		pathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-	}
-	lang := os.Getenv("LANG")
-	if lang == "" {
-		lang = "C.UTF-8"
-	}
-	user := os.Getenv("USER")
-	m := map[string]string{
-		"PATH": pathEnv, "LANG": lang, "TERM": "dumb", "USER": user,
-		"HOME": filepath.Join(dir, "home"), "TMPDIR": filepath.Join(dir, "tmp"),
-		"GOCACHE": filepath.Join(cache, "go-build"), "GOMODCACHE": filepath.Join(cache, "gomod"),
-		"XDG_CACHE_HOME": filepath.Join(cache, "xdg"), "TUN_JOB_ID": j.ID,
-	}
-	for k, v := range j.Env {
-		m[k] = v
-	}
+	m := jobEnv(s.cfg.DataDir, j.ID, j.Env)
 	portEnv(j, m)
-	env := make([]string, 0, len(m))
-	for k, v := range m {
-		env = append(env, k+"="+v)
-	}
-	return env
+	return envList(m)
 }
 
 // run executes a job that has been taken off the queue (or admitted as a service).
 func (s *Server) run(j *job) {
-	dir, sb := s.jobDir(j.ID), s.sandboxDir(j.ID)
-	argv := j.Argv
-	if j.Script != "" {
-		argv = []string{"bash", "-c", j.Script}
-	}
-	cache := filepath.Join(s.cfg.DataDir, "cache")
-	spec := sandbox.Spec{
-		Mode: s.cfg.Sandbox, Argv: argv, Env: s.env(j), Dir: filepath.Join(sb, "work", j.Cwd),
-		Root: sb, Tmp: filepath.Join(sb, "tmp"), DataDir: s.cfg.DataDir, PrivateNet: s.cfg.PrivateNet,
-		Caches: []string{filepath.Join(cache, "go-build"), filepath.Join(cache, "gomod"), filepath.Join(cache, "xdg")},
-	}
-	fail := func(msg string) {
-		s.mu.Lock()
-		s.finish(j, api.Failed, nil, nil, msg)
-		s.mu.Unlock()
-	}
-	if fi, err := os.Stat(spec.Dir); err != nil || !fi.IsDir() {
-		fail(fmt.Sprintf("cwd %q does not exist in the workspace", j.Cwd))
-		return
-	}
-	logs, err := s.openLogs(dir)
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	defer logs.close()
+	p, err := newProc(execSpec{
+		DataDir: s.cfg.DataDir, ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: s.env(j),
+		TimeoutSec: j.TimeoutSec, Sandbox: s.cfg.Sandbox, PrivateNet: s.cfg.PrivateNet, MaxLog: s.cfg.MaxLog, KillGrace: s.cfg.KillGrace,
+	})
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.finish(j, api.Failed, nil, nil, err.Error())
+		return
+	}
 	if s.closed {
-		s.mu.Unlock()
+		p.abort()
 		return
 	}
 	if j.cancelReq { // canceled after leaving the queue, before starting
+		p.abort()
 		s.finish(j, api.Canceled, nil, nil, "canceled before it started")
-		s.mu.Unlock()
 		return
 	}
-	cmd, jnet, err := sandbox.Start(spec, logs.Stdout, logs.Stderr)
-	logs.started()
-	if err != nil {
+	if err := p.start(); err != nil {
 		s.finish(j, api.Failed, nil, nil, "starting command: "+err.Error())
-		s.mu.Unlock()
 		return
 	}
-	pid := cmd.Process.Pid
-	j.net = jnet
+	j.net = p.net
 	now := time.Now().UTC()
 	j.State, j.StartedAt = api.Running, &now
 	s.persist(j)
-	endState := api.Exited
-	killed := make(chan struct{})
-	j.kill = func(state string) { // called with s.mu held
-		if endState != api.Exited {
-			return // already being killed
-		}
-		endState = state
-		if state == "" {
-			endState = "crash"
-		}
-		syscall.Kill(-pid, syscall.SIGTERM)
-		close(killed)
-	}
+	j.kill = p.kill // called with s.mu held
 	s.mu.Unlock()
-
-	waitDone := make(chan struct{})
-	go func() {
-		select {
-		case <-waitDone:
-			return
-		case <-killed:
-		}
-		select {
-		case <-waitDone:
-		case <-time.After(s.cfg.KillGrace):
-			syscall.Kill(-pid, syscall.SIGKILL)
-		}
-	}()
-	timeout := time.Duration(j.TimeoutSec) * time.Second
-	if timeout == 0 {
-		timeout = 1<<63 - 1 // none (services)
-	}
-	timer := time.AfterFunc(timeout, func() {
-		s.mu.Lock()
-		if j.kill != nil {
-			j.kill(api.Timeout)
-		}
-		s.mu.Unlock()
-	})
-	err = cmd.Wait()
-	timer.Stop()
-	close(waitDone)
-	syscall.Kill(-pid, syscall.SIGKILL) // reap stragglers left in the group
-	logs.wait()
-	if jnet != nil {
+	res := p.wait()
+	if p.net != nil {
 		s.mu.Lock()
 		j.net = nil
 		s.mu.Unlock()
-		jnet.Close()
-	}
-
-	var code, sig *int
-	if ps := cmd.ProcessState; ps != nil {
-		if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-			n := int(ws.Signal())
-			sig = &n
-		} else {
-			n := ps.ExitCode()
-			code = &n
-		}
+		p.net.Close()
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	msg := ""
-	switch endState {
-	case "crash":
+	if res.State == "crash" {
 		j.kill = nil // leave state as running: the next server marks it failed
 		return
-	case api.Timeout:
-		msg = fmt.Sprintf("timed out after %ds", j.TimeoutSec)
-	case api.Canceled:
-		msg = "canceled"
 	}
-	if err != nil && code == nil && sig == nil {
-		msg = err.Error()
-	}
-	s.finish(j, endState, code, sig, msg)
+	s.finish(j, res.State, res.Code, res.Sig, res.Msg)
 }
 
 // logs serves GET /v1/jobs/{id}/stdout|stderr?offset=N&follow=1&tail=N. With tail, the

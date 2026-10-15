@@ -41,6 +41,12 @@ type Config struct {
 	GCInterval                    time.Duration // 0: derived from the Keep* durations
 	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
 	MaxLog                        int64         // max bytes kept per stdout/stderr; 0: unlimited
+
+	// Runners (see hub.go). HubOnly: no local job slots (tun serve --local-slots 0), so
+	// non-service jobs run only on runners; MaxJobs is then ignored.
+	HubOnly         bool
+	RunnerPollWait  time.Duration // how long a runner's poll waits for work; default 25s
+	RunnerDeadAfter time.Duration // a runner silent for this long is lost; default 30s
 }
 
 // Server is the tun server. Create with New, serve with Handler, stop with Close.
@@ -51,9 +57,11 @@ type Server struct {
 	mu      sync.Mutex
 	jobs    map[string]*job
 	queue   []*job // FIFO of queued jobs
-	running int
+	running int    // local non-service jobs
 	svc     services
+	runners map[string]*runnerState
 	closed  bool
+	quit    chan struct{} // closed by Close
 	wg      sync.WaitGroup
 	gc      gcState
 }
@@ -67,6 +75,16 @@ type job struct {
 	// cancelReq is set by a cancel that arrives after the job left the queue (or, for a
 	// service, was admitted) but before run started it; run then finishes it as canceled.
 	cancelReq bool
+
+	// Runner jobs (see hub.go).
+	assignedAt time.Time  // given to a runner, which has not started it yet (state queued)
+	killReq    string     // end state the hub asked the runner for (canceled)
+	killReqAt  time.Time  //
+	logMu      sync.Mutex // serializes log chunk writes
+	// Outcome of the runner collecting the declared outputs.
+	OutMissing []string `json:"out_missing,omitempty"`
+	OutSkipped []string `json:"out_skipped,omitempty"`
+	OutError   string   `json:"out_error,omitempty"`
 }
 
 // New opens (creating if needed) the data dir, loads the token and existing jobs, and marks
@@ -75,6 +93,17 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxJobs < 1 {
 		cfg.MaxJobs = 1
 	}
+	if cfg.HubOnly {
+		cfg.MaxJobs = 0
+	}
+	if cfg.RunnerDeadAfter <= 0 {
+		cfg.RunnerDeadAfter = 30 * time.Second
+	}
+	if cfg.RunnerPollWait <= 0 {
+		cfg.RunnerPollWait = 25 * time.Second
+	}
+	// A runner is seen at least once per poll wait, so it must be shorter than the timeout.
+	cfg.RunnerPollWait = min(cfg.RunnerPollWait, cfg.RunnerDeadAfter*5/6)
 	if cfg.MaxServices < 1 {
 		cfg.MaxServices = 4
 	}
@@ -94,7 +123,7 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 	}
-	s := &Server{cfg: cfg, jobs: map[string]*job{}}
+	s := &Server{cfg: cfg, jobs: map[string]*job{}, runners: map[string]*runnerState{}, quit: make(chan struct{})}
 	if s.token, err = loadToken(filepath.Join(dir, "token")); err != nil {
 		return nil, err
 	}
@@ -102,6 +131,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s.startGC()
+	s.startReaper()
 	return s, nil
 }
 
@@ -150,6 +180,11 @@ func (s *Server) recover() error {
 		if err := json.Unmarshal(b, j); err != nil || j.ID != e.Name() {
 			continue
 		}
+		if j.State == api.Running && isRunnerJob(j) {
+			s.jobs[j.ID] = j // the runner may still be running it
+			s.adopt(j)
+			continue
+		}
 		if !api.Terminal(j.State) {
 			j.Error = fmt.Sprintf("server restarted while job was %s", j.State)
 			j.State = api.Failed
@@ -169,6 +204,9 @@ func (s *Server) recover() error {
 // would; the next server on this data dir marks them failed.
 func (s *Server) Close() {
 	s.mu.Lock()
+	if !s.closed {
+		close(s.quit)
+	}
 	s.closed = true
 	for _, j := range s.jobs {
 		if j.kill != nil {
@@ -225,8 +263,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
-		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, NetworkIsolation: s.cfg.PrivateNet, MaxJobs: s.cfg.MaxJobs, MaxServices: s.cfg.MaxServices,
-			Running: s.running, Queued: len(s.queue), Services: s.svc.running}
+		slots, running, runners := s.runnerInfo()
+		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, NetworkIsolation: s.cfg.PrivateNet, MaxJobs: s.cfg.MaxJobs + slots,
+			MaxServices: s.cfg.MaxServices, Running: s.running + running, Queued: len(s.queue), Services: s.svc.running,
+			LocalSlots: s.cfg.MaxJobs, Runners: runners}
 		s.mu.Unlock()
 		writeJSON(w, 200, h)
 	})
@@ -246,6 +286,12 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("HEAD /v1/blobs/{sha}", auth(s.headBlob))
 	mux.HandleFunc("PUT /v1/blobs/{sha}", auth(s.putBlob))
+	mux.HandleFunc("GET /v1/blobs/{sha}", auth(s.getBlob))
+	mux.HandleFunc("POST /v1/runner/poll", auth(s.runnerPoll))
+	mux.HandleFunc("POST /v1/runner/jobs/{id}/started", auth(s.runnerStarted))
+	mux.HandleFunc("POST /v1/runner/jobs/{id}/done", auth(s.runnerDone))
+	mux.HandleFunc("PUT /v1/runner/jobs/{id}/outputs", auth(s.runnerOutputs))
+	mux.HandleFunc("POST /v1/runner/jobs/{id}/{stream}", auth(s.runnerLog))
 	mux.HandleFunc("POST /v1/jobs", auth(s.createJob))
 	mux.HandleFunc("GET /v1/jobs", auth(s.listJobs))
 	mux.HandleFunc("GET /v1/jobs/{id}", auth(s.getJob))
@@ -422,8 +468,17 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		}
 		if queued {
 			s.finish(j, api.Canceled, nil, nil, "canceled while queued")
+		} else if isRunnerJob(j) { // assigned; the runner's .../started will be refused
+			s.finish(j, api.Canceled, nil, nil, "canceled before it started")
 		} else {
 			j.cancelReq = true // run() owns it now and will finish it before starting
+		}
+	case isRunnerJob(j) && j.State == api.Running:
+		if j.killReq == "" {
+			j.killReq, j.killReqAt = api.Canceled, time.Now()
+			if rn := s.runners[j.Runner]; rn != nil {
+				rn.poke()
+			}
 		}
 	case j.kill != nil:
 		j.kill(api.Canceled)
@@ -449,4 +504,7 @@ func (s *Server) finish(j *job, state string, code, sig *int, msg string) {
 	}
 	s.serviceDone(j)
 	close(j.done)
+	if isRunnerJob(j) {
+		s.runnerJobEnded(j)
+	}
 }

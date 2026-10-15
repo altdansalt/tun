@@ -118,6 +118,7 @@ func (s *Server) sweep(now time.Time) {
 		if !s.remove(s.sandboxDir(j.ID)) {
 			continue
 		}
+		os.Remove(filepath.Join(s.jobDir(j.ID), outputsFile)) // a runner job's files
 		s.mu.Lock()
 		if s.jobs[j.ID] == j {
 			j.WorkDeleted = true

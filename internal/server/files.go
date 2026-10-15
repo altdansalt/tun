@@ -56,8 +56,13 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if snap := s.snapshot(j); !api.Terminal(snap.State) {
+	snap := s.snapshot(j)
+	if !api.Terminal(snap.State) {
 		writeErr(w, 409, fmt.Sprintf("job %s is %s; files can be fetched once it has ended", snap.ID, snap.State))
+		return
+	}
+	if snap.Runner != "" && snap.Runner != api.LocalRunner {
+		s.runnerFiles(w, j, paths)
 		return
 	}
 	root, err := s.openWork(j.ID)
@@ -115,8 +120,10 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 
 // openWork opens the job's sandbox/work dir as a Root without following symlinks at any
 // level: the job can replace sandbox/work (or, under sandbox none, anything) with a link.
-func (s *Server) openWork(id string) (*os.Root, error) {
-	r, err := os.OpenRoot(filepath.Join(s.cfg.DataDir, "jobs"))
+func (s *Server) openWork(id string) (*os.Root, error) { return openWorkDir(s.cfg.DataDir, id) }
+
+func openWorkDir(dataDir, id string) (*os.Root, error) {
+	r, err := os.OpenRoot(filepath.Join(dataDir, "jobs"))
 	if err != nil {
 		return nil, err
 	}

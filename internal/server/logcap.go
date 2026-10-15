@@ -21,7 +21,7 @@ type jobLogs struct {
 
 // openLogs opens dir/stdout and dir/stderr and starts the copiers. Call started once the
 // child has (or has failed to) start, and wait after the job's processes are gone.
-func (s *Server) openLogs(dir string) (*jobLogs, error) {
+func openLogs(dir string, maxLog int64) (*jobLogs, error) {
 	l := &jobLogs{}
 	for _, name := range []string{"stdout", "stderr"} {
 		f, err := openOwn(filepath.Join(dir, name), os.O_WRONLY|os.O_APPEND, 0)
@@ -44,7 +44,7 @@ func (s *Server) openLogs(dir string) (*jobLogs, error) {
 		l.wg.Add(1)
 		go func() {
 			defer l.wg.Done()
-			copyCapped(f, r, s.cfg.MaxLog, name)
+			copyCapped(f, r, maxLog, name)
 		}()
 	}
 	return l, nil
