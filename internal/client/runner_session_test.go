@@ -115,6 +115,13 @@ func TestRunnerSessionCancelTimeoutSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts.waitFor(j.ID, func(j api.Job) bool { return j.State == api.Running })
+	// Admission precedes sandbox startup; wait for the command before asserting
+	// that cancellation retains an idle warm session (an unstarted lease can vanish).
+	eventually(t, "session command started", func() bool {
+		var out bytes.Buffer
+		_, err := c.Logs(context.Background(), j.ID, "stdout", 0, false, &out)
+		return err == nil && strings.Contains(out.String(), "cmd=sleep")
+	})
 	if _, err := c.Cancel(context.Background(), j.ID); err != nil {
 		t.Fatal(err)
 	}
