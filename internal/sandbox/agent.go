@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -240,12 +239,15 @@ func (ss *Session) Run(argv []string, dir string, stdout, stderr *os.File) (<-ch
 		}
 	}
 	m, err := next(time.After(30 * time.Second))
-	if err == nil && m.Op != "started" {
-		err = fmt.Errorf("starting %s: %s", argv[0], m.Error)
-	}
 	if err != nil {
+		// The agent may still answer later; replies must never attach to another command.
+		ss.Kill()
 		ss.mu.Unlock()
 		return nil, err
+	}
+	if m.Op != "started" {
+		ss.mu.Unlock()
+		return nil, fmt.Errorf("starting %s: %s", argv[0], m.Error)
 	}
 	res := make(chan Result, 1)
 	go func() {
@@ -287,5 +289,3 @@ func (ss *Session) Kill() {
 	syscall.Kill(-ss.cmd.Process.Pid, syscall.SIGKILL)
 	<-ss.done
 }
-
-var _ io.Closer = (*os.File)(nil)

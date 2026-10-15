@@ -82,16 +82,16 @@ func (s *Server) tooBig(n int64) string {
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var req api.CreateJob
-	body := io.Reader(http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload))
+	body, limit := io.Reader(http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload)), int64(8<<20)
 	if r.Header.Get("Content-Encoding") == "gzip" { // tun bazel's manifests
 		z, err := gzip.NewReader(body)
 		if err != nil {
 			writeErr(w, 400, "bad job JSON: "+err.Error())
 			return
 		}
-		body = z
+		body, limit = z, 256<<20
 	}
-	dec := json.NewDecoder(io.LimitReader(body, 256<<20))
+	dec := json.NewDecoder(io.LimitReader(body, limit))
 	if err := dec.Decode(&req); err != nil {
 		writeErr(w, 400, "bad job JSON: "+err.Error())
 		return

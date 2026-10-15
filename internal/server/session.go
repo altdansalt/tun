@@ -30,6 +30,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -180,7 +181,7 @@ func (s *Server) missingBlobs(m []api.ManifestEntry) []string {
 		switch {
 		case err != nil:
 			missing = append(missing, e.Sha)
-		case now.Sub(fi.ModTime()) > time.Hour:
+		case now.Sub(fi.ModTime()) > min(time.Hour, max(s.cfg.KeepBlobs/2, time.Second)):
 			os.Chtimes(s.casPath(e.Sha), now, now)
 		}
 	}
@@ -220,7 +221,7 @@ func (s *Server) claimSession(j *job) bool {
 			if o.stopping {
 				return false // an eviction is under way; wait for it
 			}
-			if o.job == nil && (victim == nil || o.LastUsed.Before(victim.LastUsed)) {
+			if o.job == nil && !s.queuedFor(o) && (victim == nil || o.LastUsed.Before(victim.LastUsed)) {
 				victim = o
 			}
 		}
@@ -235,6 +236,12 @@ func (s *Server) claimSession(j *job) bool {
 	s.sessions[sess.ID] = sess
 	sess.job = j
 	return true
+}
+
+// queuedFor reports whether a queued job waits for sess (it must not be evicted or expire
+// under it). Caller holds s.mu.
+func (s *Server) queuedFor(sess *session) bool {
+	return slices.ContainsFunc(s.queue, func(j *job) bool { return j.SessionID == sess.ID })
 }
 
 // stopSession shuts down sess's Bazel server and sandbox and deletes it, in the background.
@@ -279,7 +286,7 @@ func (s *Server) expireSessions(now time.Time) {
 		return
 	}
 	for _, sess := range s.sessions {
-		if sess.job == nil && !sess.stopping && now.Sub(sess.LastUsed) > s.cfg.SessionIdle {
+		if sess.job == nil && !sess.stopping && now.Sub(sess.LastUsed) > s.cfg.SessionIdle && !s.queuedFor(sess) {
 			s.stopSession(sess, fmt.Sprintf("idle for %v (tun serve --session-idle)", s.cfg.SessionIdle))
 		}
 	}
@@ -419,9 +426,14 @@ func (s *Server) ensureSandbox(sess *session, spec sandbox.Spec) (bool, error) {
 		// A previous sandbox's Bazel server is gone with its pid namespace; its pid/port files
 		// would name processes of another namespace. (Without bwrap they are host pids, and a
 		// server that outlived a tun restart is still valid.)
-		os.RemoveAll(filepath.Join(dir, "sandbox", "out", "base", "server"))
+		// out is writable by the sandbox: never follow its links (os.Root).
+		if root, err := os.OpenRoot(filepath.Join(dir, "sandbox", "out")); err == nil {
+			root.RemoveAll("base/server")
+			root.Close()
+		}
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	// A new log per sandbox (O_TRUNC), so it can't grow over the life of the session.
+	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return false, err
 	}
@@ -488,24 +500,31 @@ func (br *bazelRun) kill(state string, grace time.Duration) {
 		br.endState = "crash"
 	}
 	close(br.killed)
-	if sb := br.sb; sb != nil {
-		if state == "" {
-			go sb.Kill()
-			return
-		}
-		sb.Signal(syscall.SIGINT)
-		later := func(f func()) func() {
-			return func() {
-				select {
-				case <-br.done:
-				default:
-					f()
-				}
+	if br.sb != nil {
+		br.escalate(state == "", grace)
+	}
+}
+
+// escalate ends the started command: at once with the sandbox (crash), else SIGINT, SIGKILL
+// after grace, the sandbox after twice that unless the command ended. Caller holds br.mu.
+func (br *bazelRun) escalate(crash bool, grace time.Duration) {
+	sb := br.sb
+	if crash {
+		go sb.Kill()
+		return
+	}
+	sb.Signal(syscall.SIGINT)
+	later := func(f func()) func() {
+		return func() {
+			select {
+			case <-br.done:
+			default:
+				f()
 			}
 		}
-		time.AfterFunc(grace, later(func() { sb.Signal(syscall.SIGKILL) }))
-		time.AfterFunc(2*grace, later(sb.Kill))
 	}
+	time.AfterFunc(grace, later(func() { sb.Signal(syscall.SIGKILL) }))
+	time.AfterFunc(2*grace, later(sb.Kill))
 }
 
 // runBazel runs bazel job j, which holds its session: sync, then the command in the
@@ -658,28 +677,33 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 		say("session %s: started a new session sandbox (Bazel server starts with this command)", sess.Name)
 	}
 	argv := append(append([]string{s.cfg.BazelCommand}, s.startupOptions(p)...), b.Args...)
-	br.mu.Lock()
-	if br.endState != "" {
-		br.mu.Unlock()
+	if killed() {
 		endLogs()
 		return procResult{State: api.Canceled}
 	}
+	// Not under br.mu: Run may wait for the agent, and kill is called with s.mu held.
 	resc, err := sess.sb.Run(argv, dir, logs.Stdout, logs.Stderr)
-	if err == nil {
-		br.sb = sess.sb
-	}
-	br.mu.Unlock()
 	if err != nil {
 		return fail("session %s: %v", sess.Name, err)
 	}
+	br.mu.Lock()
+	br.sb = sess.sb
+	if br.endState != "" { // killed while starting: deliver it now
+		br.escalate(br.endState == "crash", s.cfg.KillGrace)
+	}
+	br.mu.Unlock()
 	logs.started()
 	r := <-resc
 	logs.wait()
 	if r.Err != nil {
 		tail := ""
-		if b, err := os.ReadFile(filepath.Join(s.sessionDir(sess.ID), "agent.log")); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-			tail = strings.Join(lines[max(0, len(lines)-5):], " | ")
+		if f, err := openOwn(filepath.Join(s.sessionDir(sess.ID), "agent.log"), os.O_RDONLY, 0); err == nil {
+			if off, err := tailStart(f, 5); err == nil {
+				b := make([]byte, 4096)
+				n, _ := f.ReadAt(b, off)
+				tail = strings.ReplaceAll(strings.TrimSpace(string(b[:n])), "\n", " | ")
+			}
+			f.Close()
 		}
 		return procResult{State: api.Failed, Msg: fmt.Sprintf("session %s: %v (agent.log: %s)", sess.Name, r.Err, tail)}
 	}

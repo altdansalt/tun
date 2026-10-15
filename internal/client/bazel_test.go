@@ -248,12 +248,24 @@ func TestBazelSessionBwrap(t *testing.T) {
 	if ss := ts.sessions(); len(ss) != 1 || !ss[0].Server {
 		t.Fatalf("sessions: %+v", ss)
 	}
+	// The sandbox controls out/: a link planted there must not make the server delete
+	// a host dir when it clears a dead server's files.
+	outside := t.TempDir()
+	write(t, filepath.Join(outside, "server", "keep"), "x", 0o644)
+	base := filepath.Join(ts.data, "sessions", ts.sessions()[0].ID, "sandbox", "out", "base")
+	os.RemoveAll(base)
+	if err := os.Symlink(outside, base); err != nil {
+		t.Fatal(err)
+	}
 	// A server restart ends the sandbox (and the daemon in it); the session dir stays.
 	ts.stop()
 	ts = bazelServer(t, cfg, false)
 	r = ts.tun(ws, "bazel", "build")
 	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || !strings.Contains(r.stderr, "2 unchanged") {
 		t.Fatalf("after restart: %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "server", "keep")); err != nil {
+		t.Fatalf("server deleted a dir outside the session through a link: %v", err)
 	}
 }
 
