@@ -29,6 +29,13 @@ on the server: they survive --cold and session expiry, and other clients can't t
 output streams back; the exit status is Bazel's (124 on --timeout, 125 for tun's own errors,
 as for tun run). Bazel startup options of your own are not supported.
 
+Remote cache: when the server has one (tun serve's default), the rc file also points Bazel at
+it (--remote_cache through a unix socket in the session; no token or network needed), so a
+new or --cold session, or one on another host later, gets cache hits for what this client
+built before. Action results you upload are yours: other clients don't see them. The
+session's first line says "remote cache: tun's, ..." when it is on. To build without it for
+one command, pass --remote_cache= (empty) like any Bazel flag.
+
 A session is (this client, this workspace, NAME): a persistent copy of the workspace on the
 server at a fixed path (/work), Bazel's output base, and a Bazel server that stays up between
 commands, so the second command skips Bazel's startup and reuses its analysis cache. Commands

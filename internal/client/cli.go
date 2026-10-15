@@ -88,6 +88,7 @@ chance to cancel, the job keeps running and 'tun logs -f <id>' reattaches. SIGIN
 cancel the job and exit 128+signal.
 If the server is busy (it runs --max-jobs jobs at once, FIFO), tun run prints once
 "tun: queued (N ahead, M running)" and, when the job starts, "tun: started after Xs in queue".
+Then "tun: running on hub" (the server itself) or "tun: running on runner NAME" says where.
 On completion stderr ends with "tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)".
 Workspace diagnostics show compressed bytes uploaded or already on the server.
 The job object's queue_sec and run_sec (tun status, and in --json) show where time went.
