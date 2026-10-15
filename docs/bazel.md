@@ -559,3 +559,68 @@ session names still serialize concurrent commands; automatic unnamed-session spl
 live JVM migration and remote lease recovery after a hub restart remain future work.
 Two runner processes in one dev job share physical resources: this measures protocol and
 retention behavior, not the throughput of two independent 4GB machines.
+
+### Placement measurements (2026-10-15)
+
+Command (all work inside a tun job; no shared server deployment):
+
+```
+tun run --timeout 15m -c 'DEV_TUN_SERVE_ARGS="--local-slots 0 --runner-timeout 3s" scripts/dev-tun.sh scripts/bench-placement.sh'
+```
+
+The script starts two runner processes with separate data dirs, each one job slot;
+`--max-sessions=2` per host. It generates 200 trivial genrules under a temporary workspace,
+with every Bazel output base inside the job's TMPDIR. Outer job
+`20261015T113853982116-eb0454df` ran on tun-r2; all steps exited 0:
+
+| Step | Host | Wall | Action behavior | Private-server job |
+|---|---|---:|---|---|
+| New alpha, empty cache | b | 48.887s | 200 linux-sandbox | `20261015T113902365453-73e65de1` |
+| Warm alpha | b | 3.291s | no actions | `20261015T113951182220-7a64dbb0` |
+| New beta, separate host/cache dirs | a | 39.988s | 200 remote cache hits | `20261015T113954480733-52f16f62` |
+| New gamma; three simultaneous retained sessions | a | 43.819s | 200 remote cache hits | `20261015T114034476729-bdceb2a0` |
+| Alpha after beta and gamma | b | **2.320s** | no actions; same warm JVM | `20261015T114118377294-f07c3ed3` |
+| Kill b; recreate alpha on a | a | 42.777s | 200 remote cache hits | `20261015T114124068068-7ad354a8` |
+| Warm recreated alpha | a | 5.095s | no actions | `20261015T114206780060-411d0599` |
+
+Before host loss, `tun sessions` showed alpha on b and beta/gamma on a: three JVMs
+retained beyond the former global two-session limit. Losing b moved alpha to a and evicted
+beta there, leaving gamma and alpha, respecting a's maximum of two. Placement queue times
+were 1–4ms in this run. The three cold cached builds each reported all 200 remote hits and
+no local actions. These trivial actions do not establish a useful cache-versus-execution
+speedup: cold JVM/analysis and host load dominate their wall times.
+
+An earlier two-session run, outer job `20261015T113327205286-24c898b7` on tun-r2,
+measured 32.271s seed; 2.517s warm alpha; 35.207s beta on a second runner (200 remote
+hits); 2.397s retained alpha; 42.296s moved alpha (200 remote hits); 4.904s warm again.
+An isolated in-process real-Bazel test in `20261015T113033771891-0e597ee1` measured
+10.2s seed and 10.3s moved rebuild with a remote cache hit. Later runs of the same test
+under shared-host load took 29.9/37.5s (`20261015T113655569050-7f1a73a3`). Thus the
+previous 12–15s cold-cache measurements are achievable observations, not a placement SLA;
+this exercise observed 10–44s for cold cached sessions, and did not measure independent
+physical-runner throughput or rerun the three external customer repositories.
+
+Expected effect: capacity grows with eligible hosts instead of stopping at two globally,
+up to `--max-sessions * hosts` subject to memory/disk; unrelated sessions can run on
+independent hosts, while repeat commands retain JVM/analysis state. The demonstrated
+benefit is preserving alpha's 2.320s warm request after a third session, avoiding an eviction
+and another cold start. Host loss still pays JVM/analysis startup, but reuses the client's
+hub action cache rather than executing its cached actions again.
+
+Validation: full vet/build/race tests plus both CLI smoke suites passed in
+`20261015T113239837300-0552ac47` (397.665s). Additional placement, serialization,
+streaming, per-host capacity, credential revocation and cross-host real-cache checks passed
+in `20261015T113655569050-7f1a73a3` (91.799s). The final sync-deadline regression and
+cold-session metadata checks passed in `20261015T114209081325-0266b8fd` (26.106s).
+Follow-up vet/build, focused race checks and both smoke suites passed in
+`20261015T114042863948-8ab096a9` (161.991s). Final vet/build plus real cross-host
+cache and stalled-sync timeout checks passed in `20261015T114315276575-7e381701`
+(104.701s). Gazelle regenerated BUILD files in `20261015T113351284471-8588ce2e` (444.014s).
+
+Tun friction: full Go test output can stay at a few package lines for minutes while a
+package runs; `--tail` heartbeats and `tun logs` distinguish liveness but not which test is
+active. The cold Gazelle invocation compiled its SDK stdlib and took 444s; a direct
+`bazel run //:gazelle` does not automatically inherit bazel-ci.sh's disk/repository-cache
+flags. Two private runner processes still share their outer job's CPUs/memory, so their
+cold build times vary greatly with other work on the shared host. No shared service was
+restarted or replaced.
