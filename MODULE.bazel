@@ -6,4 +6,10 @@ bazel_dep(name = "rules_shell", version = "0.8.0")
 
 # Hermetic Go SDK: the go.mod language version (go 1.25), latest patch release.
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
-go_sdk.download(version = "1.25.14")
+go_sdk.download(
+    name = "go_sdk",
+    version = "1.25.14",
+)
+
+# Tests run go in jobs (internal/client) and in the e2e suites: they use this SDK too.
+use_repo(go_sdk, "go_sdk")

@@ -18,7 +18,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-(cd "$root" && go build -o "$tmp/tun" ./cmd/tun)
+# DEV_TUN_BIN: use this tun binary instead of building the working tree (Bazel's e2e tests).
+if [ -n "${DEV_TUN_BIN:-}" ]; then
+  cp "$DEV_TUN_BIN" "$tmp/tun"
+else
+  (cd "$root" && go build -o "$tmp/tun" ./cmd/tun)
+fi
 # A FIFO makes readiness explicit and EOF shuts the server down if this wrapper dies.
 mkfifo "$tmp/env" "$tmp/stdin"
 exec 3<>"$tmp/stdin"
