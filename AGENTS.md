@@ -1,6 +1,6 @@
 # Working on tun
 
-Read SPEC.md first. tun is a Go (stdlib-only) remote execution service for coding agents.
+Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is a Go (stdlib-only) remote execution service for coding agents.
 
 ## Building and testing
 - **Build and test with tun itself** (a shared tun server is at $TUN_URL, or the default local address; the

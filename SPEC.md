@@ -1,5 +1,7 @@
 # tun v0 spec
 
+> Direction for v1 (Bazel-native remote execution): docs/bazel.md. This file describes what exists.
+
 tun is a remote execution service whose clients are autonomous coding agents. An agent in a
 checkout runs `tun run -- <cmd>`; tun ships the working tree to a server, runs the command in an
 isolated per-job sandbox, streams stdout/stderr back, and exits with the command's exit status.
