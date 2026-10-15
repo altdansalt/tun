@@ -35,7 +35,8 @@ func TestBazelRemoteExecution(t *testing.T) {
 	if !sandbox.BwrapUsable() {
 		t.Skip("bwrap unusable (without it a Bazel server would outlive the test)")
 	}
-	store, err := reapi.Open(t.TempDir(), 1<<30)
+	cacheDir := t.TempDir()
+	store, err := reapi.Open(cacheDir, 1<<30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +98,23 @@ func TestBazelRemoteExecution(t *testing.T) {
 		t.Fatalf("cancel: %+v", r)
 	}
 
-	// A new session finds the executors' results in the shared action cache.
-	r = ts.tun(ws, "bazel", "--cold", "build", "//...")
-	if r.code != 0 || !strings.Contains(r.stderr, "4 remote cache hit") || out("g1.txt") != "two\n1\n" {
-		t.Fatalf("--cold: %+v", r)
+	// The executors' results are in the shared action cache namespace ("ac-<digest>", which
+	// every client reads), not the session client's own. (A new session's Bazel takes long to
+	// start on a loaded host; TestBazelReal covers hits after --cold.)
+	ents, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, own := 0, 0
+	for _, e := range ents {
+		switch {
+		case strings.HasPrefix(e.Name(), "ac-"):
+			shared++
+		case strings.HasPrefix(e.Name(), "acc-"):
+			own++
+		}
+	}
+	if shared != 8 || own != 0 {
+		t.Fatalf("action cache: %d shared, %d in client namespaces; want 8 and 0", shared, own)
 	}
 }
