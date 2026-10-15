@@ -186,3 +186,82 @@ No change to the agreed direction. The explicit C++ host-toolchain exception and
 bounded target scope are exercise limitations, recorded here and linked from
 [bazel.md](bazel.md). Prioritize runner session placement/retention, then artifact
 access and M3 execution; retain remote cache automation as the default.
+
+## Tun measurement ledger
+
+Manifest and blob columns are bytes reported by `tun: sync`; zero blob bytes still
+incur manifest traffic. Job IDs work with `tun status ID` and `tun logs --stderr ID`
+while shared-server retention keeps them. Names are local measurement identifiers;
+`warm-immediate` was the intended experiment, not proof that the session survived.
+
+| Run | Wall s | Queue s | Job run s | Manifest B | Blobs B | Job ID |
+|---|---:|---:|---:|---:|---:|---|
+| gazelle-cold | 32.00 | 0.001 | 30.308 | 192246 | 3297739 | `20261015T111255368637-aed7e8d6` |
+| gazelle-cold-corrected | 290.815 | 62.976 | 227.542 | 96127 | 0 | `20261015T111346772019-53da4337` |
+| gazelle-warm | 30.930 | 29.072 | 1.607 | 96135 | 0 | `20261015T111808227351-53016933` |
+| gazelle-edit | 1.789 | 0.013 | 1.617 | 192278 | 1850 | `20261015T111839129730-2bc748d7` |
+| gazelle-warm-immediate | 42.535 | 0.000 | 42.256 | 96139 | 0 | `20261015T111900163919-5fdaa994` |
+| gazelle-followup-queued | 3.685 | 3.165 | 0.415 | 96139 | 0 | `20261015T111939256180-76394f55` |
+| gazelle-noop-final | 0.622 | 0.001 | 0.513 | 96139 | 0 | `20261015T111942996348-f8e70d23` |
+| gtest-cold | 81.62 | 1.797 | 79.345 | 25838 | 952862 | `20261015T111326872750-45732021` |
+| gtest-warm | 98.751 | 56.867 | 41.603 | 12904 | 0 | `20261015T111454944044-19150eca` |
+| gtest-warm-immediate | 4.291 | 0.002 | 4.103 | 12904 | 0 | `20261015T111654474361-a7479c6c` |
+| gtest-edit | 6.100 | 0.000 | 5.964 | 25818 | 2347 | `20261015T111658905402-bcf255a5` |
+| python-cold | 93.911 | 2.493 | 89.614 | 213966 | 2092377 | `20261015T111712892443-f1b81911` |
+| python-warm | 4.903 | 2.616 | 2.164 | 106976 | 0 | `20261015T111852994741-ec8458fc` |
+| python-edit | 6.195 | 0.000 | 5.908 | 213956 | 204 | `20261015T111858172399-e4b1600d` |
+
+Exact final tun summary lines, in the same order (only the first run failed):
+
+```text
+gazelle-cold
+tun: bazel test exit=1 after 29.8s: build incomplete or failed (BUILD_FAILURE)
+gazelle-cold-corrected
+tun: bazel test exit=0 after 226.5s: 1 tests passed
+gazelle-warm
+tun: bazel test exit=0 after 0.9s: 1 tests passed
+gazelle-edit
+tun: bazel test exit=0 after 1.5s: 1 tests passed
+gazelle-warm-immediate
+tun: bazel test exit=0 after 40.1s: 1 tests passed
+gazelle-followup-queued
+tun: bazel test exit=0 after 0.4s: 1 tests passed
+gazelle-noop-final
+tun: bazel test exit=0 after 0.5s: 1 tests passed
+gtest-cold
+tun: bazel test exit=0 after 79.3s: 1 tests passed
+gtest-warm
+tun: bazel test exit=0 after 41.4s: 1 tests passed
+gtest-warm-immediate
+tun: bazel test exit=0 after 4.1s: 1 tests passed
+gtest-edit
+tun: bazel test exit=0 after 6.0s: 1 tests passed
+python-cold
+tun: bazel test exit=0 after 88.6s: 1 tests passed
+python-warm
+tun: bazel test exit=0 after 2.0s: 1 tests passed
+python-edit
+tun: bazel test exit=0 after 5.9s: 1 tests passed
+```
+
+## BuildBuddy measurement ledger
+
+All exit 0. Links distinguish outer remote-run job from the inner Bazel invocation.
+Upload/sync byte counts were not exposed, so no byte comparison is claimed.
+
+| Run | Wall s | Bazel elapsed s | Remote run | Bazel invocation |
+|---|---:|---:|---|---|
+| bb-gazelle-cold | 139.09 | 110.334 | [eb6f8e56-6dcf-4457-ae2a-4678119d45d5](https://app.buildbuddy.dev/invocation/eb6f8e56-6dcf-4457-ae2a-4678119d45d5) | [f5d63d41-bb62-4421-a820-f6525060cf69](https://app.buildbuddy.dev/invocation/f5d63d41-bb62-4421-a820-f6525060cf69) |
+| bb-gazelle-warm | 73.276 | 56.024 | [bfd5fc52-ba71-44bf-8231-b59ab81a8834](https://app.buildbuddy.dev/invocation/bfd5fc52-ba71-44bf-8231-b59ab81a8834) | [f6d0e492-f9d0-4f95-a9c9-f6adfa78714e](https://app.buildbuddy.dev/invocation/f6d0e492-f9d0-4f95-a9c9-f6adfa78714e) |
+| bb-gazelle-edit | 10.870 | 1.824 | [dc205d78-4856-4565-8210-aa2cd7080175](https://app.buildbuddy.dev/invocation/dc205d78-4856-4565-8210-aa2cd7080175) | [523f3104-61a9-4316-a35a-a37743f258ea](https://app.buildbuddy.dev/invocation/523f3104-61a9-4316-a35a-a37743f258ea) |
+| bb-gtest-cold | 58.372 | 40.724 | [20717ba8-0f39-4884-94a6-f6f6ae2aaa0b](https://app.buildbuddy.dev/invocation/20717ba8-0f39-4884-94a6-f6f6ae2aaa0b) | [025ff4f0-c77b-420e-8935-6bc52664a3ea](https://app.buildbuddy.dev/invocation/025ff4f0-c77b-420e-8935-6bc52664a3ea) |
+| bb-gtest-warm | 40.487 | 12.280 | [f72b0e61-68ee-45ee-984d-d6c17aa22283](https://app.buildbuddy.dev/invocation/f72b0e61-68ee-45ee-984d-d6c17aa22283) | [c515c720-8c58-4565-9a95-c5cb2fa05f04](https://app.buildbuddy.dev/invocation/c515c720-8c58-4565-9a95-c5cb2fa05f04) |
+| bb-gtest-edit | 13.171 | 3.330 | [1d92b251-974c-442d-9f9e-412db8cd09cf](https://app.buildbuddy.dev/invocation/1d92b251-974c-442d-9f9e-412db8cd09cf) | [2ae5625b-58fd-4984-bb2a-6f0ca02c6c9f](https://app.buildbuddy.dev/invocation/2ae5625b-58fd-4984-bb2a-6f0ca02c6c9f) |
+| bb-python-cold | 56.425 | 33.587 | [d3804d6e-78e3-4f4c-ae1e-6b8f74187afd](https://app.buildbuddy.dev/invocation/d3804d6e-78e3-4f4c-ae1e-6b8f74187afd) | [72b89543-3e54-41df-95d1-27d6acf21ec0](https://app.buildbuddy.dev/invocation/72b89543-3e54-41df-95d1-27d6acf21ec0) |
+| bb-python-warm | 48.971 | 30.886 | [d8d7cfd1-ba9f-45a4-9c65-7830deabfca5](https://app.buildbuddy.dev/invocation/d8d7cfd1-ba9f-45a4-9c65-7830deabfca5) | [2fe2f778-3488-4630-9c7f-8b0b1f006013](https://app.buildbuddy.dev/invocation/2fe2f778-3488-4630-9c7f-8b0b1f006013) |
+| bb-python-edit | 14.575 | 4.906 | [c2c055fd-9e44-4ce4-9b01-4ea22b2a9e5a](https://app.buildbuddy.dev/invocation/c2c055fd-9e44-4ce4-9b01-4ea22b2a9e5a) | [d1f2175f-2427-4e03-8961-ce34ca307611](https://app.buildbuddy.dev/invocation/d1f2175f-2427-4e03-8961-ce34ca307611) |
+
+BuildBuddy edits reported 6 linux-sandbox actions (Go), 3 (C++), and 3
+(Python, including Pyrefly and two shards). Unchanged repeats reported 19 / 31 / 3
+remote cache hits respectively. The inner logs showed new Bazel servers on those
+repeats; edit invocations reused analysis (0 packages loaded).
