@@ -5,7 +5,7 @@ import "context"
 const runnersUsage = `usage: tun runners
 
 Print the server's live runners (machines running its jobs via tun runner), one JSON object
-per line: {name, slots, running, last_seen, sandbox, source}. Nothing if it has none; its
+per line: {name, slots, running, last_seen, sandbox, network_isolation, source}. Nothing if it has none; its
 own job slots are local_slots in $TUN_URL/v1/healthz.
 `
 

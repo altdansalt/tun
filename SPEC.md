@@ -38,6 +38,7 @@ tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>      
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
+           [--net auto|private|host]
 tun runners                       (JSON lines: the server's live runners)
 ```
 `tun logs --tail N`: only the last N lines (a final line without a newline counts); with `-f`,
@@ -224,7 +225,9 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   `--name` (default hostname; unique per hub, it becomes the job's `runner`), `--data DIR`
   (default `~/.local/share/tun-runner`: blob cache, job dirs, shared build caches; a tun serve
   data dir is refused; job dirs left by a previous runner process are deleted at start),
-  `--sandbox` as for serve. Token: `--token-file`, else `$TUN_TOKEN`, else
+  `--sandbox` and `--net auto|private|host` as for serve: with a private network the runner
+  runs the job's network helper and serves its egress proxy itself, so the job's HTTP(S)
+  traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
   `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
   (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
   work, kills its jobs and reports them `failed` ("runner N shut down"); a second signal quits
@@ -237,7 +240,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   of a 413 at creation). With local slots the hub unpacks at creation as before (and deletes
   its copy once a runner starts the job).
 - Protocol (all runner-initiated, bearer auth, `X-Tun-Runner: <name>` on job requests):
-  - `POST /v1/runner/poll` `{name, instance, seq, slots, running: [ids], sandbox}` long-polls
+  - `POST /v1/runner/poll` `{name, instance, seq, slots, running: [ids], sandbox, network_isolation}` long-polls
     (up to 25s) and is the heartbeat. `instance` is random per runner process; `seq` grows
     with each poll and a poll at or below the highest seen is answered empty and ignored (a
     delayed request must not undo newer state). The answer
@@ -288,7 +291,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   message. Retention deletes the tar with the work dir (`--keep-work`, then 410). Hub-local
   jobs keep serving any path from the work dir.
 - `GET /v1/healthz` adds `local_slots` and `runners: [{name, slots, running, last_seen,
-  sandbox, source}]`; `tun runners` prints them as JSON lines.
+  sandbox, network_isolation, source}]`; `tun runners` prints them as JSON lines.
 - Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
   workspace; a runner-only credential (any token holder can act as a runner, and read any
   blob by sha with `GET /v1/blobs/{sha}`, though every token holder is already fully trusted).

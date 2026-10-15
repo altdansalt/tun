@@ -31,7 +31,9 @@ work, kills its jobs and reports them failed.
 
 The token is the hub's client token (for now; a separate runner credential is future work):
 --token-file, else $TUN_TOKEN, else ~/.config/tun/token. With --sandbox none a job can read
-it, like on the hub.
+it, like on the hub. With --net private (auto picks it when it works) each job has its own
+network namespace and reaches out only over HTTP(S), through a proxy run by this runner (the
+job's traffic leaves from the runner host).
 
 flags:
 `
@@ -64,6 +66,34 @@ func resolveSandbox(mode string) (string, error) {
 	return "", fmt.Errorf("--sandbox must be auto, bwrap or none, got %q", mode)
 }
 
+// resolveNet decides whether jobs get a private network namespace (--net auto|private|host
+// with the resolved sandbox mode), warning on stderr where isolation is missing.
+func resolveNet(netMode, mode string, stderr io.Writer) (bool, error) {
+	switch netMode {
+	case "auto", "private":
+		if mode != sandbox.Bwrap {
+			if netMode == "private" {
+				return false, fmt.Errorf("--net private needs --sandbox bwrap")
+			}
+			return false, nil
+		}
+		err := sandbox.NetUsable()
+		if err != nil && netMode == "private" {
+			return false, fmt.Errorf("--net private: cannot give jobs a private network namespace: %v (try --net host)", err)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "tun: warning: no network isolation (bwrap --unshare-net with the tun helper failed: %v): jobs share the host network, so any job can reach services' ports without the token (healthz: \"network_isolation\": false)\n", err)
+		}
+		return err == nil, nil
+	case "host":
+		if mode == sandbox.Bwrap {
+			fmt.Fprintln(stderr, "tun: warning: --net host: jobs share the host network, so any job can reach services' ports without the token")
+		}
+		return false, nil
+	}
+	return false, fmt.Errorf("--net must be auto, private or host, got %q", netMode)
+}
+
 // RunnerMain implements `tun runner`. It returns the process exit code.
 func RunnerMain(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("runner", flag.ContinueOnError)
@@ -75,6 +105,7 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	name := fs.String("name", host, "runner name, unique per hub (shown as the job's \"runner\")")
 	data := fs.String("data", DefaultRunnerDataDir(), "data dir (blob cache, job dirs, build caches); not a tun serve data dir")
 	mode := fs.String("sandbox", "auto", "auto|bwrap|none, as for tun serve")
+	netMode := fs.String("net", "auto", "auto|private|host, as for tun serve: private gives each job its own network namespace, with outbound HTTP(S) through a proxy this runner serves")
 	fs.Usage = func() { fmt.Fprint(stderr, runnerUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -114,12 +145,20 @@ func RunnerMain(args []string, stderr io.Writer) int {
 	if sb == sandbox.None {
 		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
 	}
+	private, err := resolveNet(*netMode, sb, stderr)
+	if err != nil {
+		return fail("%v", err)
+	}
 	logf := func(format string, a ...any) { fmt.Fprintf(stderr, format+"\n", a...) }
-	r, err := NewRunner(RunnerConfig{Hub: *hub, Token: token, Name: *name, Slots: *slots, DataDir: *data, Sandbox: sb, Logf: logf})
+	r, err := NewRunner(RunnerConfig{Hub: *hub, Token: token, Name: *name, Slots: *slots, DataDir: *data, Sandbox: sb, PrivateNet: private, Logf: logf})
 	if err != nil {
 		return fail("runner: %v", err)
 	}
-	logf("tun runner: %s polling %s (slots %d, sandbox %s, data %s)", *name, *hub, *slots, sb, r.cfg.DataDir)
+	netDesc := "host"
+	if private {
+		netDesc = "private"
+	}
+	logf("tun runner: %s polling %s (slots %d, sandbox %s, net %s, data %s)", *name, *hub, *slots, sb, netDesc, r.cfg.DataDir)
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)

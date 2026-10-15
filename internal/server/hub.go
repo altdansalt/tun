@@ -40,6 +40,7 @@ import (
 // runnerState is the hub's view of one runner. Guarded by Server.mu.
 type runnerState struct {
 	name, instance, sandbox, source string
+	privateNet                      bool
 	slots                           int
 	lastSeen                        time.Time
 	jobs                            map[string]*job // assigned to it and not ended
@@ -211,6 +212,7 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 		s.runners[name] = rn
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
+	rn.privateNet = p.NetworkIsolation
 	return rn, nil
 }
 
@@ -546,7 +548,7 @@ func (s *Server) runnerInfo() (slots, running int, list []api.RunnerInfo) {
 		slots += rn.slots
 		running += len(rn.jobs)
 		list = append(list, api.RunnerInfo{Name: rn.name, Slots: rn.slots, Running: len(rn.jobs),
-			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source})
+			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet})
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].Name < list[b].Name })
 	return slots, running, list

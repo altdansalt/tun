@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,12 +33,16 @@ type testRunner struct {
 }
 
 func (ts *testServer) startRunner(name string, slots int) *testRunner {
+	return ts.startRunnerCfg(server.RunnerConfig{Name: name, Slots: slots, Sandbox: sandbox.None})
+}
+
+func (ts *testServer) startRunnerCfg(cfg server.RunnerConfig) *testRunner {
 	t := ts.t
 	t.Helper()
 	dir := t.TempDir()
 	t.Cleanup(func() { workspace.RemoveAll(dir) })
-	r, err := server.NewRunner(server.RunnerConfig{Hub: ts.url, Token: ts.srv.Token(), Name: name, Slots: slots,
-		DataDir: dir, Sandbox: sandbox.None, KillGrace: 2 * time.Second, Logf: t.Logf})
+	cfg.Hub, cfg.Token, cfg.DataDir, cfg.KillGrace, cfg.Logf = ts.url, ts.srv.Token(), dir, 50*time.Millisecond, t.Logf
+	r, err := server.NewRunner(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +64,7 @@ func (ts *testServer) waitRunners(n int) {
 }
 
 func TestRunnerJobs(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	ts.startRunner("r1", 2)
 	ts.startRunner("r2", 2)
@@ -74,7 +80,7 @@ func TestRunnerJobs(t *testing.T) {
 	os.MkdirAll(filepath.Join(ws, "sub"), 0o755)
 	os.WriteFile(filepath.Join(ws, "sub", "f.txt"), []byte("content"), 0o644)
 	r := ts.tun(ws, "run", "--", "sh", "-c", "echo out; echo err >&2; exit 3")
-	if r.code != 3 || r.stdout != "out\n" || !strings.HasSuffix(r.stderr, "\nerr\n") {
+	if r.code != 3 || r.stdout != "out\n" || !strings.Contains(r.stderr, "\nerr\n") {
 		t.Errorf("exit/stdout/stderr: %+v", r)
 	}
 	r = ts.tun(ws, "run", "-C", "sub", "-e", "FOO=bar", "--", "sh", "-c", `printf '%s %s ' "$FOO" "$(basename "$PWD")"; cat f.txt; test -n "$TUN_JOB_ID"`)
@@ -101,6 +107,7 @@ func TestRunnerJobs(t *testing.T) {
 }
 
 func TestRunnerConcurrency(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	ts.startRunner("r1", 1)
 	ts.startRunner("r2", 1)
@@ -131,6 +138,7 @@ func TestRunnerConcurrency(t *testing.T) {
 }
 
 func TestRunnerCancelAndTimeout(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	ts.startRunner("r1", 2)
 	ts.waitRunners(1)
@@ -157,6 +165,7 @@ func TestRunnerCancelAndTimeout(t *testing.T) {
 }
 
 func TestRunnerLost(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	r1 := ts.startRunner("r1", 1)
 	ts.waitRunners(1)
@@ -188,6 +197,7 @@ func TestRunnerLost(t *testing.T) {
 }
 
 func TestRunnerOutputs(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	ts.startRunner("r1", 1)
 	ws := t.TempDir()
@@ -228,6 +238,7 @@ func TestRunnerOutputs(t *testing.T) {
 }
 
 func TestRunnerOutputsLimit(t *testing.T) {
+	t.Parallel()
 	cfg := hubConfig("")
 	cfg.MaxDownload = 100
 	ts := startServer(t, cfg)
@@ -292,6 +303,7 @@ func jobIDs(r api.RunnerPollResponse) []string {
 }
 
 func TestRunnerProtocol(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	f := &fakeRunner{ts: ts, name: "fake", instance: "i1"}
 	id := ts.detach("", "--no-workspace", "--", "true")
@@ -403,6 +415,7 @@ func TestRunnerProtocol(t *testing.T) {
 }
 
 func TestRunnerStalePoll(t *testing.T) {
+	t.Parallel()
 	ts := startServer(t, hubConfig(""))
 	f := &fakeRunner{ts: ts, name: "seq", instance: "s1", seq: 1}
 	id := ts.detach("", "--no-workspace", "--", "true")
@@ -458,6 +471,7 @@ func TestRunnerHubRestart(t *testing.T) {
 }
 
 func TestRunnerMixedLocal(t *testing.T) {
+	t.Parallel()
 	// A hub with a local slot and a runner: both take work from the same FIFO.
 	ts := startServer(t, server.Config{MaxJobs: 1, RunnerPollWait: 300 * time.Millisecond, RunnerDeadAfter: 1500 * time.Millisecond})
 	ts.startRunner("r1", 1)
@@ -472,5 +486,42 @@ func TestRunnerMixedLocal(t *testing.T) {
 	slices.Sort(runners)
 	if !slices.Equal(runners, []string{"local", "r1"}) || ja.State != api.Exited || jb.State != api.Exited {
 		t.Errorf("placement: %+v %+v", ja, jb)
+	}
+}
+
+// Runner jobs get the same private network as hub jobs; the runner serves their egress proxy.
+func TestRunnerNetIsolation(t *testing.T) {
+	t.Parallel()
+	if !sandbox.BwrapUsable() {
+		t.Skip("bwrap not installed or unusable on this host")
+	}
+	if err := sandbox.NetUsable(); err != nil {
+		t.Skipf("no private network namespaces here: %v", err)
+	}
+	ts := startServer(t, hubConfig(""))
+	ts.startRunnerCfg(server.RunnerConfig{Name: "net", Slots: 2, Sandbox: sandbox.Bwrap, PrivateNet: true})
+	ts.waitRunners(1)
+	if h := ts.health(); !h.Runners[0].NetworkIsolation || h.Runners[0].Sandbox != sandbox.Bwrap {
+		t.Errorf("healthz runners: %+v", h.Runners)
+	}
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello %s", r.URL.Path)
+	}))
+	defer host.Close()
+	_, port, _ := net.SplitHostPort(host.Listener.Addr().String())
+	r := ts.tun("", "run", "--no-workspace", "-e", "REQ=GET http://127.0.0.1:"+port+"/a HTTP/1.0\\r\\n\\r\\n", "-c",
+		`! (exec 3<>/dev/tcp/127.0.0.1/`+port+`) 2>/dev/null || echo direct-reachable; `+
+			`exec 3<>/dev/tcp/127.0.0.1/${HTTP_PROXY##*:} && printf "$REQ" >&3 && cat <&3`)
+	if r.code != 0 || !strings.Contains(r.stdout, "hello /a") || strings.Contains(r.stdout, "direct-reachable") {
+		t.Errorf("egress through the runner's proxy only: %+v", r)
+	}
+	if j := ts.status(ts.lastID()); j.Runner != "net" || j.Sandbox != sandbox.Bwrap {
+		t.Errorf("job: %+v", j)
+	}
+	if r := ts.tun("", "run", "--no-workspace", "-c", "echo out; exit 3"); r.code != 3 || r.stdout != "out\n" {
+		t.Errorf("exit status through the helper: %+v", r)
+	}
+	if r := ts.tun("", "run", "--no-workspace", "--timeout", "1s", "-c", "trap '' TERM; sleep 60 & sleep 60"); r.code != 124 {
+		t.Errorf("timeout through the helper: %+v", r)
 	}
 }

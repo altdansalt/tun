@@ -145,29 +145,9 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *mode == sandbox.None {
 		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
 	}
-	private := false
-	switch *netMode {
-	case "auto", "private":
-		if *mode != sandbox.Bwrap {
-			if *netMode == "private" {
-				return fail("--net private needs --sandbox bwrap")
-			}
-			break
-		}
-		err := sandbox.NetUsable()
-		if err != nil && *netMode == "private" {
-			return fail("--net private: cannot give jobs a private network namespace: %v (try --net host)", err)
-		}
-		private = err == nil
-		if err != nil {
-			fmt.Fprintf(stderr, "tun: warning: no network isolation (bwrap --unshare-net with the tun helper failed: %v): jobs share the host network, so any job can reach services' ports without the token (healthz: \"network_isolation\": false)\n", err)
-		}
-	case "host":
-		if *mode == sandbox.Bwrap {
-			fmt.Fprintln(stderr, "tun: warning: --net host: jobs share the host network, so any job can reach services' ports without the token")
-		}
-	default:
-		return fail("--net must be auto, private or host, got %q", *netMode)
+	private, err := resolveNet(*netMode, *mode, stderr)
+	if err != nil {
+		return fail("%v", err)
 	}
 	if *localSlots >= 0 {
 		*maxJobs = *localSlots

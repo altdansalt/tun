@@ -24,21 +24,25 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/workspace"
 )
 
 // RunnerConfig configures a Runner.
 type RunnerConfig struct {
-	Hub       string // hub base URL
-	Token     string // sent as X-Tun-Token (the hub's client token, for now)
-	Name      string
-	Slots     int
-	DataDir   string // blob cache, job dirs, shared build caches
-	Sandbox   string // sandbox.Bwrap or sandbox.None (already resolved)
-	KillGrace time.Duration
-	KeepBlobs time.Duration // cached workspace blobs unused this long are deleted; default 24h
-	HTTP      *http.Client
-	Logf      func(format string, a ...any) // default: discard
+	Hub     string // hub base URL
+	Token   string // sent as X-Tun-Token (the hub's client token, for now)
+	Name    string
+	Slots   int
+	DataDir string // blob cache, job dirs, shared build caches
+	Sandbox string // sandbox.Bwrap or sandbox.None (already resolved)
+	// PrivateNet (bwrap only): a network namespace per job, egress through an HTTP(S) proxy
+	// this runner serves (check sandbox.NetUsable first).
+	PrivateNet bool
+	KillGrace  time.Duration
+	KeepBlobs  time.Duration // cached workspace blobs unused this long are deleted; default 24h
+	HTTP       *http.Client
+	Logf       func(format string, a ...any) // default: discard
 }
 
 // Runner is a running tun runner. Create with NewRunner, run with Run; stop with Shutdown
@@ -88,6 +92,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		cfg.Logf = func(string, ...any) {}
 	}
 	cfg.Hub = strings.TrimRight(cfg.Hub, "/")
+	if cfg.Sandbox != sandbox.Bwrap {
+		cfg.PrivateNet = false
+	}
 	dir, err := filepath.Abs(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -250,7 +257,8 @@ func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
 func (r *Runner) poll() (api.RunnerPollResponse, error) {
 	r.mu.Lock()
 	r.seq++
-	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox, Running: []string{}}
+	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox,
+		NetworkIsolation: r.cfg.PrivateNet, Running: []string{}}
 	for id := range r.jobs {
 		req.Running = append(req.Running, id)
 	}
@@ -361,7 +369,7 @@ func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
 	p, err := newProc(execSpec{
 		DataDir: r.cfg.DataDir, ID: spec.ID, Argv: spec.Argv, Script: spec.Script, Cwd: spec.Cwd,
 		Env: envList(jobEnv(r.cfg.DataDir, spec.ID, spec.Env)), TimeoutSec: spec.TimeoutSec,
-		Sandbox: r.cfg.Sandbox, MaxLog: spec.MaxLog, KillGrace: r.cfg.KillGrace,
+		Sandbox: r.cfg.Sandbox, PrivateNet: r.cfg.PrivateNet, MaxLog: spec.MaxLog, KillGrace: r.cfg.KillGrace,
 	})
 	if err != nil {
 		return failed("%v", err), done
@@ -410,6 +418,9 @@ func (r *Runner) execute(j *runnerJob) (procResult, api.RunnerDone) {
 		}
 	}()
 	res := p.wait()
+	if p.net != nil {
+		p.net.Close()
+	}
 	close(stop)
 	<-shipped
 	if res.State == "crash" {

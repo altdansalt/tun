@@ -55,6 +55,19 @@ code=0
 tun get -o "$tmp/got" "$id" input 2>"$tmp/get.err" || code=$?
 [ "$code" -eq 125 ] && grep -q -- "--out input" "$tmp/get.err" || fail "tun get of an undeclared path: $code $(cat "$tmp/get.err")"
 
+# With network isolation (when bwrap --unshare-net works here, as on the hub), runner jobs
+# have their own network namespace: no direct connection to the host's ports, and HTTP out
+# only through the egress proxy the runner serves.
+if curl -fsS "$TUN_URL/v1/healthz" | grep -q '"network_isolation":true'; then
+  [ "$(tun runners | grep -c '"network_isolation":true')" -eq 2 ] || fail "runners without isolation: $(tun runners)"
+  port=${TUN_URL##*:}
+  out=$(tun run --no-workspace -e "REQ=GET $TUN_URL/v1/healthz HTTP/1.0\r\n\r\n" -c \
+    "! (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null || echo direct-reachable
+     exec 3<>/dev/tcp/127.0.0.1/\${HTTP_PROXY##*:} && printf \"\$REQ\" >&3 && cat <&3")
+  [[ "$out" == *'"ok":true'* && "$out" != *direct-reachable* ]] || fail "isolated egress: $out"
+  echo 'e2e-runners: network isolation checked'
+fi
+
 # Both runners take work at once.
 a=$(tun run --detach --no-workspace -- sleep 3)
 b=$(tun run --detach --no-workspace -- sleep 3)

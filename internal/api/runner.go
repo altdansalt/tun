@@ -24,6 +24,8 @@ type RunnerPoll struct {
 	Slots   int      `json:"slots"`   // jobs the runner runs at once
 	Running []string `json:"running"` // job ids the runner holds (received and not yet reported done)
 	Sandbox string   `json:"sandbox"` // the runner's sandbox mode (bwrap|none)
+	// NetworkIsolation: the runner gives each job its own network namespace (--net private).
+	NetworkIsolation bool `json:"network_isolation"`
 }
 
 // RunnerPollResponse is the hub's answer: jobs to start and job ids to kill and drop.
@@ -69,10 +71,11 @@ type RunnerDone struct {
 
 // RunnerInfo describes a live runner in GET /v1/healthz.
 type RunnerInfo struct {
-	Name     string    `json:"name"`
-	Slots    int       `json:"slots"`
-	Running  int       `json:"running"` // jobs assigned to it and not yet ended
-	LastSeen time.Time `json:"last_seen"`
-	Sandbox  string    `json:"sandbox,omitempty"`
-	Source   string    `json:"source,omitempty"` // who connected (exe.dev source VM, else IP)
+	Name             string    `json:"name"`
+	Slots            int       `json:"slots"`
+	Running          int       `json:"running"` // jobs assigned to it and not yet ended
+	LastSeen         time.Time `json:"last_seen"`
+	Sandbox          string    `json:"sandbox,omitempty"`
+	NetworkIsolation bool      `json:"network_isolation"`
+	Source           string    `json:"source,omitempty"` // who connected (exe.dev source VM, else IP)
 }
