@@ -857,17 +857,23 @@ sums it (`execution.input_fetch_sec` etc.). `scripts/bench-rbe.sh build` (`bazel
 |---|---|---|---|---|
 | copy every input | 216.3s elapsed | 165.1s | 3.1s (33.9s / 11) | 20261015T120047873986-6a0d09c2 |
 | tree cache (below) | 266.4s | 260.4s | 1.5s (17.0s / 11) | 20261015T125227334862-7f3f3996 |
+| tree cache, again | 174.1s | 64.8s | 1.0s (10.6s / 11) | 20261015T141912585028-f34c31d1 |
 
-(The second run's host was busier: local went from 165s to 260s. Compare within a row.)
+(Host load differs a lot between runs: local took 165s, 260s and 65s. Compare within a row:
+on a quiet host local execution wins by far, since the executors add no CPU and each remote
+Go action spends seconds in its input phase and uploads its outputs.)
 
 **Tree cache** (internal/reapi/treecache.go): an input directory of 64+ files or 4MB+ that an
 action names the second time with the same digest is materialized once per executor data dir
 (`action-trees/`, verified while copied, LRU within 2GB, deleted at startup) and bound
 read-only into later exec roots instead of copied; the topmost such directory is taken (a
 varying `external/` is not, the SDK under it is). Never a directory that holds an output or
-the working dir. Remote is now at parity with local execution for this build on the same
-2-CPU host (the executors share its CPUs, so remote can't be faster here); the remaining
-1.5s per action is unexplained (smaller copied inputs, the first sighting of each tree).
+the working dir. The input phase halved, but the build is still slower remotely than locally on
+the same 2-CPU host (the executors share its CPUs, so remote can't be faster here); the
+executor's log of the third run names the rest: the stdlib build's 5515 files copied on first
+sight (48s on that busy disk), a link action copying 155MB of archives, and input phases of
+2-6s with nothing copied (reading and verifying a few hundred Directory messages while 3
+actions use the 2 CPUs).
 
 ### Fixes from the review of feat/bazel-sessions
 
