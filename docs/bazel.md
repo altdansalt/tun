@@ -351,3 +351,29 @@ equivalent but noncanonical protobuf made Bazel 9.3.0 crash in parseDirectory
 fields by number and omits false executable bits and zero digest sizes. Regressions
 cover exact canonical bytes, mixed nested file/directory trees and empty files and
 directories, plus a real Bazel tree-producing action and a dependent action.
+
+Corrected self-build succeeded in job `20261015T085626697154-490ef40b`:
+**330.740s wall**, Bazel elapsed **328.005s**, critical path **267.96s**,
+**118 processes: 44 internal, 74 remote**. The overlay was M0 commit
+`abd610e8053cb7398400a91f7bd0791c444ae16f`; package library sources/dependencies
+were refreshed for this execution branch. The downloaded Go 1.25.14 SDK was
+shipped as CAS inputs and ran with network disabled. No toolchain-environment
+failure remained after the Directory encoding fix. This is a cold build under
+shared-host load, including analysis, SDK setup and stdlib compilation; it is not
+a warm-session measurement. The earlier 240s self-build budget was insufficient
+(`20261015T084415612968-3e8f39fa`); the reproducible script now allows 600s with a
+hard kill grace and an outer tun timeout.
+
+Final **full** vet/build/race tests, both real Bazel integrations (including the
+nested mixed output Tree), exact environment/network isolation, cache reuse,
+and both CLI smoke suites passed in `20261015T085657372388-505fd9c8`:
+283.089s running after 88.216s queued. The standalone canonical-encoding and real
+Bazel Tree regressions also passed in `20261015T085609309999-7933381d`.
+
+Tun friction observed: shared capacity produced 25.599s and 88.216s queue waits;
+concurrent cold Go/Bazel builds substantially changed timings (full CI ranged
+from roughly 1–5 minutes). `--tail` plus explicit job IDs made finished runs easy
+to inspect, but redirected nested benchmark logs were unavailable through the
+parent's stdout until the script exited. REAPI executor jobs currently have
+empty v0 stdout/stderr files because their logs live in CAS; operation/stage/CAS
+log inspection in the CLI is useful follow-up work.
