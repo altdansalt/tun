@@ -536,3 +536,23 @@ handler. No historical hub/proxy logs or goroutine/resource traces were availabl
 so overload versus another bug remains undetermined. State persistence and some
 responses still run under the hub mutex; the test does not exclude disk stalls or
 slow response writers. No shared server was restarted.
+
+Validation of the merged tree: full vet/build/race tests (including real Bazel)
+and both CLI smoke suites passed in tun job
+`20261015T094423233532-c3ea51a8`: **527.658s** run time, 5.609s queued;
+client package 345.023s, REAPI 445.823s, server 120.019s.
+Focused disk-pressure/mount checks passed in
+`20261015T094014563979-4c9dc4b9` (19.701s), and the Bazel/session diagnostic
+passed in `20261015T094933108093-62ad2742` (client package 51.307s).
+
+Tun friction: an earlier full run, `20261015T094025566091-2fc64155`,
+was interrupted after 222.113s by "runner tun-r2 shut down while the job was
+running". All four runners resumed polling. Five subsequent hub health samples
+returned HTTP 200 in 75.8, 22.4, 26.4, 18.0 and 22.2ms; this shutdown did not
+reproduce the earlier sustained health outage. The successful full run used a
+hub-local slot and was much slower than the previous branch validation; no CPU
+or memory trace was collected to attribute that difference. Normal go test output
+was silent while packages ran; TEST_FLAGS='-json -run TestBazel' exposed live
+test progress for the diagnostic. A precautionary BuildBuddy fallback invocation
+(ca7d054a-9f74-4210-a41a-44ddc56e6783) was canceled after tun CI passed.
+Superseded local iterations were canceled as well.
