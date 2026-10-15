@@ -5,6 +5,7 @@ package sandbox
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,10 +25,10 @@ type Spec struct {
 	Mode    string
 	Argv    []string
 	Env     []string
-	Dir     string   // working directory (inside JobDir)
-	JobDir  string   // read-write: the job's own dir (work, home, tmp)
+	Dir     string   // working directory (inside Root)
+	Root    string   // read-write: the job's own tree (work, home, tmp); nothing server-owned
 	Tmp     string   // the job's tmp dir; also mounted at /tmp under bwrap
-	DataDir string   // the server data dir: hidden under bwrap except JobDir and Caches
+	DataDir string   // the server data dir: hidden under bwrap except Root and Caches
 	Caches  []string // read-write shared cache dirs
 }
 
@@ -42,23 +43,52 @@ func BwrapUsable() bool {
 		"--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "true").Run() == nil
 }
 
-// Command returns an unstarted command for s, in its own process group.
-func Command(s Spec) *exec.Cmd {
+// Start starts the command for s in its own process group, with the given stdout/stderr.
+//
+// Under bwrap, the job's env is applied inside the sandbox (--clearenv/--setenv) and bwrap
+// itself runs with an empty env, so client-supplied vars like LD_PRELOAD can't act on the
+// unsandboxed bwrap process. The options travel over a pipe (--args) rather than argv, so
+// env values don't show up in the host's process list.
+func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
+	var opts *os.File
 	if s.Mode == Bwrap {
-		cmd = exec.Command("bwrap", append(bwrapArgs(s), s.Argv...)...)
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		opts = w
+		defer r.Close() // the child has its own copy once started
+		cmd = exec.Command("bwrap", append([]string{"--args", "3", "--"}, s.Argv...)...)
+		cmd.Env = []string{}
+		cmd.ExtraFiles = []*os.File{r}
 	} else {
 		cmd = exec.Command(s.Argv[0], s.Argv[1:]...)
 		cmd.Dir = s.Dir
+		cmd.Env = s.Env
 	}
-	cmd.Env = s.Env
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
-	return cmd
+	if err := cmd.Start(); err != nil {
+		if opts != nil {
+			opts.Close()
+		}
+		return nil, err
+	}
+	if opts != nil {
+		data := strings.Join(bwrapArgs(s), "\x00") + "\x00"
+		go func() { // the pipe may be smaller than the env; bwrap reads it all before anything else
+			io.WriteString(opts, data)
+			opts.Close()
+		}()
+	}
+	return cmd, nil
 }
 
 // bwrapArgs: read-only root, fresh /dev /proc and pid namespace, the job's tmp at /tmp,
-// the server user's home and the data dir hidden behind tmpfs, then the job dir and shared
-// caches bound back read-write at their real paths (so env paths are valid inside).
+// the server user's home and the data dir hidden behind tmpfs, then the job's tree and shared
+// caches bound back read-write at their real paths (so env paths are valid inside), and the
+// job's env. Values must not contain NUL (the server rejects such jobs).
 func bwrapArgs(s Spec) []string {
 	a := []string{"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
 		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
@@ -79,11 +109,16 @@ func bwrapArgs(s Spec) []string {
 			}
 		}
 	}
-	a = append(a, "--tmpfs", s.DataDir, "--bind", s.JobDir, s.JobDir)
+	a = append(a, "--tmpfs", s.DataDir, "--bind", s.Root, s.Root)
 	for _, c := range s.Caches {
 		a = append(a, "--bind", c, c)
 	}
-	return append(a, "--chdir", s.Dir, "--")
+	a = append(a, "--clearenv")
+	for _, kv := range s.Env {
+		k, v, _ := strings.Cut(kv, "=")
+		a = append(a, "--setenv", k, v)
+	}
+	return append(a, "--chdir", s.Dir)
 }
 
 func within(p, dir string) bool {

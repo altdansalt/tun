@@ -38,8 +38,9 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
 ## Workspace
 - Root = `git rev-parse --show-toplevel` of the client's cwd; if not in git, the cwd itself.
 - Files = in git: `git ls-files -z --cached --others --exclude-standard` (tracked + untracked-not-ignored,
-  deleted-but-tracked files skipped); not in git: walk the dir, skipping `.git`. Keep file modes and
-  symlinks (symlinks stored as links; server refuses links that are absolute or escape the root).
+  deleted-but-tracked files skipped); not in git: walk the dir, skipping `.git`. Keep file and
+  directory modes and symlinks (symlinks stored as links; server refuses links that are absolute or
+  resolve outside the root, including via chains of other links in the workspace).
   `.git` itself is not shipped in v0.
 - Packed as tar.gz, content addressed by sha256 of the bytes. Client `HEAD /v1/blobs/<sha>`;
   `PUT` only if missing. Size limit (default 512MB, server flag) with a clear error.
@@ -47,17 +48,27 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
   device files.
 
 ## Execution and isolation
-- Each job: `$DATA/jobs/<id>/` containing `work/` (the workspace), `home/`, `tmp/`, `stdout`,
-  `stderr`, `job.json` (spec + state). Job ids: sortable, unique (time prefix + random).
+- Each job: `$DATA/jobs/<id>/` containing the server's files `stdout`, `stderr`, `job.json`
+  (spec + state), and `sandbox/` with `work/` (the workspace), `home/`, `tmp/`. Only `sandbox/` is
+  given to the job; server-owned files are never inside anything the job can write, and the server
+  opens them without following symlinks (and refuses hard-linked ones). Job ids: sortable, unique
+  (time prefix + random).
 - Env: a small base (`PATH`, `LANG`, `TERM=dumb`, `HOME=<job home>`, `TMPDIR=<job tmp>`, `USER`),
   plus shared build caches (`GOCACHE`, `GOMODCACHE`, `XDG_CACHE_HOME` pointing to `$DATA/cache/...`,
   shared across jobs because these tools are safe under concurrency), plus `-e` vars (which win).
   Also `TUN_JOB_ID`.
-- Sandbox `bwrap` (default when `bwrap` works, `auto`): root filesystem read-only, job dir and shared cache dirs
-  read-write, the job's home/tmp mounted at the same paths as in env, `/dev` `/proc` fresh, new pid
-  namespace, `--die-with-parent`; network allowed (builds fetch modules). Jobs cannot see or write
-  each other's directories, or the server's data dir/token. `none`: plain subprocess in its own process group
-  (for hosts without bwrap); still per-job dirs.
+- Sandbox `bwrap` (default when `bwrap` works, `auto`): root filesystem read-only, the job's
+  `sandbox/` dir and shared cache dirs read-write, the job's home/tmp mounted at the same paths as in
+  env, `/dev` `/proc` fresh, new pid namespace, `--die-with-parent`; network allowed (builds fetch
+  modules). Jobs cannot see or write each other's directories, their own job.json/logs, or the
+  server's data dir/token. The job env is set inside the sandbox (`--clearenv`/`--setenv`, passed
+  via `--args <fd>`): bwrap itself runs with an empty env, so `-e LD_PRELOAD=...` can't affect the
+  unsandboxed bwrap process, and env values don't appear in host `ps`. Shared caches are writable by
+  every job, so a job can poison them for later jobs.
+- `none`: plain subprocess in its own process group (for hosts without bwrap); still per-job dirs,
+  but **no isolation at all**: the job runs as the server user with the server's filesystem access,
+  so it can read `$DATA/token`, other jobs' workspaces and logs, and rewrite job state. Use it only
+  when every job is as trusted as the server operator.
 - `--max-jobs` (default NumCPU) jobs run at once; the rest queue FIFO (state `queued`).
 - Timeout and cancel kill the entire process group (SIGTERM, then SIGKILL after 10s).
 - State machine: queued -> running -> exited | failed (couldn't start) | timeout | canceled.
@@ -68,12 +79,16 @@ stderr that starts with `tun:`. On SIGINT/SIGTERM the client cancels the job and
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.
 - `POST /v1/jobs` `{argv|script, cwd, env, timeout_sec, workspace}` -> job object (201).
+  `timeout_sec` <= 0 means the default (1800); over 604800 (7 days) is a 400. NUL bytes in
+  argv/script/cwd/env and env names that are empty or contain `=` are a 400. The body must be
+  exactly one JSON object.
 - `GET /v1/jobs/{id}` -> job object `{id, state, exit_code, signal, created_at, started_at, ended_at, argv, script, cwd, error}`.
 - `GET /v1/jobs?limit=N` -> list. `POST /v1/jobs/{id}/cancel`.
 - `GET /v1/jobs/{id}/stdout?offset=N&follow=1` (and `/stderr`): raw bytes from offset; with follow,
   streams (flush as written) until the job ends and all bytes are sent. Reattachable at any offset.
 - `GET /v1/healthz` (no auth).
-Errors: JSON `{"error": "..."}` with proper status codes.
+Errors: JSON `{"error": "..."}` with proper status codes; malformed query parameters (`limit`,
+`offset` must be plain decimal integers, `follow` a boolean) are a 400.
 
 ## Tests (required)
 - Unit tests for workspace packing/unpacking (path safety, modes, symlinks, gitignore handling).

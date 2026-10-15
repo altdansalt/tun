@@ -25,6 +25,12 @@ the data dir. On first start it writes a bearer token to $DATA/token (0600); loc
 using the default data dir find it automatically. Jobs left queued/running by a previous
 server process are marked failed on startup.
 
+Sandboxes: bwrap (used by auto when it works) gives each job a read-only root, its own
+$DATA/jobs/<id>/sandbox dir and the shared caches, and hides the rest of the data dir (token,
+other jobs, its own logs/state) and the server user's home. none runs jobs as plain
+subprocesses of this server user: NO ISOLATION - a job can read the token and every other
+job's files. Use none only if every job is as trusted as whoever runs tun serve.
+
 flags:
 `
 
@@ -44,7 +50,7 @@ func Main(args []string, stderr io.Writer) int {
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once; the rest queue FIFO")
-	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host")
+	mode := fs.String("sandbox", "auto", "auto|bwrap|none: auto uses bwrap if it works on this host; none gives jobs no isolation from the server")
 	maxUpload := fs.String("max-upload", "512MB", "max workspace upload size (bytes, or with KB/MB/GB suffix)")
 	fs.Usage = func() { fmt.Fprint(stderr, serveUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
@@ -77,6 +83,9 @@ func Main(args []string, stderr io.Writer) int {
 	case sandbox.None:
 	default:
 		return fail("--sandbox must be auto, bwrap or none, got %q", *mode)
+	}
+	if *mode == sandbox.None {
+		fmt.Fprintln(stderr, "tun: warning: sandbox none: jobs run unisolated as this user and can read the token and other jobs' files")
 	}
 	s, err := New(Config{DataDir: *data, MaxJobs: *maxJobs, Sandbox: *mode, MaxUpload: limit})
 	if err != nil {

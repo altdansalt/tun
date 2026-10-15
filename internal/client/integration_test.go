@@ -21,6 +21,7 @@ import (
 	"github.com/altdansalt/tun/internal/api"
 	"github.com/altdansalt/tun/internal/sandbox"
 	"github.com/altdansalt/tun/internal/server"
+	"github.com/altdansalt/tun/internal/workspace"
 )
 
 // testServer is a real tun server on a random local port with a temp data dir.
@@ -38,6 +39,8 @@ func startServer(t *testing.T, cfg server.Config) *testServer {
 	t.Helper()
 	if cfg.DataDir == "" {
 		cfg.DataDir = t.TempDir()
+		dir := cfg.DataDir
+		t.Cleanup(func() { workspace.RemoveAll(dir) }) // before TempDir's: jobs may leave read-only dirs
 	}
 	if cfg.Sandbox == "" {
 		cfg.Sandbox = sandbox.None
@@ -207,7 +210,7 @@ func TestStdoutStderrAndEnv(t *testing.T) {
 	}
 	id := parts[6]
 	jobDir := filepath.Join(ts.data, "jobs", id)
-	want := []string{"a=b", "copied", "xterm", jobDir + "/home", jobDir + "/tmp", ts.data + "/cache/go-build", id, ""}
+	want := []string{"a=b", "copied", "xterm", jobDir + "/sandbox/home", jobDir + "/sandbox/tmp", ts.data + "/cache/go-build", id, ""}
 	for i := range want {
 		if parts[i] != want[i] {
 			t.Errorf("env field %d = %q, want %q", i, parts[i], want[i])

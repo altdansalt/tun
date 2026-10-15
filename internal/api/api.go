@@ -13,6 +13,9 @@ const (
 	Canceled = "canceled"
 )
 
+// MaxTimeoutSec is the largest timeout_sec the server accepts (7 days).
+const MaxTimeoutSec = 7 * 24 * 60 * 60
+
 // Terminal reports whether state is final.
 func Terminal(state string) bool {
 	return state != Queued && state != Running

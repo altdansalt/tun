@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -79,12 +80,21 @@ func (s *Server) tooBig(n int64) string {
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var req api.CreateJob
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
+	if err := dec.Decode(&req); err != nil {
 		writeErr(w, 400, "bad job JSON: "+err.Error())
+		return
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		writeErr(w, 400, "bad job JSON: unexpected data after the job object")
 		return
 	}
 	if (len(req.Argv) == 0) == (req.Script == "") {
 		writeErr(w, 400, "exactly one of argv or script is required")
+		return
+	}
+	if err := checkStrings(req); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	cwd := path.Clean("/" + req.Cwd)[1:]
@@ -98,6 +108,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if req.TimeoutSec <= 0 {
 		req.TimeoutSec = 30 * 60
 	}
+	if req.TimeoutSec > api.MaxTimeoutSec {
+		writeErr(w, 400, fmt.Sprintf("timeout_sec %d is over the maximum of %d (7 days)", req.TimeoutSec, api.MaxTimeoutSec))
+		return
+	}
 	if req.Workspace != "" && !shaRE.MatchString(req.Workspace) {
 		writeErr(w, 400, "workspace must be a sha256 of an uploaded blob")
 		return
@@ -107,7 +121,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		Cwd: cwd, TimeoutSec: req.TimeoutSec, Workspace: req.Workspace, Sandbox: s.cfg.Sandbox,
 	}}
 	if code, err := s.prepare(j); err != nil {
-		os.RemoveAll(s.jobDir(j.ID))
+		workspace.RemoveAll(s.jobDir(j.ID))
 		writeErr(w, code, err.Error())
 		return
 	}
@@ -130,18 +144,42 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, snap)
 }
 
-// prepare creates the job dir and extracts the workspace into work/.
+// checkStrings rejects NUL bytes (they can't be passed to exec) and malformed env names.
+func checkStrings(req api.CreateJob) error {
+	for _, a := range req.Argv {
+		if strings.Contains(a, "\x00") {
+			return fmt.Errorf("argv %q contains a NUL byte", a)
+		}
+	}
+	if strings.Contains(req.Script, "\x00") || strings.Contains(req.Cwd, "\x00") {
+		return fmt.Errorf("script and cwd must not contain NUL bytes")
+	}
+	for k, v := range req.Env {
+		if k == "" || strings.ContainsAny(k, "=\x00") || strings.Contains(v, "\x00") {
+			return fmt.Errorf("env %q: names must be non-empty without = or NUL, values without NUL", k)
+		}
+	}
+	return nil
+}
+
+// prepare creates the job dir and extracts the workspace into sandbox/work. The job only
+// ever gets sandbox/ (see sandboxDir); stdout, stderr and job.json live beside it.
 func (s *Server) prepare(j *job) (int, error) {
-	dir := s.jobDir(j.ID)
-	for _, d := range []string{"work", "home", "tmp"} {
-		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+	dir, sb := s.jobDir(j.ID), s.sandboxDir(j.ID)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return 500, err
+	}
+	for _, d := range []string{"", "work", "home", "tmp"} {
+		if err := os.Mkdir(filepath.Join(sb, d), 0o700); err != nil {
 			return 500, err
 		}
 	}
 	for _, f := range []string{"stdout", "stderr"} {
-		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
+		f, err := openOwn(filepath.Join(dir, f), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
 			return 500, err
 		}
+		f.Close()
 	}
 	if j.Workspace == "" {
 		return 0, nil
@@ -151,10 +189,31 @@ func (s *Server) prepare(j *job) (int, error) {
 		return 400, fmt.Errorf("workspace blob %s not uploaded (PUT /v1/blobs/%s first)", j.Workspace, j.Workspace)
 	}
 	defer f.Close()
-	if err := workspace.Unpack(f, filepath.Join(dir, "work")); err != nil {
+	if err := workspace.Unpack(f, filepath.Join(sb, "work")); err != nil {
 		return 400, fmt.Errorf("unpacking workspace: %v", err)
 	}
 	return 0, nil
+}
+
+// openOwn opens one of the server's own files in a job dir. It never follows a symlink, and
+// refuses anything but a regular file with a single link, so even a job that could write
+// the job dir (sandbox none) can't point the server at another file.
+func openOwn(name string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(name, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, perm)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", name)
+	} else if st, ok := fi.Sys().(*syscall.Stat_t); err == nil && ok && st.Nlink != 1 {
+		err = fmt.Errorf("%s has %d hard links, want 1", name, st.Nlink)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // schedule starts queued jobs while there is capacity. Caller holds s.mu.
@@ -169,7 +228,7 @@ func (s *Server) schedule() {
 }
 
 func (s *Server) env(j *job) []string {
-	dir := s.jobDir(j.ID)
+	dir := s.sandboxDir(j.ID)
 	cache := filepath.Join(s.cfg.DataDir, "cache")
 	pathEnv := os.Getenv("PATH")
 	if pathEnv == "" {
@@ -205,15 +264,15 @@ func (s *Server) run(j *job) {
 		s.schedule()
 		s.mu.Unlock()
 	}()
-	dir := s.jobDir(j.ID)
+	dir, sb := s.jobDir(j.ID), s.sandboxDir(j.ID)
 	argv := j.Argv
 	if j.Script != "" {
 		argv = []string{"bash", "-c", j.Script}
 	}
 	cache := filepath.Join(s.cfg.DataDir, "cache")
 	spec := sandbox.Spec{
-		Mode: s.cfg.Sandbox, Argv: argv, Env: s.env(j), Dir: filepath.Join(dir, "work", j.Cwd),
-		JobDir: dir, Tmp: filepath.Join(dir, "tmp"), DataDir: s.cfg.DataDir,
+		Mode: s.cfg.Sandbox, Argv: argv, Env: s.env(j), Dir: filepath.Join(sb, "work", j.Cwd),
+		Root: sb, Tmp: filepath.Join(sb, "tmp"), DataDir: s.cfg.DataDir,
 		Caches: []string{filepath.Join(cache, "go-build"), filepath.Join(cache, "gomod"), filepath.Join(cache, "xdg")},
 	}
 	fail := func(msg string) {
@@ -225,23 +284,21 @@ func (s *Server) run(j *job) {
 		fail(fmt.Sprintf("cwd %q does not exist in the workspace", j.Cwd))
 		return
 	}
-	stdout, err1 := os.OpenFile(filepath.Join(dir, "stdout"), os.O_WRONLY|os.O_APPEND, 0)
-	stderr, err2 := os.OpenFile(filepath.Join(dir, "stderr"), os.O_WRONLY|os.O_APPEND, 0)
+	stdout, err1 := openOwn(filepath.Join(dir, "stdout"), os.O_WRONLY|os.O_APPEND, 0)
+	stderr, err2 := openOwn(filepath.Join(dir, "stderr"), os.O_WRONLY|os.O_APPEND, 0)
 	if err := errors.Join(err1, err2); err != nil {
 		fail(err.Error())
 		return
 	}
 	defer stdout.Close()
 	defer stderr.Close()
-	cmd := sandbox.Command(spec)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
-	if err := cmd.Start(); err != nil {
+	cmd, err := sandbox.Start(spec, stdout, stderr)
+	if err != nil {
 		s.finish(j, api.Failed, nil, nil, "starting command: "+err.Error())
 		s.mu.Unlock()
 		return
@@ -285,7 +342,7 @@ func (s *Server) run(j *job) {
 		}
 		s.mu.Unlock()
 	})
-	err := cmd.Wait()
+	err = cmd.Wait()
 	timer.Stop()
 	close(waitDone)
 	syscall.Kill(-pid, syscall.SIGKILL) // reap stragglers left in the group
@@ -330,14 +387,23 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var offset int64
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if _, err := fmt.Sscan(v, &offset); err != nil || offset < 0 {
-			writeErr(w, 400, "offset must be a non-negative integer")
+	q := r.URL.Query()
+	if v := q.Get("offset"); v != "" {
+		var err error
+		if offset, err = strconv.ParseInt(v, 10, 64); err != nil || offset < 0 {
+			writeErr(w, 400, fmt.Sprintf("offset %q must be a non-negative integer", v))
 			return
 		}
 	}
-	follow := r.URL.Query().Get("follow") == "1" || r.URL.Query().Get("follow") == "true"
-	f, err := os.Open(filepath.Join(s.jobDir(j.ID), stream))
+	follow := false
+	if v := q.Get("follow"); v != "" {
+		var err error
+		if follow, err = strconv.ParseBool(v); err != nil {
+			writeErr(w, 400, fmt.Sprintf("follow %q must be 1, 0, true or false", v))
+			return
+		}
+	}
+	f, err := openOwn(filepath.Join(s.jobDir(j.ID), stream), os.O_RDONLY, 0)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

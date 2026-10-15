@@ -158,7 +158,7 @@ func runCmd(args []string, e Env) int {
 	dir := fs.String("C", "", "working dir relative to the workspace root (default: the client's cwd relative to the root)")
 	var envs envFlag
 	fs.Var(&envs, "e", "`K=V` env var for the job (repeatable); -e K copies K from this environment")
-	timeout := fs.Duration("timeout", 30*time.Minute, "kill the job's whole process group after this long (exit 124)")
+	timeout := fs.Duration("timeout", 30*time.Minute, "kill the job's whole process group after this long (exit 124; max 168h)")
 	noWS := fs.Bool("no-workspace", false, "upload nothing; run in an empty dir")
 	detach := fs.Bool("detach", false, "print the job id to stdout and exit 0 immediately")
 	jsonOut := fs.Bool("json", false, "don't stream; when the job ends print one JSON object {id, state, exit_code, signal, error,\nduration (seconds), stdout, stderr, stdout_truncated, stderr_truncated} (output: last 64KiB of each)")
@@ -174,6 +174,8 @@ func runCmd(args []string, e Env) int {
 		return errorf(e, "run: nothing to run; usage: tun run [flags] -- <argv...> | tun run [flags] -c '<script>'")
 	case *timeout <= 0:
 		return errorf(e, "run: --timeout must be positive")
+	case *timeout > api.MaxTimeoutSec*time.Second:
+		return errorf(e, "run: --timeout %v is over the server maximum of %v", *timeout, api.MaxTimeoutSec*time.Second)
 	}
 	req.TimeoutSec = int((*timeout + time.Second - 1) / time.Second)
 	for _, kv := range envs {

@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -110,9 +112,14 @@ func (s *Server) recover() error {
 		return err
 	}
 	for _, e := range ents {
-		b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "jobs", e.Name(), "job.json"))
+		f, err := openOwn(filepath.Join(s.jobDir(e.Name()), "job.json"), os.O_RDONLY, 0)
 		if err != nil {
 			continue // half-created job dir
+		}
+		b, err := io.ReadAll(io.LimitReader(f, 16<<20))
+		f.Close()
+		if err != nil {
+			continue
 		}
 		j := &job{done: make(chan struct{})}
 		if err := json.Unmarshal(b, j); err != nil || j.ID != e.Name() {
@@ -147,19 +154,38 @@ func (s *Server) Close() {
 	s.wg.Wait()
 }
 
+// jobDir holds the server's files for a job (job.json, stdout, stderr) and its sandbox dir.
+// The job itself can write only inside sandboxDir.
 func (s *Server) jobDir(id string) string { return filepath.Join(s.cfg.DataDir, "jobs", id) }
 
-// persist writes job.json atomically. Caller holds s.mu (or owns j exclusively).
+// sandboxDir is the job's own tree (work, home, tmp): the only part of the data dir, besides
+// the shared caches, that a job can see or write.
+func (s *Server) sandboxDir(id string) string { return filepath.Join(s.jobDir(id), "sandbox") }
+
+// persist writes job.json atomically, via a fresh temp file (O_EXCL, random name) so a
+// pre-existing file or symlink can't redirect the write. Caller holds s.mu (or owns j
+// exclusively).
 func (s *Server) persist(j *job) error {
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
 	}
-	p := filepath.Join(s.jobDir(j.ID), "job.json")
-	if err := os.WriteFile(p+".tmp", b, 0o600); err != nil {
+	dir := s.jobDir(j.ID)
+	tmp, err := os.CreateTemp(dir, ".job.json-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(p+".tmp", p)
+	_, err = tmp.Write(b)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), filepath.Join(dir, "job.json"))
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+	}
+	return err
 }
 
 // newID returns a sortable unique id: UTC time to the microsecond plus random suffix.
@@ -233,8 +259,9 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
-		if _, err := fmt.Sscan(v, &limit); err != nil || limit < 1 {
-			writeErr(w, 400, "limit must be a positive integer")
+		var err error
+		if limit, err = strconv.Atoi(v); err != nil || limit < 1 {
+			writeErr(w, 400, fmt.Sprintf("limit %q must be a positive integer", v))
 			return
 		}
 	}
