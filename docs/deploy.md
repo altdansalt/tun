@@ -87,3 +87,48 @@ TestBazelCache, scripts/e2e_test); the standard CI above passes these real-Bazel
 checks. That environment limitation remains unresolved. Bazel setup on this runner
 spent about 52s building its Go toolchain helper and 86s building its standard
 library before project tests. No Bazel architecture deviation was needed.
+
+## Migrating agent identities
+
+After deploying a server with client tokens, issue one identity per agent VM on the hub:
+
+```sh
+tun token --help
+tun token --data "$HOME/.local/share/tun" new agent-vm-name
+```
+
+Copy the printed secret securely to `~/.config/tun/token` on that agent VM (directory
+0700, file 0600). Unset any old `TUN_TOKEN` environment override: it takes precedence over
+the file. Verify `tun run --no-workspace -- true` and `tun ls --mine`. Keep the same client
+name used previously to preserve session/cache ownership. Deploy clients normally; existing
+clients already send tokens and need no protocol change. REAPI users use that same token
+in `x-tun-token` or `authorization: Bearer TOKEN` metadata.
+
+The original `$DATA/token` is an admin credential, with unrestricted job access and legacy
+header-selected identity. **Sharing this token gives no isolation**, including to clients
+already migrated. Remove it from every agent VM and retain it only for trusted operators
+and existing runner authentication. Client tokens cannot act as runners. Issue a replacement
+token with the same name to rotate, then remove the old `DATA/clients/<sha256(token)>` file
+to revoke; issuance/revocation does not require restart. The files contain names, never raw
+tokens. Back up this directory with the server data.
+
+Tool cache budgets for a 25GB hub (see SPEC.md, Tool cache budgets). Measured on runner
+tun-r3 (job 20261015T113251890110-695fa3c0, after weeks of tun CI): go-build 509MB, gomod
+4KB, xdg 0.9GB (bazelisk 74MB; bazel-ci.sh's repository cache 521MB and disk cache 316MB).
+Budget, with defaults:
+
+| what | bound | GB |
+|---|---|---|
+| REAPI cache | `--cache-max-size` 10GB | 10 |
+| shared tool caches | `--max-shared-cache` 5GB | 5 |
+| bazel-ci.sh's Bazel disk cache | Bazel GC, 3G | 3 |
+| each client's Bazel repository cache | `--max-client-cache` 1GB | 1 per client |
+| each client's Bazel disk cache | Bazel GC 5G, only without the REAPI cache | 0 |
+| sessions' output bases | `--max-sessions` 2, ~1-2GB each | 2-4 |
+| reserve | `--min-free` 10% | 2.5 |
+
+That is ~23-25GB before workspaces, blobs and retained jobs with two Bazel clients: on a
+25GB hub pass `--cache-max-size 6GB` (or less), leaving several GB for jobs. `--min-free` is
+the backstop: under pressure tool caches are trimmed first (with shorter graces), then
+finished workspaces, then idle sessions. Budgets are soft (recently used entries, running
+jobs' and live sessions' caches are protected); inspect `tun: trimmed ...` logs.

@@ -62,8 +62,8 @@ type Job struct {
 	WorkDeleted bool   `json:"work_deleted,omitempty"`
 	Service     bool   `json:"service,omitempty"`
 	Ports       []Port `json:"ports,omitempty"`
-	// Client is who submitted the job: the exe.dev proxy's X-Exedev-Source-Vm header, else
-	// the client's X-Tun-Client header (its hostname), else the remote address.
+	// Client is the authenticated token's client name. Legacy admin requests use
+	// X-Exedev-Source-Vm, X-Tun-Client, then remote address for compatibility.
 	Client string `json:"client,omitempty"`
 	// Runner is where the job runs or ran: "local" (the hub itself) or a runner's name. Set
 	// when the job leaves the queue. Files of a runner job are only its declared Outputs.

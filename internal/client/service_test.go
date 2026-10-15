@@ -161,6 +161,22 @@ func TestService(t *testing.T) {
 	if code, body := ts.get(strings.TrimSuffix(u, "/"), true); code != 200 || !strings.HasPrefix(body, "path=/ ") {
 		t.Errorf("proxy GET without trailing slash = %d %q", code, body)
 	}
+	// Client bearer credentials must be stripped just like the legacy admin token.
+	clientToken, err := server.IssueClientToken(ts.data, ts.status(id).Client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqClient, _ := http.NewRequest("GET", u, nil)
+	reqClient.Header.Set("Authorization", "Bearer "+clientToken)
+	respClient, err := http.DefaultClient.Do(reqClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientBody, err := io.ReadAll(respClient.Body)
+	respClient.Body.Close()
+	if err != nil || respClient.StatusCode != 200 || !strings.Contains(string(clientBody), `auth=""`) {
+		t.Fatalf("client token leaked to service: %d %q %v", respClient.StatusCode, clientBody, err)
+	}
 	// Via X-Tun-Token (as the tun client sends it): dropped, and the service's own
 	// Authorization passes through.
 	req0, _ := http.NewRequest("GET", u, nil)

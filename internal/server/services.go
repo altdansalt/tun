@@ -7,7 +7,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -226,7 +225,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			// The tun token is not the service's business. With X-Tun-Token, Authorization
 			// is the service's own (e.g. its basic auth) and passes through unless it is ours.
 			pr.Out.Header.Del("X-Tun-Token")
-			if got := pr.In.Header.Get("Authorization"); subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+s.token)) == 1 {
+			authRequest := pr.In.Clone(pr.In.Context())
+			authRequest.Header.Del("X-Tun-Token")
+			if s.authenticate(authRequest) {
 				pr.Out.Header.Del("Authorization")
 			}
 		},

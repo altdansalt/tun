@@ -251,7 +251,7 @@ func TestSessionBatchFetch(t *testing.T) {
 	if n := calls.Load(); n != 3 {
 		t.Fatalf("600 blobs took %d requests, want 3", n)
 	}
-	if missing := r.sessions.missingBlobs(b.Manifest); len(missing) != 0 {
+	if missing := r.sessions.missingBlobs("", b.Manifest); len(missing) != 0 {
 		t.Fatalf("%d missing", len(missing))
 	}
 }

@@ -31,9 +31,10 @@ type Handler struct {
 	AllowActionWrites bool
 	// Client names the action cache namespace of an authenticated request (its client).
 	// Nil or "": the shared namespace, read-only.
-	Client      func(*http.Request) string
-	trusted     bool          // authenticated by the listener (ForClient): no token
-	idleTimeout time.Duration // zero uses two minutes
+	Authenticate func(*http.Request) bool
+	Client       func(*http.Request) string
+	trusted      bool          // authenticated by the listener (ForClient): no token
+	idleTimeout  time.Duration // zero uses two minutes
 }
 
 // ForClient returns a handler for a listener that only client can reach (a session's own
@@ -106,7 +107,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token, _ = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	if !h.trusted && subtle.ConstantTimeCompare([]byte(token), []byte(h.Token)) != 1 {
+	ok := subtle.ConstantTimeCompare([]byte(token), []byte(h.Token)) == 1
+	if h.Authenticate != nil {
+		ok = h.Authenticate(r)
+	}
+	if !h.trusted && !ok {
 		fail(16, fmt.Errorf("missing or wrong x-tun-token"))
 		return
 	}

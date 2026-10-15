@@ -3,8 +3,8 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,6 +42,8 @@ type Config struct {
 	GCInterval                    time.Duration // 0: derived from the Keep* durations
 	MaxWorkspace                  int64         // max unpacked workspace bytes; 0: unlimited
 	MaxLog                        int64         // max bytes kept per stdout/stderr; 0: unlimited
+	MaxSharedCache                int64         // shared tool cache budget (sharedcache.go); 0: none
+	MaxClientCache                int64         // each client's Bazel cache budget (sharedcache.go); 0: none
 	MinFree                       MinFree       // free space to keep on the data dir's filesystem (see disk.go)
 
 	// Runners (see hub.go). HubOnly: no local job slots (tun serve --local-slots 0), so
@@ -214,7 +216,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	if cfg.Cache != nil {
-		s.cache = &reapi.Handler{Store: cfg.Cache, Token: s.token, AllowActionWrites: !cfg.CacheReadOnly, Client: cacheClient}
+		s.cache = &reapi.Handler{Store: cfg.Cache, Token: s.token, AllowActionWrites: !cfg.CacheReadOnly, Client: s.cacheIdentity, Authenticate: s.authenticate}
 	}
 	if err := s.recover(); err != nil {
 		return nil, err
@@ -401,13 +403,14 @@ func (s *Server) Handler() http.Handler {
 	})
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			// X-Tun-Token first: proxies in front of tun (e.g. exe.dev's) may consume Authorization.
-			got, ok := r.Header.Get("X-Tun-Token"), true
-			if got == "" {
-				got, ok = strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			name, admin, ok := s.identity(r)
+			if !ok {
+				writeErr(w, 401, "missing or wrong bearer token")
+				return
 			}
-			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-				writeErr(w, 401, "missing or wrong bearer token (the server's token is in its $DATA/token)")
+			r = r.WithContext(context.WithValue(r.Context(), identityKey{}, principal{name, admin}))
+			if !admin && (strings.HasPrefix(r.URL.Path, "/v1/runner/") || (r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/blobs/"))) {
+				writeErr(w, 403, "admin token required")
 				return
 			}
 			h(w, r)
@@ -470,15 +473,6 @@ func (s *Server) CacheHandler() http.Handler {
 	return s.cache
 }
 
-// cacheClient is the action cache namespace of a token-authenticated gRPC request: its
-// client identity (see clientOf), as for jobs and sessions.
-func cacheClient(r *http.Request) string {
-	if c := clientOf(r); c != "" && c != "@" {
-		return c
-	}
-	return "unknown"
-}
-
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -495,6 +489,12 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) *job {
 	s.mu.Unlock()
 	if j == nil {
 		writeErr(w, 404, s.noSuchJob(r.PathValue("id")))
+	}
+	if j != nil {
+		if p, ok := r.Context().Value(identityKey{}).(principal); ok && !p.admin && p.name != j.Client && !(r.Method == "GET" && r.URL.Path == "/v1/jobs/"+j.ID) {
+			writeErr(w, 403, "job belongs to another client")
+			return nil
+		}
 	}
 	return j
 }
@@ -538,11 +538,12 @@ func secs(d time.Duration) float64 {
 	return float64(max(d, 0).Milliseconds()) / 1000
 }
 
-// clientOf names who sent r: the exe.dev proxy's X-Exedev-Source-Vm header (the proxy sets it
-// and doesn't let callers forge it), else the client's self-reported X-Tun-Client (its
-// hostname), else the remote IP. Without the proxy in front, both headers are only as
-// trustworthy as the token holder: this is for visibility, not access control.
+// clientOf returns the authenticated principal. Without one (including legacy admin
+// authentication), headers select the compatibility identity and provide no isolation.
 func clientOf(r *http.Request) string {
+	if p, ok := r.Context().Value(identityKey{}).(principal); ok {
+		return p.name
+	}
 	for _, h := range []string{"X-Exedev-Source-Vm", "X-Tun-Client"} {
 		if v := cleanName(r.Header.Get(h)); v != "" {
 			return v
@@ -570,8 +571,18 @@ func cleanName(v string) string {
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	if j := s.lookup(w, r); j != nil {
-		writeJSON(w, 200, s.snapshot(j))
+		writeJSON(w, 200, redact(r, s.snapshot(j)))
 	}
+}
+
+// redact hides from other clients what a job's owner may consider secret: its command
+// (argv and scripts often carry tokens) and its workspace digest. Others still see that it
+// exists, its state and timing, to understand the server's load.
+func redact(r *http.Request, v api.Job) api.Job {
+	if o := owner(r); o != "" && o != v.Client {
+		v.Argv, v.Script, v.Workspace = nil, "", ""
+	}
+	return v
 }
 
 // listJobs serves GET /v1/jobs?limit=N&state=S[,S...]&client=NAME|mine=1, newest first.
@@ -615,7 +626,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	list := make([]api.Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		if (len(states) == 0 || states[j.State]) && (client == "" || j.Client == client) {
-			list = append(list, s.view(j, now))
+			list = append(list, redact(r, s.view(j, now)))
 		}
 	}
 	s.mu.Unlock()

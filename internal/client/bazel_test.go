@@ -464,6 +464,13 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	}
 	a := start("", "sleep", "30")
 	ts.waitFor(a, func(j api.Job) bool { return j.State == api.Running })
+	// Running is set before the command starts. Wait until the fake daemon has
+	// detached and published its pid, so cancellation actually exercises a warm
+	// server rather than racing its startup on a loaded host.
+	eventually(t, "first Bazel command ready", func() bool {
+		r := ts.tun("", "logs", a)
+		return r.code == 0 && strings.Contains(r.stdout, "cmd=sleep")
+	})
 	b := start("", "build") // same session: waits for a
 	other := start("other", "build")
 	if j := ts.waitDone(other); j.State != api.Exited { // another session runs meanwhile

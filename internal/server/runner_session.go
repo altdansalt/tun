@@ -95,7 +95,7 @@ func (r *Runner) fetchSessionBlobs(ctx context.Context, b *api.BazelJob) error {
 	return r.fetchSessionBlobsLimit(ctx, b, r.sessions.cfg.MaxUpload)
 }
 func (r *Runner) fetchSessionBlobsLimit(ctx context.Context, b *api.BazelJob, limit int64) error {
-	missing := r.sessions.missingBlobs(b.Manifest)
+	missing := r.sessions.missingBlobs("", b.Manifest)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup

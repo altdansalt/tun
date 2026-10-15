@@ -12,6 +12,9 @@ import (
 
 func main() {
 	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "token" {
+		os.Exit(server.TokenMain(args[1:], os.Stdout, os.Stderr))
+	}
 	if len(args) > 0 && args[0] == "serve" {
 		os.Exit(server.Main(args[1:], os.Stderr))
 	}
