@@ -102,3 +102,50 @@ no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms
   repository cache is content-checked by Bazel, and the disk cache is per-session until M2/M3 move
   shared results to the executor-written remote cache.
 - **Bazel versions:** bazelisk + the repo's `.bazelversion`; installs cached per host.
+
+## M1 results (implemented in internal/bep)
+
+`bep.New(command)` creates a parser. Feed newly read bytes from
+`--build_event_json_file` to `Write`; it retains partial lines between reads. Call
+`Finish` only after Bazel exits (a truncated final event returns an error, while
+`Snapshot` retains preceding results), then `SetResult(processExit, elapsed)` to
+supply the authoritative process result. `Snapshot` is the full artifact index;
+`Line` renders `tun: bazel test exit=3 after 12.4s: 2 of 40 tests failed: //a:b //c:d`.
+`JSON` returns one object with exit code/name, success/completeness, duration,
+targets, tests and failed actions. Lists are capped at 20, with full target/test
+counts and an `omitted` map (including nested list omissions). The diagnostic caps
+labels at 20 and reports how many were omitted. Unknown test statuses count as
+failures; FLAKY is a successful final status, with individual failed attempts retained.
+The full snapshot is intentionally uncapped for subsequent label lookups.
+
+Test results include each run/shard/attempt (BEP IDs are 1-based), status, duration
+and local log paths, including earlier retry logs. Failed action messages and
+stdout/stderr paths are retained when available. Top-level default output groups
+resolve transitive named file sets, mapping `bazel-out/<config>/bin/...` to
+workspace-relative `bazel-bin/...`. Non-file URIs are currently excluded: CAS/remote
+artifact fetching belongs to M3. Multiple configurations of the same label are
+currently collapsed; M1's API indexes by label.
+
+The sessions integration must keep the full snapshot with the command ID. To wire
+`tun get <id> //pkg:test.log`, resolve the label to **all** attempt log paths,
+validate those paths against the session output base/exec root, and copy or stream
+the files while that command's results still exist. For output labels, resolve
+`Target.Outputs` in that session's workspace; do not assume current v0 `tun get`
+can follow Bazel's workspace symlinks outside its root. Preserve/stage artifacts
+before another session command overwrites them, and declare staged paths when a
+runner must ship them to the hub. Never accept an agent-supplied absolute path.
+The short JSON view must not be used as the lookup index because of list caps.
+
+Deviation from the proposed universal BEP flow: Bazel 9 `query` rejects
+`--build_event_json_file`; omit that flag for query and use an empty parser plus
+`SetResult`. Empty targets are valid. Parse failures and incomplete streams should
+be reported by the caller without replacing Bazel's actual exit code.
+
+Real Bazel 9.3.0 fixtures and their generation script live in
+`internal/bep/testdata`. Generate with
+`tun run --out internal/bep/testdata -- bash internal/bep/testdata/generate.sh`;
+all Bazel output roots are under the job's TMPDIR. The flaky fixture uses a
+job-local marker and standalone test execution so its second attempt reliably
+passes; the other test fixtures exercise linux-sandbox. The compile-error fixture
+uses a genrule invoking the host C compiler solely to provoke a real failed action
+(it is not a recommended hermetic project toolchain).
