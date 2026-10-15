@@ -3,9 +3,34 @@
 Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is a Go (stdlib-only) remote execution service for coding agents.
 
 ## Building and testing
-- **Build and test with tun itself** (a shared tun server is at $TUN_URL, or the default local address; the
-  `tun` binary is on PATH, built from main):
-  - `tun run -- ./scripts/ci.sh` — vet, build, `go test -race -timeout=10m`, in a sandboxed copy of your working tree.
+- **Default CI: `tun bazel test //...`** (a shared tun server is at $TUN_URL, or the default local
+  address; the `tun` binary is on PATH, built from main). It syncs your working tree to a warm
+  Bazel session on the server (fixed `/work`, Bazel server kept between commands, remote cache)
+  and runs every target: unit and integration tests and the CLI smoke suites
+  (`//scripts:e2e_test`, `//scripts:e2e_runners_test`) against the Bazel-built `//cmd/tun`.
+  Only what your change affects rebuilds and reruns; unchanged tests show `(cached) PASSED`.
+  - Ends with one summary line: `tun: bazel test exit=3 after 61.2s: 1 of 8 tests failed:
+    //internal/client:client_test; logs: tun get <id> //internal/client:client_test`. Failing
+    tests' logs are printed already (`--test_output=errors`, .bazelrc); `tun get <id> //label`
+    writes that test's full logs to `bazel-testlogs/<pkg>/<name>/` (`-o DIR` elsewhere).
+  - Subsets: `tun bazel test //internal/server:server_test --test_filter=TestEphemeral`
+    (`--test_filter` takes a Go -run regexp: `--test_filter='TestA|TestB'`). Rerun a cached
+    test with `--nocache_test_results`; more output: `--test_output=all`.
+  - Race detector: RACE_DECISION
+  - The first command of a session (or `tun bazel --cold ...`) starts a Bazel server and
+    re-analyzes: ~1-4 min; later commands reuse it. Sessions expire after 30 min idle and the
+    server holds only a few (`tun sessions`); an evicted one just starts cold again.
+  - After adding/removing Go files or imports: update the BUILD files with gazelle and commit
+    them (`tun run --out internal --out cmd -c 'bazel --output_user_root=$TMPDIR/b run //:gazelle'`).
+    A Go file missing from BUILD.bazel is silently not built/tested; `tun run -- ./scripts/bazel-ci.sh`
+    checks that (`-e GAZELLE=1`: gazelle's full diff). Test data/tags/size are kept by gazelle.
+  - Tests that run real Bazel nested in a test (TestBazelReal, reapi's TestBazelCache, e2e.sh's
+    `tun bazel` step) use the pinned `@bazel_binary` (MODULE.bazel) and reach the Bazel Central
+    Registry through tun's egress proxy (`--test_env` in .bazelrc; tagged `requires-network`).
+- **Fallback: `tun run -- ./scripts/ci.sh`** (when `tun bazel` is down, you suspect the session
+  machinery, or you want Go's newer host toolchain): vet, build, `go test -race -timeout=10m` of
+  everything in a fresh sandboxed copy of your tree, plus the smoke suites. It reruns everything
+  every time (~2-4 min).
   - Subsets: `tun run -e TEST_FLAGS='-run TestX -v' -- ./scripts/ci.sh` (env is NOT forwarded unless `-e`).
     ci.sh splits TEST_FLAGS like xargs (quotes group, nothing is evaluated), so alternations work as
     `tun run -e TEST_FLAGS='-run "TestA|TestB" -v' -- ./scripts/ci.sh` (or `-e TEST_FLAGS="-run 'A|B'"`).
@@ -15,44 +40,30 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
     `tun run` says where the job runs: `tun: running on hub` or `tun: running on runner NAME`.
   - Long output: `tun run --tail 80 -- ./scripts/ci.sh` prints only the last 80 lines of stdout and
     stderr once the job ends (same exit code); `tun logs --tail N [--stderr] <id>` for more.
-  - Test the changed binary with a private server: `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
-    The wrapper builds the working tree, adds the new binary to PATH, exports TUN_URL/TUN_TOKEN,
-    runs the command, and cleans up the server and temporary files. Never replace the shared server.
-    Use any command, e.g. `scripts/dev-tun.sh tun run -- echo hi`.
   - CI runs the real CLI smoke suites once at the end by default (scripts/e2e.sh, and
     scripts/e2e-runners.sh: a hub without local slots plus two `tun runner` processes);
     `-e E2E=0` disables them (with `-run` they are skipped unless `-e E2E=1`).
-  - `tun bazel` (warm Bazel sessions) needs a server built from a branch that has it: try yours with
-    `tun run -c 'scripts/dev-tun.sh tun bazel build //...'`. Its tests use a fake bazel; TestBazelReal
-    and scripts/e2e.sh also run the real one when `bazel` is on PATH (it is on the tun hosts).
-    It ends with a BEP summary line; `tun bazel --json ...` prints the result as one object.
-    Bazel caches are per client on the server; dev-tun.sh seeds bazelisk from the job's cache.
-    Sessions use the server's REAPI remote cache automatically (`tun serve --cache-dir`, on by
-    default) through a per-session socket; action results are per client.
-  - The host has 2 CPUs and the server runs 2 jobs at once; others queue. That's expected.
-- **Bazel** (M0 of docs/bazel.md; `scripts/ci.sh` stays the default CI for now):
-  - `tun run -- ./scripts/bazel-ci.sh` — checks that every Go file is in a BUILD.bazel
-    (`-e GAZELLE=1`: gazelle's full diff, ~15s more), then `bazel test //...` (unit + integration
-    tests, and the e2e suites as `//scripts:e2e_test`, `//scripts:e2e_runners_test` against the
-    Bazel-built `//cmd/tun`). Arguments replace `//...` and go to `bazel test` as is:
-    `tun run -- ./scripts/bazel-ci.sh --test_filter=TestEphemeral //internal/server:server_test`.
-    `--config=race` adds the race detector (ci.sh always uses it; Bazel doesn't by default).
-  - After adding/removing Go files or imports: `bazel run //:gazelle` (in a tun job, with
-    `--out` for the BUILD files; e.g. `tun run --out internal -c 'bazel --output_user_root=$TMPDIR/b run //:gazelle'`)
-    and commit the BUILD.bazel changes. Test data/tags/size in BUILD files are kept by gazelle.
-  - Caches: output base in the job's `$TMPDIR` (deleted at exit; never let Bazel default to
-    `$XDG_CACHE_HOME/bazel`), shared repository cache and disk cache in
-    `$XDG_CACHE_HOME/tun-bazel/` on each tun host. The disk cache also caches test results:
-    an unchanged test shows `(cached) PASSED`; `--nocache_test_results` reruns it. Every job on a
-    host can write that cache (see the trust note in scripts/bazel-ci.sh; `BAZEL_DISK_CACHE=0` skips it).
+  - `tun run -- ./scripts/bazel-ci.sh [bazel test args]`: the same Bazel build in a plain job
+    (fresh output base under `$TMPDIR`, never `$XDG_CACHE_HOME/bazel`; per-host repository and
+    disk cache in `$XDG_CACHE_HOME/tun-bazel/`, writable by every job: see its trust note,
+    `BAZEL_DISK_CACHE=0` skips it). Slower than a warm session (~4-5 min), but independent of it.
+- **Test the changed binary with a private server:** `tun run -c 'scripts/dev-tun.sh ./scripts/e2e.sh'`.
+  The wrapper builds the working tree, adds the new binary to PATH, exports TUN_URL/TUN_TOKEN,
+  runs the command, and cleans up the server and temporary files. Never replace the shared server.
+  Use any command, e.g. `scripts/dev-tun.sh tun run -- echo hi`, or your branch's `tun bazel`:
+  `tun run -c 'scripts/dev-tun.sh tun bazel build //...'` (dev-tun.sh seeds bazelisk from the
+  job's cache, or from `DEV_TUN_BAZEL`, a Bazel binary). `tun bazel` prints its result as one
+  object with `--json`. Bazel caches are per client on the server; sessions use the server's
+  REAPI remote cache automatically (`tun serve --cache-dir`, on by default) through a
+  per-session socket; action results are per client.
+- The hosts have 2 CPUs; the hub runs 2 jobs (and sessions) at once; others queue. That's expected.
 - Fallback if tun is down or you suspect tun itself: `scripts/bb-ci.sh` (same CI on a BuildBuddy runner).
 - If tun gets in your way (missing feature, confusing error, slow), note it in your final report under
   "tun friction" — that's the most valuable feedback for what to build next.
 - Run long commands in the foreground and let the tool call wait; don't background + poll.
 - Don't run `go test` directly on the host; `go build`/`go vet`/`gofmt` are fine.
 
-- REAPI integration tests run real Bazel when installed (skip otherwise). Keep every
-  Bazel output root under TMPDIR, never the shared XDG cache. `scripts/bench-reapi.sh`
+- Keep every Bazel output root of a `tun run` job under TMPDIR, never the shared XDG cache. `scripts/bench-reapi.sh`
   measures 200 actions; BuildBuddy measurements run on the VM host because jobs lack DNS.
 
 ## Conventions
