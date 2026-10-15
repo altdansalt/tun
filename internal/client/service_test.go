@@ -393,7 +393,9 @@ func TestServiceJSONFailureAndEarlyLimit(t *testing.T) {
 		res["tun_exit"] != 4.0 || !strings.Contains(fmt.Sprint(res["error"]), "before it was ready") {
 		t.Errorf("--json early exit: %+v", r)
 	}
-	id, _ := ts.startService()
+	// With a port the helper serves until canceled (without one it exits at once, freeing the
+	// slot: the check below then raced its exit).
+	id, _ := ts.startService("--port", "8080")
 	defer ts.tun("", "cancel", id)
 	before, _ := os.ReadDir(ts.data + "/jobs")
 	ws := t.TempDir()
