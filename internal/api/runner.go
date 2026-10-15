@@ -16,11 +16,14 @@ const MaxOutputs = 256
 
 // RunnerPoll is the body of POST /v1/runner/poll. It doubles as the runner's heartbeat.
 type RunnerPoll struct {
-	Name     string   `json:"name"`
-	Instance string   `json:"instance"` // random per runner process: tells a restart from a name clash
-	Slots    int      `json:"slots"`    // jobs the runner runs at once
-	Running  []string `json:"running"`  // job ids the runner holds (received and not yet reported done)
-	Sandbox  string   `json:"sandbox"`  // the runner's sandbox mode (bwrap|none)
+	Name     string `json:"name"`
+	Instance string `json:"instance"` // random per runner process: tells a restart from a name clash
+	// Seq increases with every poll of an instance; the hub ignores a poll older than one it
+	// has seen (a request delayed in the network must not undo newer state). 0: unsequenced.
+	Seq     int64    `json:"seq,omitempty"`
+	Slots   int      `json:"slots"`   // jobs the runner runs at once
+	Running []string `json:"running"` // job ids the runner holds (received and not yet reported done)
+	Sandbox string   `json:"sandbox"` // the runner's sandbox mode (bwrap|none)
 }
 
 // RunnerPollResponse is the hub's answer: jobs to start and job ids to kill and drop.

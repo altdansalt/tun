@@ -44,6 +44,7 @@ type runnerState struct {
 	lastSeen                        time.Time
 	jobs                            map[string]*job // assigned to it and not ended
 	seq                             int             // polls received; only the latest may assign
+	pollSeq                         int64           // highest RunnerPoll.Seq seen from this instance
 	waiting                         int             // poll handlers waiting for work
 	held                            map[string]bool // job ids the latest poll listed
 	pending                         []*job          // assigned while a poll waited; it sends them
@@ -147,6 +148,12 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, err.Error())
 		return
 	}
+	if p.Seq > 0 && p.Seq <= rn.pollSeq {
+		s.mu.Unlock()
+		writeJSON(w, 200, api.RunnerPollResponse{Jobs: []api.RunnerJob{}, Cancel: []string{}})
+		return // stale: a newer poll has been handled
+	}
+	rn.pollSeq = max(rn.pollSeq, p.Seq)
 	rn.seq++
 	seq := rn.seq
 	rn.poke() // an older poll of this runner (its client gave up on it) should end

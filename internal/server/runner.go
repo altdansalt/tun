@@ -47,6 +47,7 @@ type Runner struct {
 	cfg      RunnerConfig
 	instance string
 	host     string
+	seq      int64           // polls sent (only the Run goroutine touches it)
 	ctx      context.Context // canceled by Kill: no more requests, jobs abandoned
 	kill     context.CancelFunc
 	pollCtx  context.Context // canceled to stop taking work
@@ -248,7 +249,8 @@ func (r *Runner) postJSON(ctx context.Context, p string, in, out any) error {
 
 func (r *Runner) poll() (api.RunnerPollResponse, error) {
 	r.mu.Lock()
-	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox, Running: []string{}}
+	r.seq++
+	req := api.RunnerPoll{Name: r.cfg.Name, Instance: r.instance, Seq: r.seq, Slots: r.cfg.Slots, Sandbox: r.cfg.Sandbox, Running: []string{}}
 	for id := range r.jobs {
 		req.Running = append(req.Running, id)
 	}

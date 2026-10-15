@@ -237,8 +237,10 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   of a 413 at creation). With local slots the hub unpacks at creation as before (and deletes
   its copy once a runner starts the job).
 - Protocol (all runner-initiated, bearer auth, `X-Tun-Runner: <name>` on job requests):
-  - `POST /v1/runner/poll` `{name, instance, slots, running: [ids], sandbox}` long-polls (up
-    to 25s) and is the heartbeat. `instance` is random per runner process. The answer
+  - `POST /v1/runner/poll` `{name, instance, seq, slots, running: [ids], sandbox}` long-polls
+    (up to 25s) and is the heartbeat. `instance` is random per runner process; `seq` grows
+    with each poll and a poll at or below the highest seen is answered empty and ignored (a
+    delayed request must not undo newer state). The answer
     `{jobs: [assignment], cancel: [ids]}`: assignments carry the full spec (argv/script, cwd,
     env, timeout_sec, workspace sha, outputs) and the hub's max_log/max_workspace/max_download;
     `cancel` lists held ids the runner must kill and drop (canceled, ended or unknown on the

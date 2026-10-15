@@ -243,6 +243,7 @@ type fakeRunner struct {
 	ts       *testServer
 	name, as string // as: X-Tun-Client, which the hub uses as the runner's source
 	instance string
+	seq      int64 // sent as RunnerPoll.Seq when set
 }
 
 func (f *fakeRunner) req(method, path string, body []byte) (int, []byte) {
@@ -264,7 +265,10 @@ func (f *fakeRunner) req(method, path string, body []byte) (int, []byte) {
 
 func (f *fakeRunner) poll(slots int, running ...string) (int, api.RunnerPollResponse) {
 	f.ts.t.Helper()
-	b, _ := json.Marshal(api.RunnerPoll{Name: f.name, Instance: f.instance, Slots: slots, Running: running})
+	if f.seq > 0 {
+		f.seq++
+	}
+	b, _ := json.Marshal(api.RunnerPoll{Name: f.name, Instance: f.instance, Seq: f.seq, Slots: slots, Running: running})
 	code, out := f.req("POST", "/v1/runner/poll", b)
 	var resp api.RunnerPollResponse
 	json.Unmarshal(out, &resp)
@@ -395,6 +399,27 @@ func TestRunnerProtocol(t *testing.T) {
 	}
 	if _, resp := f.poll(1, id3); !slices.Equal(resp.Cancel, []string{id3}) {
 		t.Errorf("cancel after backstop: %+v (before: %v)", resp, cancel)
+	}
+}
+
+func TestRunnerStalePoll(t *testing.T) {
+	ts := startServer(t, hubConfig(""))
+	f := &fakeRunner{ts: ts, name: "seq", instance: "s1", seq: 1}
+	id := ts.detach("", "--no-workspace", "--", "true")
+	if _, resp := f.poll(1); !slices.Equal(jobIDs(resp), []string{id}) {
+		t.Fatalf("assign: %+v", resp)
+	}
+	f.req("POST", "/v1/runner/jobs/"+id+"/started", nil)
+	// A poll that was sent before the runner got the job, delivered late, changes nothing.
+	f.seq = 1 // sends 2 again
+	f.poll(1)
+	if j := ts.status(id); j.State != api.Running {
+		t.Errorf("after a stale poll: %+v", j)
+	}
+	// A current poll that doesn't list it means the runner lost it.
+	f.poll(1)
+	if j := ts.status(id); j.State != api.Failed || !strings.Contains(j.Error, "no longer has the job") {
+		t.Errorf("after a current poll: %+v", j)
 	}
 }
 

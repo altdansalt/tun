@@ -76,7 +76,7 @@ func serve(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	addr := fs.String("addr", "127.0.0.1:7070", "listen address")
 	data := fs.String("data", DefaultDataDir(), "data dir (token, blobs, jobs, caches)")
 	maxJobs := fs.Int("max-jobs", runtime.NumCPU(), "jobs run at once on this host; the rest queue FIFO (same as --local-slots)")
-	localSlots := fs.Int("local-slots", -1, "jobs run at once on this host (default --max-jobs); 0: none, every non-service job runs on a runner (tun runner)")
+	localSlots := fs.Int("local-slots", -1, "jobs run at once on this host; -1: --max-jobs; 0: none, every non-service job runs on a runner (tun runner)")
 	runnerTimeout := fs.Duration("runner-timeout", 30*time.Second, "a runner that hasn't polled for this long is lost: its running jobs fail, unstarted ones are requeued")
 	maxServices := fs.Int("max-services", 4, "service jobs (tun run --service) run at once, not counted in --max-jobs; more are rejected")
 	netMode := fs.String("net", "auto", "auto|private|host: private gives each bwrap job its own network namespace (outbound via an HTTP(S) proxy; services only through the server); auto uses it when it works")
