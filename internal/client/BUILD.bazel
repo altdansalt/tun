@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "client",
     srcs = [
+        "bazel.go",
         "cli.go",
         "client.go",
         "files.go",
@@ -27,6 +28,8 @@ go_test(
         "auth_test.go",
         "bazel_test.go",
         "bazelci_test.go",
+        "bazelgo_test.go",
+        "cache_test.go",
         "fast_test.go",
         "files_review_test.go",
         "files_test.go",
@@ -54,6 +57,7 @@ go_test(
     env = {"TUN_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
     deps = [
         "//internal/api",
+        "//internal/reapi",
         "//internal/sandbox",
         "//internal/server",
         "//internal/workspace",
