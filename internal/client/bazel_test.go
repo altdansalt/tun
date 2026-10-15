@@ -433,7 +433,7 @@ func TestBazelSessionLimits(t *testing.T) {
 	}
 	// The evicted session's next command says why it is cold, on its start line and summary.
 	r = ts.tun(ws, "bazel", "build")
-	want := regexp.MustCompile(`cold: its session ended \d+s ago: evicted \(least recently used of 1 sessions\) for client \S+'s session b \(job ` + evictor + `\)\); `)
+	want := regexp.MustCompile(`cold: its session ended \d+s ago: evicted \(least recently used of 1 sessions on local\) for client \S+'s session b \(job ` + evictor + `\)\); `)
 	if r.code != 0 || !want.MatchString(r.stderr) || !strings.Contains(r.stderr, "; cold start: its session ended ") {
 		t.Fatalf("evicted session's next command: %+v", r)
 	}
