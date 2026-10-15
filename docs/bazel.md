@@ -1,7 +1,8 @@
 # tun v1 direction: Bazel-native remote execution
 
-Status: direction agreed 2026-10-15; nothing here is built yet. SPEC.md stays the contract for
-what exists (`tun run`); this file is the target and the order we get there.
+Status: direction agreed 2026-10-15. The core of M1 exists (branch feat/bazel-sessions:
+`tun bazel`, sessions, manifest sync on the hub; see "M1 status" below). SPEC.md stays the
+contract for what exists; this file is the target and the order we get there.
 
 ## Goal
 An agent sends a Bazel command; tun makes it fast. Caching, warm servers and remote execution
@@ -90,6 +91,50 @@ long-lived. `tun bazel run --service --port 8080 //svc` reuses v0's port proxy.
 
 Targets to beat, set at M1 from real numbers: warm one-line-change `test` faster than `bb remote`;
 no-op within 1 s of local Bazel's no-op; overhead of sync + routing under 300 ms.
+
+## M1 status (feat/bazel-sessions)
+Built: `tun bazel [--session NAME] [--cold] <cmd> [args...]`, `tun sessions`, sessions on the
+hub's local slots (fixed `/work`, `/tun/home`, `/tmp`, output base `/tun/out/base`), a
+long-lived session sandbox whose agent runs each command (so the Bazel server survives between
+commands), manifest sync with in-place apply, idle expiry (`--session-idle`, 30m) and LRU
+eviction (`--max-sessions`, 2), shared repository cache, per-client disk cache. Contract in
+SPEC.md ("Bazel sessions").
+
+Deviations from the model above, and why:
+- **A busy session queues** the next command of the same session instead of starting a new
+  cold one. A second Bazel server costs 1GB+ on a 4GB host and a cold analysis; `--session
+  NAME` gets the parallel one explicitly. Waiting jobs show `queue_reason`.
+- **Disk cache per client**, not per session: `--cold` and a second `--session` of the same
+  client reuse action results, and one client still can't poison another's cache. Size-capped
+  by Bazel (`--experimental_disk_cache_gc_max_size=5G`); the per-client dirs are not deleted
+  by tun yet.
+- **Bazel startup options from the agent are rejected** (tun's own must stay constant per
+  session or Bazel restarts its server).
+- The client identifies its workspace by its absolute root path; two checkouts of one repo are
+  two sessions (they share the client's disk cache).
+
+Not done yet in M1: the BEP summary line and `--json` (feat/bazel-bep is on it); the optional
+BuildBuddy remote cache; sessions on runners and placement; `tun get` of outputs; `bazel run`
+as a separate job; measuring tun's own `bazel test //...` (needs M0's BUILD files) and an
+outside repo, and against `bb remote`.
+
+Measured (2026-10-15, private dev server on a tun host via `tun run -c 'scripts/dev-tun.sh
+...'`, client on the same host, so no network round trips; tun job 20261015T081338167547-8eeb4d65):
+
+| genrule workspace (4 files)      | wall  | Bazel elapsed | sent (manifest + contents) | job |
+|----------------------------------|-------|---------------|---------------------------|-----|
+| first command, new session       | 6.60s | 6.44s, "Starting local Bazel server" | 840B + 409B | 20261015T081339359149-6bcd15ac |
+| second (no-op)                   | 0.37s | 0.33s, 0 packages loaded | 420B + 0B | 20261015T081345972324-a7ea86da |
+| third (no-op)                    | 0.11s | 0.09s | 420B + 0B | 20261015T081346347993-a343996c |
+| one-line change of an input      | 0.17s | 0.12s | 838B + 140B | 20261015T081346468837-bed213e2 |
+| `--cold`                         | 6.91s | 6.34s, new server | 427B + 0B | 20261015T081346640293-da0e4076 |
+| v0: `tun run -- bazel build` (every time) | 6.5-7.8s | new server, full analysis | tarball | |
+
+tun's own tree (78 entries, 66 files) with `bazel info`: first sync 6.9KB manifest + 176KB
+contents; no-op 3.5KB; one-line change 6.9KB (the manifest is sent twice: once answered with
+the missing digest) + 2.8KB; `tun run` uploads a 164KB tarball for every change. From a
+remote client add ~4 round trips (create, two log streams, status; ~35ms each from an exe.dev
+VM to the shared server) and 2 more for a change (409, upload).
 
 ## Open questions / risks
 - **Stdlib only vs gRPC.** Bazel speaks gRPC only for remote execution. M2's HTTP cache needs

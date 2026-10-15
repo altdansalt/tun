@@ -21,9 +21,12 @@ import (
 const bazelUsage = `usage: tun bazel [--session NAME] [--cold] [--timeout DUR] <bazel command> [args...]
 
 Run a Bazel command in a warm session on the tun server, e.g. tun bazel test //... .
-The bazel command and its args pass through unchanged; tun adds its own startup options and
-flags (output base, repository and disk caches) and no others. Bazel's output streams back;
-the exit status is Bazel's (124 on --timeout, 125 for tun's own errors, as for tun run).
+The bazel command and its args pass through unchanged; tun adds only startup options (the
+session's output base, its own --bazelrc) and, through that rc file, --repository_cache
+(shared by every session on the server), --disk_cache (one per client: it survives --cold
+and session expiry) with a size cap. Your workspace's .bazelrc applies as usual. Bazel's
+output streams back; the exit status is Bazel's (124 on --timeout, 125 for tun's own errors,
+as for tun run). Bazel startup options of your own are not supported.
 
 A session is (this client, this workspace, NAME): a persistent copy of the workspace on the
 server at a fixed path (/work), Bazel's output base, and a Bazel server that stays up between
@@ -38,6 +41,11 @@ untracked-not-ignored; Bazel's bazel-* convenience symlinks at the root are left
 sends a manifest (path, sha256, mode), uploads only the contents the server lacks, and the
 server updates the session's copy in place: unchanged files keep their mtimes. Stderr reports
 "tun: sync: ..." (bytes sent) and the server's "tun: session ...: synced workspace ..." line.
+
+Bazel runs with HOME=/tun/home and TMPDIR=/tmp (private to the session), the server's PATH,
+and on servers with network isolation the HTTP(S) proxy variables (downloads work through
+it, as in tun run). Outputs stay in the session's output base on the server; tun get can't
+fetch them yet.
 
 Each command is a normal job (tun ls, tun status, tun logs, tun cancel) with "session" and
 "session_id" fields. Stderr ends with "tun: job <id> <state> exit=<code> after <run>s

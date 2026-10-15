@@ -30,6 +30,11 @@ usage:
   tun run --service [--port N]... -- <argv...>
                                      start a long-running service, proxied at
                                      <server>/v1/jobs/<id>/ports/N/; exits once it's ready
+  tun bazel [--session NAME] [--cold] <bazel command> [args...]
+                                     run Bazel in a warm session on the server: the
+                                     workspace is synced (only changed files sent) and
+                                     the Bazel server stays up between commands (tun bazel -h)
+  tun sessions [--mine]              the server's Bazel sessions as JSON lines
   tun status <id>                    print the job as one JSON object
   tun logs [-f] [--stderr] [--tail N] <id>
                                      print a job's stdout (or stderr); -f follows until it
@@ -65,7 +70,8 @@ queue_sec (seconds from creation to start, counting while queued), run_sec (seco
 to end, counting while running), queue_position (only while queued: 1 = next to start),
 runner (where it runs: "local" = the server itself, else a runner's name), outputs (the --out
 paths). A job that ran on a runner keeps only its --out paths: tun get of anything else is an
-error saying so.
+error saying so. tun bazel jobs also have session and session_id, and while they wait,
+queue_reason (e.g. their session is busy with another command).
 Server load (no token needed): curl $TUN_URL/v1/healthz -> {running, queued, max_jobs,
 services, max_services, network_isolation, ...}.
 Services also have service: true and ports: [{port, host_port, ready, path, url}].
