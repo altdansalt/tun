@@ -16,7 +16,7 @@ import (
 const serviceUsage = `
 services (--service): the job runs until canceled (no --timeout unless given), outside the
 --max-jobs queue (the server's --max-services bounds them; creating one more fails). Each
---port N gets a free host port, passed to the job as $TUN_PORT_N (and $PORT if only one);
+--port N gets a free port number, passed to the job as $TUN_PORT_N (and $PORT if only one);
 the service must listen there on 127.0.0.1. tun run waits until every port accepts
 connections, prints to stdout the job id, then one line "N URL" per port, and exits 0. URL
 is <server>/v1/jobs/<id>/ports/N/ and proxies HTTP (streaming, websockets) to the service;
@@ -24,9 +24,12 @@ it needs the token like the API (X-Tun-Token: <token>, or Authorization: Bearer 
 the token is not forwarded (with X-Tun-Token, the request's own Authorization is).
 If the service exits first, tun run prints its output and exits with its code (125 if 0);
 if it isn't ready within --ready-timeout it is canceled. Stop it with 'tun cancel <id>'.
-KNOWN LIMITATION: jobs share the server host's network, so other jobs on the same server
-(anyone's) can connect to a service's host_port directly, without the token, and could bind
-an allocated port before the service does. Don't treat a service as private.
+With network isolation (healthz "network_isolation": true) the port exists only in the
+service's own network namespace: the token-protected URL is the only way in; other jobs
+can't connect to it or take it. KNOWN LIMITATION without isolation (tun serve --net host, or
+no usable bwrap --unshare-net): jobs share the server host's network, so other jobs (anyone's)
+can connect to a service's host_port directly, without the token, and could bind an
+allocated port before the service does. Don't treat a service as private there.
 `
 
 type portFlag []int

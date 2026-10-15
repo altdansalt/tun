@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -47,21 +48,34 @@ func TestReviewServiceCancelRace(t *testing.T) {
 	ts.tun("", "cancel", id)
 }
 
-// The proxy is the only authenticated way to reach a service, but services listen on the
-// host's 127.0.0.1 and jobs share the host network, so any job (any user's) can talk to any
-// service directly, with no token. This is a documented known limitation (SPEC.md Services,
-// tun run -h); the test pins that behavior so a fix (per-job netns) flips it deliberately.
-func TestReviewServiceReachableFromOtherJobsWithoutToken(t *testing.T) {
+// The proxy is the only authenticated way to reach a service. With per-job network namespaces
+// a service's port exists only inside its own job's namespace, so another job can neither
+// connect to it nor squat on it; the proxy still reaches the real service. (Without network
+// isolation, any job can reach it directly: see SPEC.md Services.)
+func TestReviewServiceNotReachableFromOtherJobs(t *testing.T) {
 	t.Parallel()
-	ts := startServer(t, server.Config{})
-	id, _ := ts.startService("--port", "8080")
+	ts := netServer(t)
+	id, urls := ts.startService("--port", "8080")
+	defer ts.tun("", "cancel", id)
 	hp := ts.status(id).Ports[0].HostPort
 	r := ts.tun("", "run", "--no-workspace", "-e", "P="+itoa(hp), "-c",
-		`exec 3<>/dev/tcp/127.0.0.1/$P; printf 'GET /secret HTTP/1.0\r\n\r\n' >&3; cat <&3`)
-	defer ts.tun("", "cancel", id)
-	if r.code != 0 || !strings.Contains(r.stdout, "path=/secret") {
-		t.Errorf("known limitation changed? an unrelated job could not reach service %s on host port %d: %+v (update SPEC.md Services and tun run -h)", id, hp, r)
+		`exec 3<>/dev/tcp/127.0.0.1/$P && printf 'GET /secret HTTP/1.0\r\n\r\n' >&3 && cat <&3`)
+	if r.code == 0 || strings.Contains(r.stdout, "path=/secret") {
+		t.Errorf("an unrelated job reached service %s on port %d without the token: %+v", id, hp, r)
 	}
+	// A job listening on the same port number gets its own port, not the service's traffic.
+	exe, _ := os.Executable()
+	squat := ts.detach("", "--no-workspace", "-e", "TUN_TEST_SERVICE=1", "-e", "TUN_PORT_1="+itoa(hp), "--", exe, "-test.run=^TestServiceHelper$")
+	ts.waitFor(squat, func(j api.Job) bool { return j.State != api.Queued })
+	time.Sleep(500 * time.Millisecond)
+	want := "PORT=" + itoa(hp) + " TUN_PORT_8080=" + itoa(hp)
+	if code, body := ts.get(urls[8080]+"env", true); code != 200 || body != want {
+		t.Errorf("proxy with a squatter on port %d: %d %q, want %q", hp, code, body, want)
+	}
+	if j := ts.status(squat); j.State != api.Running {
+		t.Errorf("squatter could not listen on port %d in its own namespace: %+v", hp, j)
+	}
+	ts.tun("", "cancel", squat)
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

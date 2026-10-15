@@ -5,10 +5,12 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +32,8 @@ type Spec struct {
 	Tmp     string   // the job's tmp dir; also mounted at /tmp under bwrap
 	DataDir string   // the server data dir: hidden under bwrap except Root and Caches
 	Caches  []string // read-write shared cache dirs
+	// PrivateNet (bwrap only) gives the job its own network namespace; see net.go.
+	PrivateNet bool
 }
 
 // BwrapUsable reports whether bwrap is installed and can create the namespaces we need.
@@ -49,19 +53,61 @@ func BwrapUsable() bool {
 // itself runs with an empty env, so client-supplied vars like LD_PRELOAD can't act on the
 // unsandboxed bwrap process. The options travel over a pipe (--args) rather than argv, so
 // env values don't show up in the host's process list.
-func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, error) {
+//
+// With s.PrivateNet the returned Net reaches into the job's network namespace; the caller
+// must Close it once the command has ended. It is nil otherwise. The network helper also gets
+// the env over a pipe (envFD) rather than --setenv, so it doesn't act on the helper either.
+func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, *Net, error) {
 	var cmd *exec.Cmd
-	var opts *os.File
-	if s.Mode == Bwrap {
-		r, w, err := os.Pipe()
-		if err != nil {
-			return nil, err
+	var n *Net
+	pipes := map[*os.File]string{} // write ends, and what to write once the command started
+	closeAll := func() {
+		for w := range pipes {
+			w.Close()
 		}
-		opts = w
-		defer r.Close() // the child has its own copy once started
-		cmd = exec.Command("bwrap", append([]string{"--args", "3", "--"}, s.Argv...)...)
+		if n != nil {
+			n.Close()
+		}
+	}
+	if s.Mode == Bwrap {
+		var files, ours []*os.File // ours: closed once the child has its copies
+		addPipe := func(data []string) error {
+			r, w, err := os.Pipe()
+			if err != nil {
+				return err
+			}
+			pipes[w] = strings.Join(data, "\x00") + "\x00"
+			files, ours = append(files, r), append(ours, r)
+			return nil
+		}
+		defer func() {
+			for _, f := range ours {
+				f.Close()
+			}
+		}()
+		if err := addPipe(bwrapArgs(s)); err != nil {
+			return nil, nil, err
+		}
+		argv := s.Argv
+		if s.PrivateNet {
+			exe, err := selfExe()
+			var ctl *os.File
+			if err == nil {
+				n, ctl, err = newNet()
+			}
+			if err == nil {
+				files, ours = append(files, ctl, exe), append(ours, ctl) // ctlFD, exeFD
+				err = addPipe(s.Env)                                     // envFD
+			}
+			if err != nil {
+				closeAll()
+				return nil, nil, fmt.Errorf("private network: %v", err)
+			}
+			argv = append([]string{helperPath(s), helperArg}, argv...)
+		}
+		cmd = exec.Command("bwrap", append([]string{"--args", "3", "--"}, argv...)...)
 		cmd.Env = []string{}
-		cmd.ExtraFiles = []*os.File{r}
+		cmd.ExtraFiles = files
 	} else {
 		cmd = exec.Command(s.Argv[0], s.Argv[1:]...)
 		cmd.Dir = s.Dir
@@ -70,20 +116,24 @@ func Start(s Spec, stdout, stderr io.Writer) (*exec.Cmd, error) {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
-		if opts != nil {
-			opts.Close()
-		}
-		return nil, err
+		closeAll()
+		return nil, nil, err
 	}
-	if opts != nil {
-		data := strings.Join(bwrapArgs(s), "\x00") + "\x00"
-		go func() { // the pipe may be smaller than the env; bwrap reads it all before anything else
-			io.WriteString(opts, data)
-			opts.Close()
+	for w, data := range pipes {
+		go func() { // the pipe may be smaller than the env; the reader reads it all first
+			io.WriteString(w, data)
+			w.Close()
 		}()
 	}
-	return cmd, nil
+	if n != nil {
+		go n.serveEgress()
+	}
+	return cmd, n, nil
 }
+
+// helperPath is where the network helper (this executable) appears inside the sandbox: in
+// the tmpfs that hides the data dir.
+func helperPath(s Spec) string { return filepath.Join(s.DataDir, "tun-netns-helper") }
 
 // bwrapArgs: read-only root, fresh /dev /proc and pid namespace, the job's tmp at /tmp,
 // the server user's home and the data dir hidden behind tmpfs, then the job's tree and shared
@@ -110,10 +160,16 @@ func bwrapArgs(s Spec) []string {
 		}
 	}
 	a = append(a, "--tmpfs", s.DataDir, "--bind", s.Root, s.Root)
+	if s.PrivateNet {
+		a = append(a, "--unshare-net", "--ro-bind-fd", strconv.Itoa(exeFD), helperPath(s))
+	}
 	for _, c := range s.Caches {
 		a = append(a, "--bind", c, c)
 	}
 	a = append(a, "--clearenv")
+	if s.PrivateNet {
+		return append(a, "--chdir", s.Dir) // the helper sets the env
+	}
 	for _, kv := range s.Env {
 		k, v, _ := strings.Cut(kv, "=")
 		a = append(a, "--setenv", k, v)

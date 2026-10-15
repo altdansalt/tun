@@ -308,7 +308,7 @@ func (s *Server) run(j *job) {
 	cache := filepath.Join(s.cfg.DataDir, "cache")
 	spec := sandbox.Spec{
 		Mode: s.cfg.Sandbox, Argv: argv, Env: s.env(j), Dir: filepath.Join(sb, "work", j.Cwd),
-		Root: sb, Tmp: filepath.Join(sb, "tmp"), DataDir: s.cfg.DataDir,
+		Root: sb, Tmp: filepath.Join(sb, "tmp"), DataDir: s.cfg.DataDir, PrivateNet: s.cfg.PrivateNet,
 		Caches: []string{filepath.Join(cache, "go-build"), filepath.Join(cache, "gomod"), filepath.Join(cache, "xdg")},
 	}
 	fail := func(msg string) {
@@ -336,7 +336,7 @@ func (s *Server) run(j *job) {
 		s.mu.Unlock()
 		return
 	}
-	cmd, err := sandbox.Start(spec, logs.Stdout, logs.Stderr)
+	cmd, jnet, err := sandbox.Start(spec, logs.Stdout, logs.Stderr)
 	logs.started()
 	if err != nil {
 		s.finish(j, api.Failed, nil, nil, "starting command: "+err.Error())
@@ -344,6 +344,7 @@ func (s *Server) run(j *job) {
 		return
 	}
 	pid := cmd.Process.Pid
+	j.net = jnet
 	now := time.Now().UTC()
 	j.State, j.StartedAt = api.Running, &now
 	s.persist(j)
@@ -391,6 +392,12 @@ func (s *Server) run(j *job) {
 	close(waitDone)
 	syscall.Kill(-pid, syscall.SIGKILL) // reap stragglers left in the group
 	logs.wait()
+	if jnet != nil {
+		s.mu.Lock()
+		j.net = nil
+		s.mu.Unlock()
+		jnet.Close()
+	}
 
 	var code, sig *int
 	if ps := cmd.ProcessState; ps != nil {

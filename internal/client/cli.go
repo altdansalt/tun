@@ -62,7 +62,7 @@ deleted the job's files; status and logs remain), client (who submitted it: see 
 queue_sec (seconds from creation to start, counting while queued), run_sec (seconds from start
 to end, counting while running), queue_position (only while queued: 1 = next to start).
 Server load (no token needed): curl $TUN_URL/v1/healthz -> {running, queued, max_jobs,
-services, max_services, ...}.
+services, max_services, network_isolation, ...}.
 Services also have service: true and ports: [{port, host_port, ready, path, url}].
 `
 
@@ -83,6 +83,13 @@ The job object's queue_sec and run_sec (tun status, and in --json) show where ti
 
 The job's environment is minimal: PATH, LANG, TERM=dumb, USER, HOME and TMPDIR (private to
 the job), GOCACHE/GOMODCACHE/XDG_CACHE_HOME (caches shared across jobs), TUN_JOB_ID, plus -e.
+
+Network: on a server with network isolation (healthz "network_isolation": true) each job has
+its own network namespace with only loopback. Outbound HTTP(S) goes through a proxy the server
+runs (HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy and NO_PROXY=localhost,127.0.0.1,::1 are
+set unless given with -e), which go, git, curl, pip and npm honor; raw TCP/UDP (ssh, DNS
+lookups) can't leave the job. Ports a job listens on are reachable only inside the job (and,
+for services, through the server's proxy). Without isolation jobs share the server's network.
 
 --out PATH (repeatable) gets build outputs back: after the job ends, in any state, PATH
 (relative to the workspace root; file, directory or glob) is copied from the job's work dir

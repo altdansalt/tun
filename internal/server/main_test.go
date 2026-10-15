@@ -3,12 +3,16 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/sandbox"
 )
 
 func TestEphemeral(t *testing.T) {
@@ -79,6 +83,49 @@ func TestEphemeralConflicts(t *testing.T) {
 		code := serve([]string{"--ephemeral", flag, "unused"}, strings.NewReader(""), &out, &diagnostic)
 		if code != 125 || !strings.Contains(diagnostic.String(), "cannot be combined") || out.Len() != 0 {
 			t.Fatalf("%s: code %d, %s", flag, code, &diagnostic)
+		}
+	}
+}
+
+func TestNetFlag(t *testing.T) {
+	for _, args := range [][]string{{"--sandbox", "none", "--net", "private"}, {"--net", "bogus"}} {
+		var out, diagnostic bytes.Buffer
+		code := serve(append([]string{"--ephemeral"}, args...), strings.NewReader(""), &out, &diagnostic)
+		if code != 125 || !strings.Contains(diagnostic.String(), "--net") {
+			t.Errorf("%q: code %d, %s", args, code, &diagnostic)
+		}
+	}
+	if !sandbox.BwrapUsable() || sandbox.NetUsable() != nil {
+		t.Skip("no bwrap with private networks here")
+	}
+	for _, net := range []string{"auto", "host"} {
+		stdin, input := io.Pipe()
+		output, stdout := io.Pipe()
+		var stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- serve([]string{"--ephemeral", "--exit-on-eof", "--net", net}, stdin, stdout, &stderr)
+			stdout.Close()
+		}()
+		url, err := bufio.NewReader(output).ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Get(strings.TrimSpace(strings.TrimPrefix(url, "TUN_URL=")) + "/v1/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var h api.Health
+		json.NewDecoder(resp.Body).Decode(&h)
+		resp.Body.Close()
+		input.Close()
+		go io.Copy(io.Discard, output)
+		<-done
+		if want := net == "auto"; h.NetworkIsolation != want || !strings.Contains(stderr.String(), "net "+map[bool]string{true: "private", false: "host"}[want]) {
+			t.Errorf("--net %s: healthz %+v, stderr %s", net, h, &stderr)
+		}
+		if net == "host" && !strings.Contains(stderr.String(), "warning: --net host") {
+			t.Errorf("--net host: no warning: %s", &stderr)
 		}
 	}
 }

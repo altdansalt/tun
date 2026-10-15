@@ -70,13 +70,16 @@ type Job struct {
 
 // Health is the body of GET /v1/healthz: server config and current load.
 type Health struct {
-	OK          bool   `json:"ok"`
-	Sandbox     string `json:"sandbox"`
-	MaxJobs     int    `json:"max_jobs"`
-	MaxServices int    `json:"max_services"`
-	Running     int    `json:"running"`  // non-service jobs running (at most max_jobs)
-	Queued      int    `json:"queued"`   // jobs waiting for a slot
-	Services    int    `json:"services"` // service jobs running (at most max_services)
+	OK      bool   `json:"ok"`
+	Sandbox string `json:"sandbox"`
+	// NetworkIsolation: each job has its own network namespace (egress via an HTTP proxy;
+	// services reachable only through the server's proxy). False: jobs share the host network.
+	NetworkIsolation bool `json:"network_isolation"`
+	MaxJobs          int  `json:"max_jobs"`
+	MaxServices      int  `json:"max_services"`
+	Running          int  `json:"running"`  // non-service jobs running (at most max_jobs)
+	Queued           int  `json:"queued"`   // jobs waiting for a slot
+	Services         int  `json:"services"` // service jobs running (at most max_services)
 }
 
 // Error is the body of every non-2xx response.

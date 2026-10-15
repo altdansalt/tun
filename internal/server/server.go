@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/altdansalt/tun/internal/api"
+	"github.com/altdansalt/tun/internal/sandbox"
 )
 
 // Config configures a Server.
@@ -30,6 +31,7 @@ type Config struct {
 	MaxJobs     int
 	MaxServices int    // service jobs run at once, separately from MaxJobs; more are rejected
 	Sandbox     string // sandbox.Bwrap or sandbox.None (already resolved)
+	PrivateNet  bool   // bwrap only: a network namespace per job (check sandbox.NetUsable first)
 	MaxUpload   int64  // bytes
 	KillGrace   time.Duration
 
@@ -61,6 +63,7 @@ type job struct {
 	Env  map[string]string  `json:"env,omitempty"`
 	done chan struct{}      // closed when the job reaches a terminal state
 	kill func(state string) // set while running; requests termination with the given end state
+	net  *sandbox.Net       // set while running with a private network namespace
 	// cancelReq is set by a cancel that arrives after the job left the queue (or, for a
 	// service, was admitted) but before run started it; run then finishes it as canceled.
 	cancelReq bool
@@ -74,6 +77,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.MaxServices < 1 {
 		cfg.MaxServices = 4
+	}
+	if cfg.Sandbox != sandbox.Bwrap {
+		cfg.PrivateNet = false
 	}
 	if cfg.KillGrace == 0 {
 		cfg.KillGrace = 10 * time.Second
@@ -219,7 +225,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
-		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, MaxJobs: s.cfg.MaxJobs, MaxServices: s.cfg.MaxServices,
+		h := api.Health{OK: true, Sandbox: s.cfg.Sandbox, NetworkIsolation: s.cfg.PrivateNet, MaxJobs: s.cfg.MaxJobs, MaxServices: s.cfg.MaxServices,
 			Running: s.running, Queued: len(s.queue), Services: s.svc.running}
 		s.mu.Unlock()
 		writeJSON(w, 200, h)
