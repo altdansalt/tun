@@ -16,7 +16,10 @@ Read SPEC.md first (what exists), then docs/bazel.md (where it's going). tun is 
   - Subsets: `tun bazel test //internal/server:server_test --test_filter=TestEphemeral`
     (`--test_filter` takes a Go -run regexp: `--test_filter='TestA|TestB'`). Rerun a cached
     test with `--nocache_test_results`; more output: `--test_output=all`.
-  - Race detector: RACE_DECISION
+  - Race detector: not in the default (it roughly doubles test time and has no cache entries
+    until a race build ran; docs/bazel.md). For changes to concurrent code also run
+    `tun bazel --session race test --config=race //...` (its own session, so the default one
+    keeps its analysis cache) or the fallback `tun run -- ./scripts/ci.sh` (always `-race`).
   - The first command of a session (or `tun bazel --cold ...`) starts a Bazel server and
     re-analyzes: ~1-4 min; later commands reuse it. Sessions expire after 30 min idle and the
     server holds only a few (`tun sessions`); an evicted one just starts cold again.

@@ -493,9 +493,120 @@ For comparison, `tun run -- ./scripts/ci.sh` (go vet/build, `go test -race` of e
 smoke suites) took 233.7s (job 20261015T093529837825-42cbbe49) and 249.6s
 (20261015T094450267997-c543fe16) on runners: every run pays the whole test suite.
 
-The three targets that fail in a session run a real Bazel themselves (TestBazelReal,
-reapi's TestBazelCache, scripts/e2e.sh's Bazel part): inside Bazel's test sandbox bazelisk has
-no cached Bazel binary and can't download one (Bad Gateway through the session's proxy;
-`latest` needs DNS for the version lookup). That is M0's tests' environment (they pass under
-`go test` in tun run), not the session cache; fix in M0 by passing a Bazel binary as test data
-or tagging them `manual`.
+The three targets that failed in a session run a real Bazel themselves (TestBazelReal,
+reapi's TestBazelCache, scripts/e2e.sh's Bazel part). Fixed on feat/selfhost: see "Self-hosting"
+below.
+
+
+## Self-hosting: tun tests itself with `tun bazel test //...` (feat/selfhost)
+
+`tun bazel test //...` is now the default CI in AGENTS.md (scripts/ci.sh is the fallback). All
+8 targets pass in a session on the shared hub (job 20261015T103622359021-d97f6015, and after
+merging main 20261015T122336650839-fc5bd3f6) and in `tun run -- ./scripts/bazel-ci.sh`
+(20261015T104012893018-94bd67b9, 297s).
+
+**Why 3 of 8 targets failed in sessions** (job 20261015T102008032789-c8d97156): all three run
+`bazel` (bazelisk) nested in a Bazel test. In the test's environment there is no bazelisk cache
+(Bazel passes neither XDG_CACHE_HOME nor BAZELISK_HOME to tests) and no network (no proxy
+variables), so bazelisk could not get Bazel 9.3.0 ("Bad Gateway": the inner tun server's egress
+proxy dialed directly; reapi's run had no `.bazelversion` and failed resolving `latest`). With a
+Bazel binary, the nested Bazel then failed resolving bazel_tools' module deps from the Bazel
+Central Registry. Fixes:
+- `@bazel_binary` (MODULE.bazel): the Bazel 9.3.0 binary, sha256-pinned, a data dep of the three
+  targets. reapi runs it directly; TestBazelReal and dev-tun.sh (`DEV_TUN_BAZEL`, set by
+  scripts/bazel-e2e.sh) build a bazelisk cache from it for `tun serve --bazelisk-seed`.
+- `.bazelrc`: `test --test_env=` for the six proxy variables; the targets are tagged
+  `requires-network`. In a job or session the network is tun's egress proxy anyway.
+- **The egress proxy now listens on a fixed `127.0.0.1:3128`** in every job's namespace (was a
+  random port). Bazel keys test results on the test env, so with a random port these three
+  tests (client_test is the slowest target) missed every cache in every new session or v0 job.
+  Each job has its own network namespace, so the fixed port can't collide. Deviation from
+  SPEC's earlier "random port", documented there.
+- Not fixable from the outside and so not done: tests can't run fully offline. A vendored
+  registry or a pre-seeded repository cache for the nested workspaces was the alternative
+  (no network), at the cost of checked-in registry files per Bazel version.
+
+**Other fixes found on the way:** the egress listener hang (below); client_test lacked the
+`//internal/reapi` dep after main's cache_test.go (Bazel failed to compile it, `go test` didn't
+notice); load flakes in TestStreamDeadlinesAndBearer, TestBazelSessionQueueAndCancel (canceled
+before its fake server had started), TestBazelSessionCancelLeftover (50ms kill grace),
+TestReviewRunnerStartedCancelRace (runner dropped after 1s), TestBazelCache (90s per nested
+Bazel run).
+
+**Egress listener hang** (TestRunnerNetIsolation, job 20261015T100453577886-afe35f9f): the netns
+helper sent descriptors with `(*os.File).Fd()`, which switches the open file description to
+blocking mode, and the server's egress listener shares that description. NetUsable asked the
+helper for the listener a second time while Start's serveEgress was serving it, so the server's
+Accept could end up in a blocking accept4 and `http.Server.Close` waited for it forever. Now the
+helper sends the socket's fd via `SyscallConn().Control` (no mode change), NetUsable waits for
+serveEgress's result instead of asking again, and `Net.Close` first `shutdown(2)`s the listener,
+which wakes a blocked accept whatever the mode. The session agent's fds (socketpair ends,
+pipes, log files) never share a description with something the server polls, so they are fine.
+
+**Test logs:** `tun get <id> //pkg:name_test` (see SPEC "Test logs"): after a session test
+command the server copies the logs the BEP names into the job's work dir (only from
+`bazel-out/*/testlogs/`, through an os.Root, 64MB per job), so they survive the session's next
+command; a failed run's summary line ends with `; logs: tun get <id> <label>`. Build outputs by
+label are still not fetchable.
+
+### Measurements (2026-10-15, shared hub, client on this VM)
+
+`scripts/bench-selfhost.sh 3` from a separate worktree of this branch (session `bench`), against
+the shared hub (which runs main's tun: random proxy port, see above). Wall = client wall clock
+including sync and round trips; "Bazel" = Bazel's elapsed time. Load = healthz `running` (all
+hosts) when the command started. "cold" is `--cold`: a new Bazel server and output base, with
+this client's repository cache and tun's remote cache warm (a truly empty cache needs a new
+client identity). Edits change a log string in internal/server/gc.go or an error string in
+internal/workspace/sync.go (new value each time), so the libraries' outputs change.
+
+| Scenario | Run 1 | Run 2 | Run 3 | Jobs |
+| --- | --- | --- | --- | --- |
+| cold (`--cold`) | 104.5s (Bazel 102.1; load 1) | 430.8s (418.8; load 5) | 128.7s (126.2; load 2) | 20261015T105250582390-d355ee84, 20261015T105808189176-f4160dc4, 20261015T110904789302-aa414d39 |
+| warm no-op (1st / 2nd) | 1.2s / 0.6s (load 1) | 2.3s / 1.1s (load 3) | 1.6s / 1.1s (load 1) | 20261015T105435109797-54521d52, 20261015T105436382909-07e4439f, 20261015T110519026609-a5d76f03, 20261015T110521590395-d58086fd, 20261015T111113549080-d2baca56, 20261015T111115284948-60f1cda3 |
+| edit internal/server | 78.3s (load 1) | 115.4s (load 3; a flake, fixed since) | 140.8s (load 1) | 20261015T105437108913-3342eba0, 20261015T110522801009-3f208b88, 20261015T111116499199-58f6e4cb |
+| edit internal/workspace | 132.3s (load 0) | 106.4s (load 3) | 126.9s (load 2) | 20261015T105555479509-53b9df29, 20261015T110718271330-be1721b9, 20261015T111337588556-17faf360 |
+| edit internal/server, profiled | 88.5s (load 2) | | | 20261015T112839996252-fb454a49 |
+
+Comparison (see M0's table): v0 `bazel-ci.sh` with warm disk cache: no-op 15-27s, edit
+53-68s (load 0-1) / 171-228s (load 3-4); `scripts/ci.sh` 71-100s then, 128-575s today under
+load; `bb remote` edit 30.6s. Today's suite is heavier than at M0: TestBazelReal (23s of a
+cold nested Bazel), reapi's TestBazelCache (4 nested Bazel runs, 50-190s) and e2e.sh's `tun
+bazel` step came with the sessions and cache merges and now run under Bazel too.
+
+What changed: the **no-op is ~1s** (was 15-27s in v0 jobs): the warm server re-analyzes nothing
+and every test is cached. A **cold session** costs 100-130s on a quiet hub, not ~10s as in
+bench-session.sh's run (b), because the three nested-Bazel tests rerun: their cache key includes
+`HTTPS_PROXY`, whose port the deployed hub still picks at random per session. With this branch
+deployed (fixed port) they hit the remote cache like the others. **Edits are not faster than
+v0's**: 78-141s vs 53-68s.
+
+Where the time goes in a warm edit (Bazel JSON profile of job 20261015T112839996252-fb454a49,
+88.5s, read in the session with a throwaway `sh_binary` via `tun bazel run`, since Bazel 9 has
+no `analyze-profile` and the profile lives in the session's /tmp):
+- 1.1s until execution starts (no loading/analysis to redo: the session works).
+- ~9s compile and link: server.a 2.8s, server_test's compile 6.5s (parallel), client_test link
+  2.1s, runfiles 0.3s.
+- **78s: `//internal/client:client_test` runs, the critical path**; e2e_runners_test (7.5s) and
+  e2e_test (48.7s) run in the other CPU slot meanwhile. Inside client_test (`-test.v`, job
+  20261015T113023800547-5594364e: 107 tests, sequential, 67s): TestBazelReal 22.8s,
+  TestBwrapGoBuild 6.6s, TestBazelSessionCancelLeftover 5.3s, TestNetGoModuleDownload 4.6s, then
+  ~100 tests of 0.1-3s, mostly waiting on processes and timers.
+
+Tried: `shard_count = 4` on client_test: 89.1s (20261015T113144922562-2baeff57), no gain with
+2 test slots on 2 CPUs. Adding `--local_test_jobs=4` (overcommit; the tests mostly wait):
+595s with two nested-Bazel targets timing out on a loaded hub (20261015T113317175015-6b819d16),
+so no. The levers left: remote execution (M3: shards over all runners), or making the slowest
+tests cheaper (TestBazelReal's cold nested Bazel; a fake suffices for most of it).
+
+**Race detector: not in the default.** `--config=race` has no remote cache entries until a race
+build ran and slows every test: M0 measured a warm-cache edit at 116-142s with race vs 53-68s
+without; today's first race run in a session took 1389s on a hub with load 3 and under 1GB
+of free disk, with timeouts in e2e_test and nested-Bazel tests (20261015T114423867638-5a4a2df3;
+stopped there). `scripts/ci.sh` keeps `go test -race`; AGENTS.md says to run it (or
+`tun bazel test --config=race //...`) for changes to concurrent code.
+
+Observed on the shared hub during these runs: sessions were evicted (LRU) by other agents'
+sessions several times between two commands of mine (`--max-sessions` on a hub with 2 local
+slots), which turns a warm edit into a cold one; and free disk went down to 0.6-1.1GB
+(`--min-free` warnings) with several sessions' output bases and the remote cache on one
+25GB disk.
