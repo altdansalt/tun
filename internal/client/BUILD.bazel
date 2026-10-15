@@ -40,6 +40,7 @@ go_test(
         "review2_test.go",
         "review_runner_test.go",
         "review_test.go",
+        "runner_session_test.go",
         "runner_test.go",
         "sandbox_test.go",
         "service_review_test.go",

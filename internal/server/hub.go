@@ -42,6 +42,12 @@ type runnerState struct {
 	name, instance, sandbox, source string
 	privateNet                      bool
 	disk                            *api.Disk
+	serviceSupport                  bool
+	tunnels                         map[string]*serviceTunnel
+	sessionSupport                  bool
+	memoryAvailable                 int64
+	load                            float64
+	liveSessions                    int
 	slots                           int
 	lastSeen                        time.Time
 	retiredAt                       time.Time       // when a newer instance took the name (or it was dropped)
@@ -108,6 +114,12 @@ func (s *Server) takeJobs(rn *runnerState, held map[string]bool) []api.RunnerJob
 func (s *Server) runnerJobEnded(j *job) {
 	if rn := j.rn; rn != nil && rn.jobs[j.ID] == j {
 		delete(rn.jobs, j.ID)
+		if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+			sess.job = nil
+			if s.runners[rn.name] != rn {
+				delete(s.sessions, sess.ID)
+			}
+		}
 		rn.poke()
 	}
 }
@@ -179,7 +191,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	resp.Jobs = s.takeJobs(rn, held)
 	deadline := time.NewTimer(s.cfg.RunnerPollWait)
 	defer deadline.Stop()
-	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !s.closed && rn.seq == seq {
+	for len(resp.Jobs) == 0 && len(resp.Cancel) == 0 && !rn.pendingTunnels() && !s.runnerNeedsRevocation(rn, p.Sessions) && !s.closed && rn.seq == seq {
 		rn.waiting++
 		s.mu.Unlock()
 		timedOut := false
@@ -205,6 +217,13 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	if s.runners[name] == rn {
 		rn.lastSeen = time.Now()
 	}
+	for _, t := range rn.tunnels {
+		if !t.sent {
+			resp.Tunnels = append(resp.Tunnels, t.spec)
+			t.sent = true
+		}
+	}
+	resp.Sessions = s.runnerSessionLeases(rn)
 	s.mu.Unlock()
 	writeJSON(w, 200, resp)
 }
@@ -231,7 +250,22 @@ func (s *Server) register(name string, p api.RunnerPoll, source string, now time
 		s.runners[name] = rn
 	}
 	rn.instance, rn.slots, rn.sandbox, rn.source, rn.lastSeen = p.Instance, p.Slots, cleanName(p.Sandbox), source, now
+	rn.serviceSupport = p.ServiceSupport
 	rn.privateNet, rn.disk = p.NetworkIsolation, p.Disk
+	rn.sessionSupport, rn.memoryAvailable, rn.load, rn.liveSessions = p.SessionSupport, p.MemoryAvailable, p.Load, len(p.Sessions)
+	for id, sess := range s.sessions {
+		if sess.runner != rn {
+			continue
+		}
+		if sess.stopping && !slices.Contains(p.Sessions, id) {
+			delete(s.sessions, id)
+		}
+		if p.Slots == 0 && sess.job == nil {
+			delete(s.sessions, id)
+		}
+	}
+	s.schedule()
+
 	return rn
 }
 
@@ -251,7 +285,13 @@ func (s *Server) retire(rn *runnerState, now time.Time) {
 			s.requeue(j)
 		}
 	}
+	for id, sess := range s.sessions {
+		if sess.runner == rn && sess.job == nil {
+			delete(s.sessions, id)
+		}
+	}
 	rn.poke()
+	s.schedule()
 }
 
 // dropRunner gives up on a runner instance: it is retired, and its running jobs end (failed
@@ -259,6 +299,11 @@ func (s *Server) retire(rn *runnerState, now time.Time) {
 func (s *Server) dropRunner(rn *runnerState, msg string) {
 	s.retire(rn, time.Now())
 	rn.dropped = msg
+	for id, sess := range s.sessions {
+		if sess.runner == rn {
+			delete(s.sessions, id)
+		}
+	}
 	for _, j := range rn.jobs {
 		if d := j.exited; d != nil {
 			s.finishRunnerJob(j, *d, msg+" before it finished shipping the job's logs and outputs")
@@ -267,6 +312,7 @@ func (s *Server) dropRunner(rn *runnerState, msg string) {
 		}
 	}
 	rn.jobs = map[string]*job{}
+	s.schedule()
 }
 
 // finishRunnerJob ends j as the runner reported (a kill the hub requested decides the state),
@@ -279,7 +325,35 @@ func (s *Server) finishRunnerJob(j *job, d api.RunnerDone, note string) {
 	if note != "" {
 		msg = strings.TrimPrefix(msg+"; "+note, "; ")
 	}
+	if j.bz != nil {
+		if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+			sess.LastUsed = time.Now().UTC()
+			sess.LastJob = j.ID
+			sess.Commands++
+			if d.Session != nil {
+				sess.Commands = d.Session.Commands
+				sess.CreatedAt = d.Session.CreatedAt
+			}
+		}
+		j.Summary = d.Summary
+		if len(d.BEP) > 0 {
+			if err := writeOwn(filepath.Join(s.jobDir(j.ID), "bep.json"), d.BEP); err != nil {
+				msg = joinMsg(msg, err.Error())
+			}
+		}
+	}
+	if j.bz != nil && !d.SessionReady {
+		if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+			sess.stopping = true
+			if sess.runner != nil {
+				sess.runner.poke()
+			}
+		}
+	}
 	s.finish(j, state, d.ExitCode, d.Signal, msg)
+	if j.bz != nil {
+		s.schedule()
+	}
 }
 
 // reconcile compares what runner rn holds (held, as of a poll that arrived at arrival) with
@@ -313,6 +387,11 @@ func (s *Server) reconcile(rn *runnerState, held map[string]bool, arrival time.T
 func (s *Server) requeue(j *job) {
 	if j.rn != nil {
 		delete(j.rn.jobs, j.ID)
+		if j.bz != nil {
+			if sess := s.sessions[j.SessionID]; sess != nil && sess.job == j {
+				sess.job = nil
+			}
+		}
 	}
 	j.Runner, j.rn, j.assignedAt = "", nil, time.Time{}
 	i := sort.Search(len(s.queue), func(i int) bool { return s.queue[i].ID > j.ID })
@@ -330,7 +409,9 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 	}
 	var out []*job
 	for free := rn.slots - busy; free > 0 && !s.closed; free-- {
-		i := slices.IndexFunc(s.queue, func(j *job) bool { return j.bz == nil }) // bazel jobs run here
+		i := slices.IndexFunc(s.queue, func(j *job) bool {
+			return (!j.Service || rn.serviceSupport) && (j.bz == nil || (s.sessionHost(j) == rn.name && s.claimSessionOn(j, rn.name)))
+		})
 		if i < 0 {
 			break
 		}
@@ -345,11 +426,19 @@ func (s *Server) assign(rn *runnerState, held map[string]bool) []*job {
 
 // assignment is what a runner gets to run j.
 func (s *Server) assignment(j *job) api.RunnerJob {
-	return api.RunnerJob{
+	out := api.RunnerJob{
 		ID: j.ID, Argv: j.Argv, Script: j.Script, Cwd: j.Cwd, Env: j.Env, TimeoutSec: j.TimeoutSec,
-		Workspace: j.Workspace, Outputs: j.Outputs,
+		Workspace: j.Workspace, Outputs: j.Outputs, Ports: j.Ports,
 		MaxLog: s.cfg.MaxLog, MaxWorkspace: s.cfg.MaxWorkspace, MaxDownload: s.maxDownload(),
 	}
+	if j.bz != nil {
+		sess := s.sessions[j.SessionID]
+		out.Bazel = &api.RunnerBazel{MaxUpload: s.cfg.MaxUpload, DiskCacheMax: s.cfg.DiskCacheMax, Command: *j.bz, Session: sess.Session, CacheReadOnly: s.cfg.CacheReadOnly, SessionIdleSec: int(s.cfg.SessionIdle.Seconds())}
+		if s.cache != nil {
+			out.Bazel.CacheCredential = sess.credential
+		}
+	}
+	return out
 }
 
 func (s *Server) maxDownload() int64 {
@@ -405,6 +494,9 @@ func (s *Server) runnerStarted(w http.ResponseWriter, r *http.Request) {
 	if j.State == api.Queued {
 		now := time.Now().UTC()
 		j.State, j.StartedAt = api.Running, &now
+		if j.Service {
+			go s.probe(j)
+		}
 		if j.rn.sandbox != "" {
 			j.Sandbox = j.rn.sandbox
 		}
@@ -676,7 +768,7 @@ func (s *Server) runnerInfo() (slots, running int, list []api.RunnerInfo) {
 		slots += rn.slots
 		running += len(rn.jobs)
 		list = append(list, api.RunnerInfo{Name: rn.name, Slots: rn.slots, Running: len(rn.jobs),
-			LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet, Disk: rn.disk})
+			MemoryAvailable: rn.memoryAvailable, Load: rn.load, Sessions: rn.liveSessions, LastSeen: rn.lastSeen.UTC(), Sandbox: rn.sandbox, Source: rn.source, NetworkIsolation: rn.privateNet, Disk: rn.disk})
 	}
 	for _, rn := range s.retired {
 		running += len(rn.jobs) // still finishing on a superseded instance
@@ -717,6 +809,9 @@ func (s *Server) runnerFiles(w http.ResponseWriter, j *job, paths []string) {
 	outputs, runner, outErr, skippedAll, gone := j.Outputs, j.Runner, j.OutError, j.OutSkipped, j.WorkDeleted
 	s.mu.Unlock()
 	for _, p := range paths {
+		if j.SessionID != "" {
+			break
+		}
 		if !slices.ContainsFunc(outputs, func(o string) bool { return covers(o, p) }) {
 			declared := "none"
 			if len(outputs) > 0 {
@@ -745,7 +840,18 @@ func (s *Server) runnerFiles(w http.ResponseWriter, j *job, paths []string) {
 	if f != nil {
 		defer f.Close()
 	}
+	if j.SessionID != "" {
+		var err error
+		paths, err = resolveSessionPaths(f, paths)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	match := func(name string) bool {
+		if name == artifactIndex {
+			return false
+		}
 		return slices.ContainsFunc(paths, func(p string) bool { return under(path.Clean(p), name) })
 	}
 	// First pass: which patterns matched, so missing ones go in the headers.

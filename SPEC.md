@@ -45,7 +45,7 @@ tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>      
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
-           [--net auto|private|host] [--min-free 10%] [--drain-timeout 15m]
+           [--net auto|private|host] [--min-free 10%] [--max-client-cache 1GB] [--drain-timeout 15m]
 tun token [--data DIR] new NAME   issue a client token on the server host
 tun runners                       (JSON lines: the server's live runners)
 tun bazel [--session NAME] [--cold] [--timeout DUR] [--json] <bazel command> [args...]   (see Bazel sessions)
@@ -102,7 +102,7 @@ Queueing is visible: if the created job is waiting in the FIFO (`queue_position`
 `running` from healthz), polls the job every 500ms, and when it starts prints
 `tun: started after Xs in queue` before streaming output. Non-JSON attached runs then print
 where the job runs, once the server decided: `tun: running on hub` (the server itself) or
-`tun: running on runner NAME` (also `tun bazel`, whose jobs run on the hub). SIGINT/SIGTERM while queued cancel it.
+`tun: running on runner NAME` (also `tun bazel`, with session affinity). SIGINT/SIGTERM while queued cancel it.
 `tun run --json` adds `queue_sec` and `run_sec` to its object.
 On completion, non-JSON attached runs (including `--tail`) print a final stderr line:
 `tun: job <id> <state> exit=<code> after <run>s (<queue>s queued)` with seconds to three
@@ -289,9 +289,11 @@ prints it ("tun: job ID exited; server error: ...").
 `tun run --service [--port N]... -- <cmd>` starts a job meant to run until canceled (dev server,
 database, test fixture):
 - No timeout unless `--timeout` is given explicitly (`timeout_sec: 0` = none).
-- Not queued and not counted against `--max-jobs` (services are mostly idle and must not starve
+- On a hub with local slots: not queued and not counted against `--max-jobs` (services are mostly idle and must not starve
   or be starved by builds). Instead at most `--max-services` (default 4) run at once; creating
-  another fails with 429 and an explanation, rather than queueing indefinitely.
+  another fails with 429 and an explanation. With `--local-slots 0`, services instead queue
+  on service-capable runners and occupy runner slots. Their HTTP proxy uses runner-initiated
+  upgraded HTTP connections, including streaming and WebSocket traffic.
 - Each requested port N is a name: the server allocates a free host port H (kernel-chosen, not
   held by another live service) and sets `TUN_PORT_<N>=H` in the job env, plus `PORT=H` when
   exactly one port was requested (these override `-e`). The service must listen on
@@ -330,7 +332,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   `--sandbox` and `--net auto|private|host` as for serve: with a private network the runner
   runs the job's network helper and serves its egress proxy itself, so the job's HTTP(S)
   traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
-  `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
+  `~/.config/tun/token`. It must be the hub admin token; client tokens cannot authenticate runners. a separate runner credential
   (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
   work, finishes its jobs up to --drain-timeout (default 15m) and tells the hub it is
   leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
@@ -338,7 +340,9 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   to start. All its hub requests have timeouts (2 minutes; polls 90s).
 - Scheduling: one FIFO; the head job goes to whichever free slot asks first: one of the hub's
   `--local-slots` (default `--max-jobs`; `0` = pure hub that only dispatches) or a runner's.
-  Services always run on the hub (not counted in either). healthz `max_jobs` = local slots +
+  Services run on the hub when it has local slots. With `--local-slots 0` they queue on
+  service-capable runners and hold a runner slot until stopped; `--max-services` still bounds
+  total admitted services. healthz `max_jobs` = local slots +
   live runners' slots, `running` counts jobs on both. With `--local-slots 0` the hub doesn't
   unpack workspaces at all; the runner enforces `--max-workspace` (the job then fails instead
   of a 413 at creation). With local slots the hub unpacks at creation as before (and deletes
@@ -481,8 +485,10 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `--remote_cache=`) override it. The first command of a sandbox says "started a new session
   sandbox ...; remote cache: tun's, through /tun/sock/cache.sock" (or why there is none).
 - **Jobs.** Each command is a job (`POST /v1/jobs` with `bazel`, see the API) in the normal
-  FIFO; it needs a hub-local slot (a hub with `--local-slots 0` answers 409) and is never
-  given to a runner. It also needs its session: a session runs one command at a time, so the
+  FIFO; it needs a slot on its session host (hub or runner). New sessions are placed by
+  free job slots first, then available memory, CPU-normalized load, free disk and per-host session capacity; existing sessions retain
+  affinity to one host instance, even while its slots are busy. A pure hub queues until a
+  session-capable runner is available. It also needs its session: a session runs one command at a time, so the
   scheduler skips a bazel job whose session is busy (later jobs may start first) and sets
   `queue_reason` on it (tun prints it with the queued line). The job object has `session`,
   `session_id`, and `argv` = `["bazel", args...]`. Once it has a slot and its session, the job
@@ -493,8 +499,8 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   the bazel client (Bazel cancels the command), SIGKILL after the kill grace, and if the
   command still hasn't ended after twice the grace, kill the session sandbox. A server
   orderly shutdown finishes admitted commands before killing the sandboxes; after a crash
-  the next server marks running bazel jobs failed. `tun get` of
-  a bazel job is a 409 (outputs stay in the session's output base).
+  the next server marks running bazel jobs failed. `tun get` fetches retained outputs and test logs by label
+  (see Retained session artifacts).
 - **Sync.** The client lists the same files as for `tun run` (minus top-level `bazel-*`
   symlinks: Bazel's convenience links) and builds a manifest: entries `{p, t: f|d|l, m (perm
   bits), s (sha256), n (size), l (link target)}`, each parent directory listed before its
@@ -528,11 +534,15 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   `state` and `error` (only those, plus `exit_code`, when the command never ran).
 - **Lifetime.** A session is deleted (Bazel `shutdown` through the agent, then the sandbox is
   closed and the dir removed) after `--session-idle` (default 30m) without a command. At most
-  `--max-sessions` (default 2) exist; a bazel job for a new session when that many exist
+  `--max-sessions` (default 2) exist **per host**; memory can lower the effective capacity
+  (1.5GiB reserved per new JVM, always allowing one session). A new session first tries
+  another host with capacity; when all hosts are full it
   evicts the least recently used idle one (one eviction at a time) and waits for it. Sessions
-  survive a server restart on disk (`bazel_server: false` until the next command starts a new
-  sandbox).
-- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root,
+  on the hub survive a server restart on disk (`bazel_server: false` until the next command
+  starts a new sandbox). Runner leases belong to a process instance: host loss fails its
+  active commands and the next command recreates the session elsewhere, using the hub
+  remote cache. A hub restart also recreates remote leases.
+- `GET /v1/sessions?client=NAME|mine=1` / `tun sessions`: `{id, name, client, root, host (local or runner name),
   created_at, last_used, commands, last_job, state (idle|busy|stopping), job, bazel_server,
   expires_at}`, most recently used first. healthz adds `sessions` and `max_sessions`.
 
@@ -662,3 +672,49 @@ Crashes and expired drain timeouts retain the failure behavior described above.
 Job creation sends a random `X-Tun-Request-Id` per request, reused on retries. The server
 returns the existing job for the same client and key for 24 hours, including across restarts,
 while the job remains retained. Failed admissions do not consume the key.
+
+### Runner session transport
+Runners advertise `session_support`, `memory_available` (MemAvailable bytes), `load`
+(one-minute load average divided by CPU count) and live `sessions` IDs in polls; `tun runners` exposes
+memory, load and session count. Assignments carry a Bazel manifest, session metadata and
+limits (including upload, workspace and disk-cache limits); runners fetch verified file contents
+in batches from `POST /v1/runner/cas` (up to 256 requested digests, tar response),
+with four concurrent requests. Both hosts use the same session engine, agent, manifest sync, per-client caches and BEP parser.
+Logs use the existing offset protocol; exit/done also carries the summary and BEP JSON.
+The hub's poll response carries authoritative session leases; revoked idle sessions stop.
+
+On runners `/tun/sock/cache.sock` serves an HTTP/2 reverse proxy to the hub REAPI cache.
+The server issues a random per-session credential in the assignment, kept in runner memory;
+the sandbox sees only its socket. `/v1/session-cache/{rpc}` authenticates with `X-Tun-Session` and
+`X-Tun-Session-Credential` headers, using a session map lookup and constant-time comparison,
+and fixes the client namespace from the lease, ignoring request identity headers. It grants no ordinary API access
+and is revoked with the lease. Hub and runner traffic must use a trusted network or HTTPS,
+as with existing runner credentials. Cache action writes follow the hub's policy.
+
+Runner session revocation retains the hub lease in a stopping state until a later poll no
+longer lists that sandbox, preventing JVM overlap during eviction. Idle leases on draining
+runners are revoked immediately; commands already running keep their leases. A failed
+command that never created a sandbox releases its reservation through the same handshake.
+Local sessions from disk are discarded when restarting with no local slots. Local
+placement resource samples are cached for one second. Runner CAS retention uses the
+runner's KeepBlobs interval (24h by default), and disk pressure also reclaims session CAS;
+abandoned inner job dirs expire after an hour.
+
+### Retained session artifacts
+After each session command, tun snapshots BEP target output files and every test attempt's
+logs into the command's retained output archive before releasing its session lock. Runners
+upload it to the hub. `tun get ID //pkg:target` fetches its outputs; a test label also
+fetches its attempt logs (`//pkg:test.log` selects only logs). Workspace-relative staged
+paths such as `bazel-bin/pkg/output` also work. Artifacts survive subsequent commands,
+session eviction and runner/hub restarts, until `--keep-work` retention or disk pressure
+removes them. Downloads use ordinary owner/admin authorization. Files are opened through
+the session output base's os.Root; arbitrary absolute paths are never accepted. The
+per-command byte limit is `--max-download`; collection errors appear in the job's
+output error and downloads fail explicitly. Directory/tree artifacts are not yet staged.
+The archive retains an uncapped label index; BEP JSON for agents remains bounded.
+
+Runner session engines trim their per-client repository caches with
+`--max-client-cache` (default 1GB; 0 disables the budget), protecting every live session's
+client. Blob fetches use the runner's trusted CAS path because the hub already checked
+uploader ownership at admission. Session cache credentials select the authenticated
+client's namespace, never a caller-supplied identity header.

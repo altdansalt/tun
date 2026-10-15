@@ -20,7 +20,9 @@ import (
 
 const getUsage = `usage: tun get [-o DIR] <id> PATH...
 
-Download files or directories (recursively) from a finished job's work dir. PATHs are
+Download files or directories (recursively) from a finished job's work dir.
+For tun bazel: //pkg:target fetches retained outputs; //pkg:test also fetches test
+logs (//pkg:test.log selects only logs). bazel-bin/... paths work too. PATHs are
 relative to the workspace root (not the job's -C dir) and may be globs (*, ?, [...] within
 one path element; no **). They are written to the same relative paths under the local
 workspace root (git toplevel of the cwd, else the cwd), or under -o DIR. Existing files are
@@ -274,7 +276,13 @@ func getCmd(args []string, e Env) int {
 		return errorf(e, "usage: tun get [-o DIR] <id> PATH... (job ids: tun ls)")
 	}
 	id, paths := pos[0], pos[1:]
-	if err := checkPaths(paths); err != nil {
+	filePaths := []string{}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "//") {
+			filePaths = append(filePaths, p)
+		}
+	}
+	if err := checkPaths(filePaths); err != nil {
 		return errorf(e, "get: %v", err)
 	}
 	dir := *out

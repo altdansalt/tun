@@ -80,13 +80,19 @@ func frameWrite(w http.ResponseWriter, b []byte) error {
 	return e
 }
 
-// grpcCode is c, or DEADLINE_EXCEEDED (4) for any timeout. HTTP/2 wraps its read deadline
-// error with %w, which os.IsTimeout doesn't unwrap.
+// grpcCode is c, or DEADLINE_EXCEEDED (4) for any timeout.
 func grpcCode(c int, e error) int {
-	if os.IsTimeout(e) || errors.Is(e, os.ErrDeadlineExceeded) {
+	if grpcTimeout(e) {
 		return 4
 	}
 	return c
+}
+
+// grpcTimeout reports a read timeout. HTTP/2 wraps its read deadline error with %w, which
+// os.IsTimeout doesn't unwrap, and request bodies can return an opaque "i/o timeout" after
+// their read timer fires, even when it was refreshed before the read observed it.
+func grpcTimeout(err error) bool {
+	return os.IsTimeout(err) || errors.Is(err, os.ErrDeadlineExceeded) || (err != nil && err.Error() == "i/o timeout")
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -530,6 +530,171 @@ Exercise deviations: bounded test targets instead of full suites on the shared
 (the explicit customer-exercise exception). No change to the agreed hermetic-toolchain
 product direction or milestone order. No local heavy Bazel baseline was run.
 
+## Runner session placement (feat/session-placement)
+
+M2 session placement now runs the existing session engine on runners as well as the hub.
+A lease binds a session to a runner **instance**, not just its name. Every command keeps
+that affinity while the lease lives; a busy host queues its own session's commands rather
+than moving a warm JVM. Lost/restarted hosts lose their leases; their active commands fail
+and the next command creates a session elsewhere. A pure hub accepts Bazel commands and
+waits for a session-capable runner. Old runners do not advertise this capability and receive
+only v0 jobs.
+
+The hub applies `--max-sessions` per host. Placement first prefers hosts with a free command slot, then spare session
+capacity, available memory, CPU-normalized one-minute load and assigned jobs; hosts below their disk
+reserve receive no new sessions. New JVMs reserve 1.5GiB against the memory sample so
+pending assignments cannot all consume the same reported headroom. Memory can reduce a
+host's effective capacity; at least one session remains possible. If all eligible hosts
+are full, evict an idle LRU session on the chosen host. Polls include memory available,
+load and live session IDs; `tun runners` exposes these and `tun sessions` includes `host`.
+
+Runner code lives in `runner_session.go`; placement and cache authorization live in
+`session_placement.go`. There is no second copy of session execution: the runner owns a
+small server instance as its session engine, reusing `bazelCommand`, the sandbox agent,
+manifest sync, per-client caches and BEP parser. Runner log chunks, cancellation and
+exit/done acknowledgements use the existing transport. The engine's parent runner data dir
+is hidden in bwrap, including v0 jobs. Session caches remain per client on each host.
+
+The runner's Unix cache socket is an HTTP/2 reverse proxy to the hub. Each lease has a
+random server-issued cache credential, retained outside the sandbox. The hub binds that
+credential to the lease's client namespace and revokes it on eviction or host loss; it
+cannot authorize the ordinary tun API. Identity headers from the sandbox cannot change
+the namespace. The forwarding seam passes the whole REAPI request/response, including
+trailers, so the remote-execution branch can serve Execute through the same socket.
+The runner still holds a job slot for the session command; separating session admission
+from future action slots remains the remote-execution branch's responsibility.
+
+Direction/deviations: this implements the agreed M2 placement direction. Existing sessions
+stay on a full/busy host until eviction or loss, to preserve affinity. Explicit/default
+session names still serialize concurrent commands; automatic unnamed-session splitting,
+live JVM migration and remote lease recovery after a hub restart remain future work.
+Two runner processes in one dev job share physical resources: this measures protocol and
+retention behavior, not the throughput of two independent 4GB machines.
+
+### Placement measurements (2026-10-15)
+
+Command (all work inside a tun job; no shared server deployment):
+
+```
+tun run --timeout 15m -c 'DEV_TUN_SERVE_ARGS="--local-slots 0 --runner-timeout 3s" scripts/dev-tun.sh scripts/bench-placement.sh'
+```
+
+The script starts two runner processes with separate data dirs, each one job slot;
+`--max-sessions=2` per host. It generates 200 trivial genrules under a temporary workspace,
+with every Bazel output base inside the job's TMPDIR. Outer job
+`20261015T113853982116-eb0454df` ran on tun-r2; all steps exited 0:
+
+| Step | Host | Wall | Action behavior | Private-server job |
+|---|---|---:|---|---|
+| New alpha, empty cache | b | 48.887s | 200 linux-sandbox | `20261015T113902365453-73e65de1` |
+| Warm alpha | b | 3.291s | no actions | `20261015T113951182220-7a64dbb0` |
+| New beta, separate host/cache dirs | a | 39.988s | 200 remote cache hits | `20261015T113954480733-52f16f62` |
+| New gamma; three simultaneous retained sessions | a | 43.819s | 200 remote cache hits | `20261015T114034476729-bdceb2a0` |
+| Alpha after beta and gamma | b | **2.320s** | no actions; same warm JVM | `20261015T114118377294-f07c3ed3` |
+| Kill b; recreate alpha on a | a | 42.777s | 200 remote cache hits | `20261015T114124068068-7ad354a8` |
+| Warm recreated alpha | a | 5.095s | no actions | `20261015T114206780060-411d0599` |
+
+Before host loss, `tun sessions` showed alpha on b and beta/gamma on a: three JVMs
+retained beyond the former global two-session limit. Losing b moved alpha to a and evicted
+beta there, leaving gamma and alpha, respecting a's maximum of two. Placement queue times
+were 1–4ms in this run. The three cold cached builds each reported all 200 remote hits and
+no local actions. These trivial actions do not establish a useful cache-versus-execution
+speedup: cold JVM/analysis and host load dominate their wall times.
+
+An earlier two-session run, outer job `20261015T113327205286-24c898b7` on tun-r2,
+measured 32.271s seed; 2.517s warm alpha; 35.207s beta on a second runner (200 remote
+hits); 2.397s retained alpha; 42.296s moved alpha (200 remote hits); 4.904s warm again.
+An isolated in-process real-Bazel test in `20261015T113033771891-0e597ee1` measured
+10.2s seed and 10.3s moved rebuild with a remote cache hit. Later runs of the same test
+under shared-host load took 29.9/37.5s (`20261015T113655569050-7f1a73a3`). Thus the
+previous 12–15s cold-cache measurements are achievable observations, not a placement SLA;
+this exercise observed 10–44s for cold cached sessions, and did not measure independent
+physical-runner throughput or rerun the three external customer repositories.
+
+Expected effect: capacity grows with eligible hosts instead of stopping at two globally,
+up to `--max-sessions * hosts` subject to memory/disk; unrelated sessions can run on
+independent hosts, while repeat commands retain JVM/analysis state. The demonstrated
+benefit is preserving alpha's 2.320s warm request after a third session, avoiding an eviction
+and another cold start. Host loss still pays JVM/analysis startup, but reuses the client's
+hub action cache rather than executing its cached actions again.
+
+Validation: full vet/build/race tests plus both CLI smoke suites passed in
+`20261015T113239837300-0552ac47` (397.665s). Additional placement, serialization,
+streaming, per-host capacity, credential revocation and cross-host real-cache checks passed
+in `20261015T113655569050-7f1a73a3` (91.799s). The final sync-deadline regression and
+cold-session metadata checks passed in `20261015T114209081325-0266b8fd` (26.106s).
+Follow-up vet/build, focused race checks and both smoke suites passed in
+`20261015T114042863948-8ab096a9` (161.991s). Final vet/build plus real cross-host
+cache and stalled-sync timeout checks passed in `20261015T114315276575-7e381701`
+(104.701s). Gazelle regenerated BUILD files in `20261015T113351284471-8588ce2e` (444.014s).
+
+Tun friction: full Go test output can stay at a few package lines for minutes while a
+package runs; `--tail` heartbeats and `tun logs` distinguish liveness but not which test is
+active. The cold Gazelle invocation compiled its SDK stdlib and took 444s; a direct
+`bazel run //:gazelle` does not automatically inherit bazel-ci.sh's disk/repository-cache
+flags. Two private runner processes still share their outer job's CPUs/memory, so their
+cold build times vary greatly with other work on the shared host. No shared service was
+restarted or replaced.
+
+### Placement review hardening
+
+New sessions prioritize a free command slot; load is normalized by host CPU count.
+Existing affinity remains intact. Host loss schedules queued commands after lease removal,
+and a hub restarted without local slots treats persisted local sessions as lost. Eviction
+keeps remote leases stopping until the runner confirms that the sandbox is gone; draining
+hosts revoke idle leases. Failed sandbox startup also revokes its memory reservation.
+
+Runner cache forwarding accepts only canonical two-component RPC method paths. The scoped
+credential travels in a header, never a URL; redirects lose Location before reaching the
+sandbox. Hub authentication uses the session map and constant-time credential comparison.
+The runner's inner engine applies retention, hub upload/workspace/disk-cache limits, and
+deferred job cleanup. CAS fetches use tar batches of up to 256 digests and four workers;
+local placement samples read OS resources at most once per second. No milestone deviation.
+
+Review validation observations (2026-10-15):
+
+- Job `20261015T120757257515-bac7cc45`: seven placement/security/transport regressions
+  passed with the race detector. The batch sync test fetched and verified 600 distinct
+  file contents in **3 HTTP requests**; this is a request-count measurement, not a
+  throughput benchmark.
+- Job `20261015T121551049772-8db4517b`: runner Bazel configuration honored the hub's
+  `123M` disk-cache limit (20.605s including compilation; test 0.21s).
+- Job `20261015T121905346536-989b2095`: disk reclamation and REAPI deadline tests passed
+  three times with the race detector (18.114s). Enabling runner retention exposed an old
+  disk test's global sampler race; that test now stops the unused engine before mocking
+  the sampler. The old 100ms REAPI idle-timeout test passed all three repeats but failed in two
+  full loaded-host runs. Its timing relationships now use a one-second idle window;
+  opaque HTTP/2 timeout errors now map to DEADLINE_EXCEEDED even after a timer refresh.
+  This small cache transport correction was needed to complete full CI.
+- Gazelle refresh `20261015T121357860351-1a132462` made no BUILD changes; 608.887s job
+  time, 606.303s Bazel time, 427.35s critical path, 64 linux-sandbox actions. This direct
+  cold invocation used a TMPDIR output root without the disk-cache setup in bazel-ci.sh.
+  The cold Go toolchain/stdlib build made this substantially slower than the warm recipe.
+
+Final validation switched to the documented BuildBuddy fallback after the shared hub
+returned retryable submission errors: healthz showed 1,216,679,936 free bytes against a
+2,630,909,542-byte reserve, while runners had roughly 17–19GB free. No shared server
+configuration or storage was changed. The fallback exposed two test environment assumptions:
+the direct cache fixture now ignores external Bazel rc files, and the CLI smoke assertion
+accepts the host socket path used with sandbox none as well as bwrap's fixed socket path.
+These do not change the milestone direction.
+
+Final full CI passed with native Bazelisk 9.3.0 on the fallback runner:
+[invocation ab621729-91f9-4502-8045-2a6f0165bb07](https://app.buildbuddy.dev/invocation/ab621729-91f9-4502-8045-2a6f0165bb07),
+125.697s for scripts/ci.sh (12:41:23.401–12:43:29.098 UTC). Vet/build and all race-tested
+Go packages passed (client 37.583s, REAPI 32.132s, server 3.709s), then both CLI smoke
+suites passed (23.982s and 16.611s), including real Bazel cache reuse, warm runner affinity,
+cache forwarding, and hub/runner restart draining. The fallback host uses sandbox none;
+its bwrap-only Go tests skip. Real bwrap cross-host cache checks had already passed in
+tun job `20261015T120940467899-f2b95807` (that run exposed the subsequently fixed double
+eviction). A final full rerun on tun remained blocked by hub disk pressure.
+
+Fallback friction: BuildBuddy's PATH wrapper dropped the Unix-proxy behavior and dialed
+`grpc://tun` directly (diagnosed in invocation `a602ef15-85a8-4885-9d02-8950164ad1da`).
+bb-ci.sh now selects the runner's installed Bazelisk directly and pins 9.3.0, preserving
+Bazel's native remote_proxy transport. Failed smoke assertions now print their captured
+Bazel diagnostics instead of deleting the only useful error log.
+
 ## Client identity and tool cache retention
 
 Client tokens now bind a server-issued name to jobs, warm sessions and REAPI action-cache
@@ -537,7 +702,7 @@ namespaces (see SPEC.md and docs/deploy.md). The legacy shared token remains adm
 migration and provides no isolation. This implements the trust boundary assumed by M1/M2;
 it does not change the Bazel-native direction. Shared v0 tool caches still allow poisoning.
 
-The hub trims tool caches to budgets (SPEC.md, Tool cache budgets): the shared Go/XDG caches
+Each session host trims tool caches to budgets (SPEC.md, Tool cache budgets): the shared Go/XDG caches
 together, each client's Bazel repository cache separately. Bazel's disk caches are left to
 Bazel's own GC (`--experimental_disk_cache_gc_max_size`) except under disk pressure, and
 bazelisk downloads are never trimmed. Bazel trusts whole repository cache entries and
@@ -551,3 +716,58 @@ file contents their client uploaded, so a digest learned elsewhere is not a capa
 The REAPI CAS is still shared by digest (SPEC.md, Known gaps); when M2 adds remote
 execution, inputs fetched by executors should be checked against the same per-client
 ownership (FindMissingBlobs answering per client) before a shared CAS serves other clients.
+
+## Zero-local-slot hub follow-up
+
+Merged per-client tokens/uploader ownership into runner placement. The hub admits only
+manifest digests owned by the authenticated client; runner-side fetching is trusted
+after that admission. That token identity selects both runner-local client caches and
+the hub action-cache namespace through the session credential. Runner session engines
+now trim idle per-client repository caches, protecting live sessions.
+
+A hub with `--local-slots 0` also schedules services on runners, with runner-initiated
+HTTP upgrade tunnels for its port proxy. Services occupy runner slots until stopped;
+this differs from hub-local services' separate pool and keeps runner concurrency bounded.
+Deployment flags are in [deploy.md](deploy.md#coordination-only-hub).
+
+Session command outputs and test-attempt logs are snapshotted before the session can
+run another command, then shipped to the hub; `tun get ID //pkg:target`, `//pkg:test`
+and `//pkg:test.log` work after runner loss or session eviction. This is an M2 bridge
+to M3's on-demand CAS downloads: it eagerly copies output files, bounded by
+`--max-download`, and does not yet retain directory/tree artifacts. The uncapped label
+index is kept in the command archive; summaries for agents remain bounded. No change
+to the agreed milestone order or remote execution direction.
+
+Validation of the zero-slot follow-up (2026-10-15):
+
+| exercise | outer tun job | result |
+|---|---|---|
+| full CI: vet, build, race tests, CLI suites and drain/restart checks (`TEST_FLAGS="-p 1"`) | `20261015T135806072272-f1303fc8` (tun-r4) | passed in 1285.220s; client 477.385s, REAPI 215.610s; zero-slot hub drain 3.000s, session hub/runner drains 54.848/60.396s |
+| real hub/runner restarts, including zero-slot hub and runner-hosted sessions | `20261015T134528679625-281e4940` (tun-r4) | 222.811s; ordinary zero-slot hub drain 4.249s; session hub/runner drains 58.000/51.097s, retained output/logs and cache hits after restart |
+| runner service HTTP streaming/WebSocket, service re-adoption after hub drain timeout, synchronized session cancellation | `20261015T135044572540-2a60fdf7` (tun-r6) | 111.789s including compilation; tests 4.606s, service 0.40s, service restart 1.11s |
+| HTTP/1.1 tunnel ALPN against an HTTP/2-capable TLS hub | `20261015T134820174178-8554debd` (tun-r5) | passed; test 0.11s |
+| Gazelle regeneration with bounded heap and the host disk cache | `20261015T134954387068-ffe0cc4e` (tun-r4) | 60.595s; 64 disk-cache hits |
+
+Session drain timings include cold JVM startup/sync because SIGTERM arrives just after
+the runner admission commit, before the command has necessarily started. All servers
+and runners in these checks are private processes inside the outer tun job.
+
+Remote tun friction during this follow-up: an uncapped/no-disk-cache Gazelle job was
+placed on the hub (`20261015T134211766721-30228d4f`) and canceled after 428s with no
+progress beyond analysis; the bounded-heap, disk-cache run on tun-r4 above completed
+in 60.595s (different settings, not a controlled host comparison). A duplicate CLI
+smoke job also landed on the hub and was canceled after 201s. This is exactly the
+placement pressure `--local-slots 0` is meant to remove. The initial parallel-package
+full race run (`20261015T133510967260-04339af6`) exceeded the 10-minute client-package
+limit and a real REAPI Bazel command's deadline. Serial package execution (`-p 1`)
+passed all Go packages in `20261015T134835670473-6b23a643` (client 366.601s, REAPI
+144.093s); that superseded job was canceled before finishing its old smoke script.
+The failure also exposed a cancellation test racing runner sandbox startup; it now
+waits for command output before asserting that a warm lease survives cancellation.
+
+The passing full run also downloaded 3 files (751 bytes) by test label and 2 log
+files (720 bytes) by `.log`, after another session command, and passed private-network
+runner service readiness/proxy checks. A redundant standalone service check
+(`20261015T140920775200-6fc650c8`) stayed queued for 558.903s before cancellation;
+the full CI covered that check. A second verbose full CI was canceled once the
+complete run passed. No shared hub or runner was restarted for these checks.

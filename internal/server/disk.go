@@ -125,6 +125,9 @@ func (s *Server) reclaimDisk() {
 		s.mu.Lock()
 		var victim *session
 		for _, o := range s.sessions {
+			if o.runner != nil {
+				continue
+			} // remote sessions cannot free the hub filesystem
 			if o.job == nil && !o.stopping && !s.queuedFor(o) && (victim == nil || o.LastUsed.Before(victim.LastUsed)) {
 				victim = o
 			}
@@ -177,7 +180,7 @@ func fmtBytes(n int64) string {
 	return fmt.Sprintf("%dB", n)
 }
 
-// reclaimBlobs is the runner's reclaimDisk: cached workspace blobs, least recently used first.
+// reclaimBlobs is the runner's reclaimDisk: workspace and session CAS blobs, least recently used first.
 func (r *Runner) reclaimBlobs() {
 	if !r.cfg.MinFree.set() {
 		return
@@ -187,15 +190,17 @@ func (r *Runner) reclaimBlobs() {
 		return
 	}
 	dir := filepath.Join(r.cfg.DataDir, "blobs")
-	ents, _ := os.ReadDir(dir)
 	type blob struct {
 		name string
 		used time.Time
 	}
 	var list []blob
-	for _, e := range ents {
-		if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
-			list = append(list, blob{e.Name(), fi.ModTime()})
+	for _, base := range []string{dir, filepath.Join(r.cfg.DataDir, "session-host", "cas")} {
+		ents, _ := os.ReadDir(base)
+		for _, e := range ents {
+			if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
+				list = append(list, blob{filepath.Join(base, e.Name()), fi.ModTime()})
+			}
 		}
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].used.Before(list[b].used) })
@@ -204,11 +209,11 @@ func (r *Runner) reclaimBlobs() {
 		if !low() {
 			break
 		}
-		if os.Remove(filepath.Join(dir, b.name)) == nil {
+		if os.Remove(b.name) == nil {
 			n++
 		}
 	}
 	r.reclaimed.Add(int64(n))
 	free, _, _ := diskStat(r.cfg.DataDir)
-	r.cfg.Logf("tun runner: disk space is low (under --min-free %v): deleted %d cached workspaces; %s free now", r.cfg.MinFree, n, fmtBytes(free))
+	r.cfg.Logf("tun runner: disk space is low (under --min-free %v): deleted %d cached workspace/session blobs; %s free now", r.cfg.MinFree, n, fmtBytes(free))
 }

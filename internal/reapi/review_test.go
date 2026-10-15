@@ -221,3 +221,18 @@ func TestUploadKeepsIncrementalHash(t *testing.T) {
 		t.Fatal("finished upload missing")
 	}
 }
+
+// An expired HTTP/2 read timer can expose a plain error rather than net.Error.
+// Its gRPC status must remain DEADLINE_EXCEEDED after a later timer refresh.
+func TestOpaqueHTTP2Timeout(t *testing.T) {
+	for _, err := range []error{os.ErrDeadlineExceeded, fmt.Errorf("i/o timeout"), fmt.Errorf("wrapped: %w", os.ErrDeadlineExceeded)} {
+		if !grpcTimeout(err) {
+			t.Errorf("deadline not recognized: %v", err)
+		}
+	}
+	for _, err := range []error{nil, fmt.Errorf("malformed frame")} {
+		if grpcTimeout(err) {
+			t.Errorf("non-timeout recognized as deadline: %v", err)
+		}
+	}
+}

@@ -51,6 +51,9 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, p := range paths {
+		if strings.HasPrefix(p, "//") && j.SessionID != "" {
+			continue
+		}
 		if err := api.ValidFilePath(p); err != nil {
 			writeErr(w, 400, err.Error())
 			return
@@ -61,11 +64,7 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, fmt.Sprintf("job %s is %s; files can be fetched once it has ended", snap.ID, snap.State))
 		return
 	}
-	if snap.SessionID != "" {
-		writeErr(w, 409, fmt.Sprintf("job %s is a tun bazel job: its outputs are in session %s's output base, which tun get can't fetch yet", snap.ID, snap.Session))
-		return
-	}
-	if snap.Runner != "" && snap.Runner != api.LocalRunner {
+	if snap.SessionID != "" || snap.Runner != "" && snap.Runner != api.LocalRunner {
 		s.runnerFiles(w, j, paths)
 		return
 	}

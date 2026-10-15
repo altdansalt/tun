@@ -500,7 +500,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "warm server") {
 		t.Fatalf("a cancel that Bazel obeyed must not end the session's server: %+v", r)
 	}
-	if r := ts.tun(ws, "get", b, "x"); r.code != 125 || !strings.Contains(r.stderr, "tun bazel job") {
+	if r := ts.tun(ws, "get", b, "x"); r.code != 1 || !strings.Contains(r.stderr, "no such file") {
 		t.Fatalf("tun get of a bazel job: %+v", r)
 	}
 	r := ts.tun(ws, "bazel", "--timeout", "1s", "sleep", "30")
@@ -545,14 +545,6 @@ func TestBazelSessionRestart(t *testing.T) {
 	r := ts.tun(ws, "bazel", "build")
 	if r.code != 0 || !strings.Contains(r.stderr, "started a new session sandbox") || !strings.Contains(r.stderr, "0 added, 0 updated, 0 deleted, 2 unchanged") {
 		t.Fatalf("after restart: %+v", r)
-	}
-}
-
-func TestBazelNeedsLocalSlots(t *testing.T) {
-	ts := startServer(t, server.Config{HubOnly: true})
-	r := ts.tun(bazelWS(t, map[string]string{}), "bazel", "build")
-	if r.code != 125 || !strings.Contains(r.stderr, "--local-slots 0") {
-		t.Fatalf("%+v", r)
 	}
 }
 
