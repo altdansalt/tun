@@ -5,6 +5,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httputil"
@@ -46,6 +47,12 @@ func (r *Runner) newSessionHost() error {
 	st := base.Clone()
 	st.Protocols = new(http.Protocols)
 	st.Protocols.SetHTTP1(true)
+	if st.TLSClientConfig != nil {
+		st.TLSClientConfig = st.TLSClientConfig.Clone()
+	} else {
+		st.TLSClientConfig = new(tls.Config)
+	}
+	st.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	r.serviceTransport = st
 	r.serviceHTTP = &http.Client{Transport: st}
 
