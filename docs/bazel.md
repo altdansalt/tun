@@ -795,3 +795,75 @@ than Bazel's own linux-sandbox once the 2 CPUs are shared by 3 actions. The runn
 on the same host as the hub; on other hosts each runner action adds its HTTP round trips to
 the hub (assignment, CAS fetches, started, exited, outputs, done), ~35ms each from an exe.dev
 VM, not measured here (see Deviations).
+
+### Go actions: input materialization and the tree cache
+
+Go compile actions name the Go SDK and the built standard library as inputs, so a remote
+action first copies (and hashes) thousands of files into a fresh exec root. Executors now
+report REAPI `ExecutedActionMetadata` (input fetch, execution, output upload) and healthz
+sums it (`execution.input_fetch_sec` etc.). `scripts/bench-rbe.sh build` (`bazel build
+//cmd/tun`, 11 remote actions; same topology as above):
+
+| | remote (--cold, all actions again) | local in the session | input fetch per remote action | job |
+|---|---|---|---|---|
+| copy every input | 216.3s elapsed | 165.1s | 3.1s (33.9s / 11) | 20261015T120047873986-6a0d09c2 |
+| tree cache (below) | 266.4s | 260.4s | 1.5s (17.0s / 11) | 20261015T125227334862-7f3f3996 |
+
+(The second run's host was busier: local went from 165s to 260s. Compare within a row.)
+
+**Tree cache** (internal/reapi/treecache.go): an input directory of 64+ files or 4MB+ that an
+action names the second time with the same digest is materialized once per executor data dir
+(`action-trees/`, verified while copied, LRU within 2GB, deleted at startup) and bound
+read-only into later exec roots instead of copied; the topmost such directory is taken (a
+varying `external/` is not, the SDK under it is). Never a directory that holds an output or
+the working dir. Remote is now at parity with local execution for this build on the same
+2-CPU host (the executors share its CPUs, so remote can't be faster here); the remaining
+1.5s per action is unexplained (smaller copied inputs, the first sighting of each tree).
+
+### Fixes from the review of feat/bazel-sessions
+
+- **Mount order (FixedRoot).** The session's job-writable `/tmp` was bound before the tmpfs
+  that hide the server user's home and the data dir; with the data dir under /tmp (every `tun
+  serve --ephemeral`) bwrap then created the tmpfs mount point inside the persistent session
+  tmp on the host, following a planted symlink. All hiding tmpfs now come first, and a session
+  sandbox refuses a mount under an earlier writable one (TestBwrapArgsOrder). Jobs (no
+  FixedRoot) keep binding their tree under /tmp when the data dir is there: it is new and
+  empty when their sandbox starts.
+- **Sweep.** The agent spared whatever pid `server.pid.txt` named, and commands can write that
+  file. Now it records the Bazel server (pid and start time) when a command of the sandbox
+  first ends with a live pid there, and never reads the file again; if that process is gone
+  later, nothing is spared and the server starts a new sandbox for the next command
+  (TestBazelSessionSweepForgedPid). Remaining hole: a session's first command (the workspace's
+  `tools/bazel` or `.bazeliskrc` can run anything as "bazel") can still name its own process.
+- **Identities.** Session ids, per-client Bazel caches and action cache namespaces are keyed by
+  `vm:<X-Exedev-Source-Vm>`, `self:<X-Tun-Client>` or `addr:<remote address>`, so a
+  self-reported name equal to a proxy-attested one is another client (TestIdentityOf,
+  TestBazelSessionRemoteCache). The visible `client` and `tun ls --client` are unchanged.
+  Session dirs from before are deleted at startup; old action cache entries are unreachable
+  (one cold build per client).
+
+### Deviations and limits
+
+- Runners in all measurements are `tun runner` processes on the same 2-CPU host as the private
+  hub (in the same tun job): a private hub in a job can't be reached from other hosts, so I
+  could not attach tun-r1..r4 to it. Sleep-based genrules measure the protocol overhead
+  correctly; CPU-bound builds can't get faster than local this way.
+- Sessions still run only on a hub with local slots (`--local-slots 0` answers 409), though
+  they no longer use one when executing remotely.
+- `--remote_local_fallback` runs an action in the session when the executors fail; such
+  results go to the client's own namespace.
+- Real-Bazel tests (TestBazelReal, TestBazelRemoteExecution, reapi's TestBazelCache and
+  TestBazelExecution, server's TestBazelRunnerExecution, e2e.sh's Bazel part) skip inside a
+  Bazel test unless `TUN_TEST_REAL_BAZEL=1` (bazel-ci.sh sets it): in a session or on an
+  executor bazelisk can't download Bazel. `//internal/client:client_test`,
+  `//internal/reapi:reapi_test` and `//scripts:e2e_test` stay out of the session benchmark
+  (client_test alone runs for minutes; the others still need a Bazel binary as test data).
+
+### Deploying on the shared server
+
+The hub creates `$DATA/runner-token` (0600) at start. Copy it to tun-r1..r4 and restart them
+with the new binary and `tun runner --token-file <file>` (or `TUN_RUNNER_TOKEN`): the client
+token is refused on runner endpoints, and only a runner that advertises actions (new binary,
+bwrap) gets them. Execution needs no flag (it comes with the default `--cache-dir=reapi`);
+then every session executes remotely on local slots + runners' slots, and its commands stop
+holding a job slot. Existing sessions are deleted at the first start (identities).
