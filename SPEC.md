@@ -42,6 +42,7 @@ tun run [flags] -c '<shell script>' run via bash -c
 tun status <id>   (JSON)          tun logs [-f] [--stderr] [--tail N] <id>       tun cancel <id>
 tun ls [--limit N] [--state S[,S...]] [--client NAME | --mine]   (JSON lines: recent jobs, newest first)
 tun get [-o DIR] <id> PATH...     download files/dirs/globs from a finished job's work dir
+                                  (tun bazel test jobs: PATH may be a test label, see Test logs)
 tun runner --hub URL [--token-file F] [--slots N] [--name NAME] [--data DIR] [--sandbox auto|bwrap|none]
            [--net auto|private|host] [--min-free 10%]
 tun runners                       (JSON lines: the server's live runners)
@@ -423,8 +424,21 @@ command other than tun's flags (a Bazel startup option) is a usage error.
   written)"); then the command runs in the session sandbox. Timeout and cancel send SIGINT to
   the bazel client (Bazel cancels the command), SIGKILL after the kill grace, and if the
   command still hasn't ended after twice the grace, kill the session sandbox. A server
-  shutdown kills the sandboxes; the next server marks running bazel jobs failed. `tun get` of
-  a bazel job is a 409 (outputs stay in the session's output base).
+  shutdown kills the sandboxes; the next server marks running bazel jobs failed.
+- **Test logs.** After a `test` or `coverage` command the server copies the logs the BEP names
+  for every attempt of every test (test.log, test.xml, `test_attempts/attempt_N.log`, ...)
+  from the output base into the job's own work dir (`jobs/<id>/sandbox/work`, which a session
+  job has only for this) as `bazel-testlogs/<package>/<name>/...`. Only paths under
+  `<out>/base/execroot/_main/bazel-out/<config>/testlogs/` are taken (the BEP file is written
+  in the sandbox, so its paths are untrusted), read through an `os.Root` on the output dir
+  without following a final symlink, regular files only, at most 64MB per job (a file over the
+  rest is cut off with a marker line). They live as long as other jobs' work dirs
+  (`--keep-work`), so a later command of the session can't overwrite them. `tun get <id>
+  PATH...` serves them like any job's files, and the client turns a label PATH (`//pkg:name`,
+  `//pkg`, `//:name`) into `bazel-testlogs/pkg/name`. The summary line of a test command
+  with a failed test and kept logs ends with `; logs: tun get <id> <first failed label>`.
+  `tun get` of a bazel job that kept nothing is a 404 saying so; build outputs stay in the
+  session's output base (not fetchable yet).
 - **Sync.** The client lists the same files as for `tun run` (minus top-level `bazel-*`
   symlinks: Bazel's convenience links) and builds a manifest: entries `{p, t: f|d|l, m (perm
   bits), s (sha256), n (size), l (link target)}`, each parent directory listed before its

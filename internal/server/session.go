@@ -926,7 +926,7 @@ func (s *Server) bazelCommand(j *job, sess *session, br *bazelRun, logs *jobLogs
 	logs.wait()
 	logErr := logs.writeErr()
 	if r.Err == nil {
-		s.bazelSummary(j, hp.out, useBEP, r, elapsed)
+		s.bazelSummary(j, hp.out, p.out, useBEP, r, elapsed)
 	}
 	if r.Err != nil {
 		tail := ""
@@ -959,7 +959,11 @@ var bepCommands = map[string]bool{"build": true, "test": true, "coverage": true,
 // line appended to its stderr log (before tun's own completion line) and recorded as the
 // job's "summary"; for every command the bounded JSON object in the job dir (bep.json:
 // GET /v1/jobs/{id}/bep, tun bazel --json). Bazel's exit status is authoritative.
-func (s *Server) bazelSummary(j *job, out string, useBEP bool, r sandbox.Result, elapsed time.Duration) {
+//
+// For test and coverage it also keeps the tests' logs (stageTestLogs) for tun get, and the
+// line of a failed test run says how to fetch them. out is the session's output dir on the
+// host, inOut the same dir as Bazel sees it (the BEP's paths).
+func (s *Server) bazelSummary(j *job, out, inOut string, useBEP bool, r sandbox.Result, elapsed time.Duration) {
 	p := bep.New(j.bz.Args[0])
 	var perr error
 	if useBEP {
@@ -982,6 +986,18 @@ func (s *Server) bazelSummary(j *job, out string, useBEP bool, r sandbox.Result,
 		return
 	}
 	line := sum.Line()
+	if c := j.bz.Args[0]; c == "test" || c == "coverage" {
+		n, err := s.stageTestLogs(j.ID, out, inOut, sum.Tests)
+		if err != nil {
+			log.Printf("tun: job %s: keeping test logs: %v", j.ID, err)
+		}
+		for _, t := range sum.Tests {
+			if n > 0 && !passingStatus(t.Status) {
+				line += "; logs: tun get " + j.ID + " " + t.Label
+				break
+			}
+		}
+	}
 	if perr != nil {
 		line += " (reading the BEP: " + perr.Error() + ")"
 	}
@@ -992,6 +1008,103 @@ func (s *Server) bazelSummary(j *job, out string, useBEP bool, r sandbox.Result,
 	s.mu.Lock()
 	j.Summary = line
 	s.mu.Unlock()
+}
+
+// passingStatus: a test's final BEP status that isn't a failure (see internal/bep).
+func passingStatus(st string) bool { return st == "PASSED" || st == "FLAKY" }
+
+// maxTestLogs bounds the test logs one job keeps (stageTestLogs); a file over what is left is
+// cut off with a marker line.
+var maxTestLogs int64 = 64 << 20
+
+// testLogsDir is where a bazel job's test logs are kept, relative to its work dir (which a
+// session job has only for these; tun get serves them like any job's files).
+const testLogsDir = "bazel-testlogs"
+
+// stageTestLogs copies the logs the BEP names for every attempt of every test (test.log,
+// test.xml; Bazel's bazel-out/<config>/testlogs/<package>/<name>/...) from the session's
+// output dir into the job's work dir as bazel-testlogs/<package>/<name>/..., so that tun get
+// can fetch them after the session's next command has replaced them. The paths come from
+// the sandbox (the BEP file is the build's to write), so only paths under the output base's
+// bazel-out/*/testlogs/ are taken, read through an os.Root on the output dir without
+// following a final symlink, and only regular files. Returns how many files it kept.
+func (s *Server) stageTestLogs(id, out, inOut string, tests []bep.Test) (int, error) {
+	prefix := inOut + "/base/execroot/_main/bazel-out/"
+	type logFile struct{ src, dst string }
+	var todo []logFile
+	seen := map[string]bool{}
+	for _, t := range tests {
+		for _, a := range t.Attempts {
+			for _, f := range a.Logs {
+				rest, ok := strings.CutPrefix(f.Path, prefix)
+				cfg, rel, ok2 := strings.Cut(rest, "/testlogs/")
+				if !ok || !ok2 || cfg == "" || strings.Contains(cfg, "/") || api.ValidFilePath(rel) != nil || path.Clean(rel) != rel {
+					continue
+				}
+				if dst := testLogsDir + "/" + rel; !seen[dst] {
+					seen[dst] = true
+					todo = append(todo, logFile{"base/execroot/_main/bazel-out/" + cfg + "/testlogs/" + rel, dst})
+				}
+			}
+		}
+	}
+	if len(todo) == 0 {
+		return 0, nil
+	}
+	src, err := os.OpenRoot(out)
+	if err != nil {
+		return 0, err
+	}
+	defer src.Close()
+	if err := os.MkdirAll(filepath.Join(s.sandboxDir(id), "work"), 0o755); err != nil {
+		return 0, err
+	}
+	dst, err := openWorkDir(s.cfg.DataDir, id)
+	if err != nil {
+		return 0, err
+	}
+	defer dst.Close()
+	left, n := maxTestLogs, 0
+	for _, lf := range todo {
+		if left <= 0 {
+			return n, fmt.Errorf("over %s of test logs; the rest is not kept", fmtSize(maxTestLogs))
+		}
+		in, err := openRegular(src, lf.src)
+		if err != nil {
+			continue // e.g. a cached test whose log Bazel didn't download
+		}
+		k, err := copyLog(dst, lf.dst, in, left)
+		in.Close()
+		if err != nil {
+			return n, err
+		}
+		left -= k
+		n++
+	}
+	return n, nil
+}
+
+// copyLog writes at most max bytes of r to name (in root, created with its parents), with a
+// marker line if r had more. Returns the bytes taken from the budget.
+func copyLog(root *os.Root, name string, r io.Reader, max int64) (int64, error) {
+	if err := root.MkdirAll(path.Dir(name), 0o755); err != nil {
+		return 0, err
+	}
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	k, err := io.Copy(f, io.LimitReader(r, max))
+	if err == nil && k == max {
+		var one [1]byte
+		if m, _ := r.Read(one[:]); m > 0 {
+			fmt.Fprintf(f, "\n[tun: log cut off: the job's test logs are over %s]\n", fmtSize(maxTestLogs))
+		}
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return k, err
 }
 
 // readBEP feeds out/bepFile to p. out is the sandbox's: the file is opened through an os.Root

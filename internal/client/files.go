@@ -27,6 +27,13 @@ workspace root (git toplevel of the cwd, else the cwd), or under -o DIR. Existin
 replaced; file modes and mtimes are kept; symlinks are recreated only if they stay inside
 the work dir.
 
+tun bazel jobs: a test or coverage command keeps its tests' logs (every attempt's test.log
+and test.xml) as bazel-testlogs/<package>/<name>/... (Bazel's layout), up to 64MB per job.
+A PATH that is a label (//pkg:name, //pkg, //:name) means that test's bazel-testlogs dir, so
+tun get <id> //internal/server:server_test writes bazel-testlogs/internal/server/server_test/
+test.log (add -o DIR if your workspace has Bazel's own bazel-testlogs symlink). Build outputs
+stay in the session's output base: tun get can't fetch them yet.
+
 exit status: 0 if every PATH matched; 1 if some matched nothing or were refused (one
 "tun: warning:" line each on stderr; the rest is still written); 125 for tun errors
 (job still running, unreachable server, over the server's --max-download limit).
@@ -274,6 +281,11 @@ func getCmd(args []string, e Env) int {
 		return errorf(e, "usage: tun get [-o DIR] <id> PATH... (job ids: tun ls)")
 	}
 	id, paths := pos[0], pos[1:]
+	for i, p := range paths {
+		if l, ok := testLogsPath(p); ok {
+			paths[i] = l
+		}
+	}
 	if err := checkPaths(paths); err != nil {
 		return errorf(e, "get: %v", err)
 	}
@@ -293,4 +305,21 @@ func getCmd(args []string, e Env) int {
 		return 1
 	}
 	return 0
+}
+
+// testLogsPath maps a test label (//pkg:name, //pkg for //pkg:<last element>, //:name) to
+// where a tun bazel job keeps its logs: bazel-testlogs/pkg/name. ok is false for a non-label.
+func testLogsPath(label string) (string, bool) {
+	rest, ok := strings.CutPrefix(label, "//")
+	if !ok {
+		return "", false
+	}
+	pkg, name, found := strings.Cut(rest, ":")
+	if !found {
+		name = path.Base(pkg)
+	}
+	if name == "" || name == "." || name == "/" {
+		return "", false
+	}
+	return path.Join("bazel-testlogs", pkg, name), true
 }

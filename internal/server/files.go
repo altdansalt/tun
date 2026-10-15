@@ -61,15 +61,24 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, fmt.Sprintf("job %s is %s; files can be fetched once it has ended", snap.ID, snap.State))
 		return
 	}
-	if snap.SessionID != "" {
-		writeErr(w, 409, fmt.Sprintf("job %s is a tun bazel job: its outputs are in session %s's output base, which tun get can't fetch yet", snap.ID, snap.Session))
-		return
-	}
 	if snap.Runner != "" && snap.Runner != api.LocalRunner {
 		s.runnerFiles(w, j, paths)
 		return
 	}
 	root, err := s.openWork(j.ID)
+	if snap.SessionID != "" && !snap.WorkDeleted {
+		// A tun bazel job's work dir holds only the test logs it kept.
+		if err == nil {
+			if _, lerr := root.Lstat(testLogsDir); lerr != nil {
+				root.Close()
+				err = lerr
+			}
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			writeErr(w, 404, fmt.Sprintf("job %s is a tun bazel job that kept no files: only test and coverage commands keep their tests' logs (bazel-testlogs/...); build outputs stay in session %s's output base, which tun get can't fetch yet", snap.ID, snap.Session))
+			return
+		}
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		writeErr(w, 410, fmt.Sprintf("job %s's work dir no longer exists (work dirs are deleted some time after a job ends; see tun serve --keep-work)", j.ID))
 		return

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,19 @@ set -- "${args[@]}"
 if [ -n "$bep" ]; then # a target (or for test, a failed test) per non-flag arg
   for t; do
     case $t in -*) ;;
-      *) if [ "$cmd" = test ]; then echo "{\"id\":{\"testSummary\":{\"label\":\"$t\"}},\"testSummary\":{\"overallStatus\":\"FAILED\"}}"
+      *) if [ "$cmd" = test ]; then
+           # Its log in Bazel's layout, named by a testResult event; for //...:logs_* labels
+           # also logs that tun must not keep (outside testlogs/, a symlink, a traversal).
+           d=$ob/execroot/_main/bazel-out/k8-fastbuild/testlogs/${t#//}; d=${d/://}; d=${d/testlogs\/\//testlogs/}
+           mkdir -p "$d/test_attempts"; echo "log of $t" > "$d/test.log"; echo "first try of $t" > "$d/test_attempts/attempt_1.log"
+           logs="{\"name\":\"test.log\",\"uri\":\"file://$d/test.log\"}"
+           case $t in *:logs_*)
+             echo secret > "$ob/secret.txt"; ln -sf /etc/hostname "$d/link.log"
+             for u in "$ob/secret.txt" "$d/../../../../../../secret.txt" "$d/link.log" /etc/hostname; do logs+=",{\"name\":\"x\",\"uri\":\"file://$u\"}"; done ;;
+           esac
+           echo "{\"id\":{\"testResult\":{\"label\":\"$t\",\"run\":1,\"shard\":1,\"attempt\":1}},\"testResult\":{\"status\":\"FAILED\",\"testActionOutput\":[{\"name\":\"test.log\",\"uri\":\"file://$d/test_attempts/attempt_1.log\"}]}}"
+           echo "{\"id\":{\"testResult\":{\"label\":\"$t\",\"run\":1,\"shard\":1,\"attempt\":2}},\"testResult\":{\"status\":\"FAILED\",\"testActionOutput\":[$logs]}}"
+           echo "{\"id\":{\"testSummary\":{\"label\":\"$t\"}},\"testSummary\":{\"overallStatus\":\"FAILED\"}}"
          else echo "{\"id\":{\"targetCompleted\":{\"label\":\"$t\"}},\"completed\":{\"success\":true}}"; fi ;;
     esac
   done >"$bep"
@@ -355,6 +368,63 @@ func TestBazelSummary(t *testing.T) {
 	r = ts.tun(ws, "bazel", "--json", "fail")
 	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil || r.code != 3 || out.ExitCode == nil || *out.ExitCode != 3 || strings.Contains(r.stderr, "tun: bazel fail") {
 		t.Fatalf("--json fail: %v: %+v", err, r)
+	}
+}
+
+// A test command keeps its tests' logs with the job: tun get <id> //label fetches them even
+// after the session's next command replaced them, and nothing outside bazel-out/*/testlogs/
+// (or a symlink in it) is kept, whatever paths the BEP names.
+func TestBazelTestLogs(t *testing.T) {
+	for _, mode := range []string{"none", "bwrap"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := server.Config{}
+			if mode == "bwrap" {
+				if !sandbox.BwrapUsable() {
+					t.Skip("bwrap unusable")
+				}
+				cfg.Sandbox = sandbox.Bwrap
+			}
+			ts := bazelServer(t, cfg, false)
+			ws := bazelWS(t, map[string]string{})
+			r := ts.tun(ws, "bazel", "test", "//pkg/sub:logs_test", "//:top")
+			id := jobOf(t, r)
+			if r.code != 3 || !strings.Contains(r.stderr, "2 of 2 tests failed: //:top //pkg/sub:logs_test; logs: tun get "+id+" //:top\n") {
+				t.Fatalf("test: %+v", r)
+			}
+			ts.tun(ws, "bazel", "test", "//pkg/sub:logs_test") // overwrites the session's logs
+			out := t.TempDir()
+			r = ts.tun(ws, "get", "-o", out, id, "//pkg/sub:logs_test", "//:top")
+			if r.code != 0 {
+				t.Fatalf("get: %+v", r)
+			}
+			for name, want := range map[string]string{
+				"bazel-testlogs/pkg/sub/logs_test/test.log":                    "log of //pkg/sub:logs_test\n",
+				"bazel-testlogs/pkg/sub/logs_test/test_attempts/attempt_1.log": "first try of //pkg/sub:logs_test\n",
+				"bazel-testlogs/top/test.log":                                  "log of //:top\n",
+			} {
+				if b, err := os.ReadFile(filepath.Join(out, name)); err != nil || string(b) != want {
+					t.Errorf("%s: %q %v", name, b, err)
+				}
+			}
+			var got []string
+			filepath.WalkDir(out, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					got = append(got, strings.TrimPrefix(p, out+"/"))
+				}
+				return nil
+			})
+			if len(got) != 4 { // the three above and //:top's attempt_1.log
+				t.Errorf("kept files: %v", got)
+			}
+			// A label for a test the job didn't run; a build job keeps nothing.
+			if r = ts.tun(ws, "get", "-o", out, id, "//nope:x_test"); r.code != 1 || !strings.Contains(r.stderr, "bazel-testlogs/nope/x_test") {
+				t.Errorf("get missing label: %+v", r)
+			}
+			r = ts.tun(ws, "bazel", "build", "//:a")
+			if r = ts.tun(ws, "get", "-o", out, jobOf(t, r), "//:a"); r.code != 125 || !strings.Contains(r.stderr, "only test and coverage commands keep") {
+				t.Errorf("get from a build job: %+v", r)
+			}
+		})
 	}
 }
 

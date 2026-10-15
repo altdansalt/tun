@@ -53,8 +53,11 @@ server updates the session's copy in place: unchanged files keep their mtimes. S
 
 Bazel runs with HOME=/tun/home and TMPDIR=/tmp (private to the session), the server's PATH,
 and on servers with network isolation the HTTP(S) proxy variables (downloads work through
-it, as in tun run). Outputs stay in the session's output base on the server; tun get can't
-fetch them yet.
+it, as in tun run). Build outputs stay in the session's output base on the server; tun get
+can't fetch them yet. Test logs it can: test and coverage keep each test's logs with the
+job, so tun get <id> //pkg:name_test writes bazel-testlogs/pkg/name_test/test.log (and
+test.xml, and every attempt's) locally; a failed test run's summary line ends with that
+command for the first failed test.
 
 Results: for build, test, coverage and run, tun adds --build_event_json_file (in the
 session) and, when Bazel exits, prints one summary line from the Build Event Protocol, e.g.
