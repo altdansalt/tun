@@ -300,7 +300,6 @@ func (s *Server) schedule() {
 		}
 		s.queue = slices.Delete(s.queue, i, i+1)
 		j.Runner = api.LocalRunner
-		j.slotless = slotless
 		if slotless {
 			s.orchestrating++
 		} else {

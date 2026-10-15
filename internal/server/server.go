@@ -129,7 +129,6 @@ type job struct {
 	exited     *api.RunnerDone // what it reported then
 	logMu      sync.Mutex      // serializes log chunk writes
 	bz         *api.BazelJob   // a tun bazel job (kept in memory only: after a restart it has failed)
-	slotless   bool            // a bazel job running outside the job slots (see schedule)
 	identity   string          // a bazel job's client identity (identityOf)
 	// Outcome of the runner collecting the declared outputs.
 	OutMissing []string `json:"out_missing,omitempty"`

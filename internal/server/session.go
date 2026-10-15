@@ -404,10 +404,11 @@ func (s *Server) sessionLayout(sess *session) (in, host sessionPaths, spec sandb
 	return in, host, spec
 }
 
-// clientCaches is the dir of the Bazel caches of a client identity. Per client, because none of them can be
-// trusted once a session has written it: bazelisk runs a cached Bazel binary without checking
-// it again, and Bazel trusts its repository contents cache (<repository_cache>/contents,
-// fetched repository trees) and disk cache. One client can only poison its own.
+// clientCaches is the dir of a client identity's Bazel caches. Per client, because none of
+// them can be trusted once a session has written it: bazelisk runs a cached Bazel binary
+// without checking it again, and Bazel trusts its repository contents cache
+// (<repository_cache>/contents, fetched repository trees) and disk cache. One client can only
+// poison its own.
 func (s *Server) clientCaches(identity string) string {
 	h := sha256.Sum256([]byte(identity))
 	return filepath.Join(s.cfg.BazelCaches, hex.EncodeToString(h[:8]))
