@@ -16,7 +16,7 @@
 # during the step and the hub's executor counts. All output roots stay under TMPDIR.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-mode=${1:?usage: bench-rbe.sh genrules|tree|build [targets...]}
+mode=${1:?usage: bench-rbe.sh genrules|tree|build|edit [targets...]}
 shift
 data=$(ls -d "${TMPDIR:-/tmp}"/tun-ephemeral-* 2>/dev/null | head -1)
 [ -n "$data" ] || { echo "bench-rbe.sh: run inside scripts/dev-tun.sh" >&2; exit 2; }
@@ -91,6 +91,18 @@ tree)
   echo "var benchOneLineLocal = 1" >>internal/server/server.go
   step g test --remote_executor= --jobs=auto "$@"
   step h --cold test --remote_executor= --jobs=auto "$@"
+  ;;
+edit)
+  # The edit loop on this tree: (a) new session; then one-line changes, (d1, d2) remote,
+  # (g) local. The private server's log (tun logs --stderr) names slow executor inputs.
+  [ $# -gt 0 ] || set -- -- //... -//internal/client:client_test -//internal/reapi:reapi_test -//scripts:e2e_test
+  step a test "$@"
+  echo "var benchEdit1 = 1" >>internal/server/server.go
+  step d1 test "$@"
+  echo "var benchEdit2 = 1" >>internal/server/server.go
+  step d2 test "$@"
+  echo "var benchEdit3 = 1" >>internal/server/server.go
+  step g test --remote_executor= --jobs=auto "$@"
   ;;
 build)
   # A build of //cmd/tun (default) only: where remote actions spend their time (healthz
