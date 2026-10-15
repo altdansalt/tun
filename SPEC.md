@@ -64,7 +64,7 @@ client works with zero config.
 For testing, `tun serve --ephemeral` uses a random loopback port and a fresh temporary
 data directory, removed on shutdown (including read-only dirs jobs left; a failure to remove
 it is reported on stderr). It rejects explicit `--addr` or `--data`. Once ready,
-stdout contains exactly two lines: `TUN_URL=http://127.0.0.1:PORT` and `TUN_TOKEN=TOKEN`;
+stdout contains exactly three lines: `TUN_URL=http://127.0.0.1:PORT` `TUN_TOKEN=TOKEN`, and `TUN_RUNNER_TOKEN=TOKEN`;
 diagnostics go to stderr. SIGINT/SIGTERM stop the server and its jobs.
 `--exit-on-eof` also stops it when stdin closes (stdin content is discarded).
 `scripts/dev-tun.sh COMMAND [ARG...]` builds the working tree binary, starts this server
@@ -236,9 +236,13 @@ client API is unchanged. Job state, logs and outputs live on the hub.
   data dir is refused; job dirs left by a previous runner process are deleted at start),
   `--sandbox` and `--net auto|private|host` as for serve: with a private network the runner
   runs the job's network helper and serves its egress proxy itself, so the job's HTTP(S)
-  traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_TOKEN`, else
-  `~/.config/tun/token`. For v1 it is the hub's client token; a separate runner credential
-  (that can't submit or read jobs) is future work. On SIGINT/SIGTERM the runner stops taking
+  traffic leaves from the runner host (healthz `runners[].network_isolation`). Token: `--token-file`, else `$TUN_RUNNER_TOKEN`, else
+  `~/.config/tun/runner-token`. The hub creates `$DATA/runner-token` (0600).
+  Deploy: copy this file securely to every runner, update its service to use
+  `tun runner --token-file /path/to/runner-token`, and restart the runners after
+  upgrading the hub. Client tokens are refused on all runner endpoints; runner
+  tokens are accepted only under `/v1/runner/`. Every runner request requires
+  `X-Tun-Runner-Instance`. On SIGINT/SIGTERM the runner stops taking
   work, kills its jobs, reports them `failed` ("runner N shut down") and tells the hub it is
   leaving (`POST /v1/runner/leave {name, instance}`: its slots disappear at once); a second
   signal quits at once. A runner flocks its data dir: a second runner on the same dir refuses
@@ -319,8 +323,7 @@ client API is unchanged. Job state, logs and outputs live on the hub.
 - `GET /v1/healthz` adds `local_slots` and `runners: [{name, slots, running, last_seen,
   sandbox, network_isolation, source}]`; `tun runners` prints them as JSON lines.
 - Not yet: services on runners; per-runner labels/affinity; reusing a runner's warm
-  workspace; a runner-only credential (any token holder can act as a runner, and read any
-  blob by sha with `GET /v1/blobs/{sha}`, though every token holder is already fully trusted).
+  workspace. Runners fetch workspace blobs through `GET /v1/runner/blobs/{sha}`.
 
 ## HTTP API (JSON, all under /v1, bearer auth)
 - `HEAD|PUT /v1/blobs/{sha256}` — PUT verifies the hash.

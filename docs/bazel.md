@@ -256,13 +256,15 @@ caching the result. Infrastructure errors use ExecuteResponse.status.
 
 Execute and WaitExecution stream google.longrunning.Operation messages, with
 ExecuteOperationMetadata and ExecuteResponse Any type URLs. Operations are kept
-in memory for the hub lifetime, independently of the client's connection. They
-are not durable across hub restarts and currently have no retention limit.
+in memory independently of the client's connection. Completed operations expire
+after one hour (pruned on the next Execute). Random 128-bit names prevent restart
+collisions; operations are not durable across hub restarts. Streams resend their
+current operation every 30s and clear idle write deadlines after flushing.
 Actions share the hub's v0 FIFO and local/runner slot limits. Runner polls
 advertise action support; older runners continue receiving only v0 jobs.
 The existing assignment, heartbeat, lost-runner and completion protocol applies.
-Action and Command bytes (including platform properties) are recorded with the
-internal executor job. Unsupported platform properties return FAILED_PRECONDITION;
+Action and Command bytes (including platform properties) stay in memory with the
+internal executor job; action jobs create no v0 job records and are hidden from tun ls. Unsupported platform properties return FAILED_PRECONDITION;
 currently OSFamily=Linux/linux and an empty container-image are accepted. Other
 properties, including a nonempty container-image, are rejected. Tools come from
 the executor host or the action's hermetic inputs, never a container image.
@@ -272,17 +274,20 @@ a persistent 10GB LRU CAS under its data dir (`reapi-cas`), so repeated inputs
 are not downloaded again. Copies rather than hard links prevent actions from
 mutating the CAS. bwrap actions have network off, without the v0 egress proxy
 or extra environment variables; Command.environment_variables is the complete
-environment. `--sandbox=none` remains the explicit unisolated development mode.
+environment. `--sandbox=none` remains an unisolated local development mode whose results never
+populate the AC. Remote actions are assigned only to bwrap runners.
 Working directories, v2.0 output_files/output_directories, v2.1 output_paths,
 symlinks, output directory Trees, executable bits and action timeouts are handled.
-Timeouts kill the whole process group. Default action timeout is 30 minutes;
+Timeouts start after input materialization and kill the whole process group.
+Cancellation interrupts input copies and runner fetches. Default action timeout
+(including an explicit zero duration) is 30 minutes;
 explicit timeouts above 24h are rejected.
 
 Deviations / limits: exec-root paths currently vary per action (fixed `/work`
 mounts remain session work); runner CAS transport uses an authenticated HTTP/JSON
 extension of the existing pull protocol, rather than an outbound HTTP/2 gRPC
-client. It currently buffers each transferred blob and limits the JSON request
-to 128MiB (about 96MiB raw), so very large individual inputs/outputs need a
+client. It buffers transferred blobs with an explicit 96MiB raw limit and bounded JSON
+decoding; oversized reads fail before loading bytes. Larger blobs need a
 streaming runner transfer follow-up. Hub CAS eviction can cause an in-flight
 action's input fetch to fail; inputs are not pinned for the whole operation.
 There is no Execution cancellation RPC yet. Warm-session integration and label
@@ -377,3 +382,22 @@ to inspect, but redirected nested benchmark logs were unavailable through the
 parent's stdout until the script exited. REAPI executor jobs currently have
 empty v0 stdout/stderr files because their logs live in CAS; operation/stage/CAS
 log inspection in the CLI is useful follow-up work.
+
+
+## Execution review hardening
+
+Deploy the upgraded hub first: it creates `$DATA/runner-token` with mode 0600.
+Copy that file securely to each runner and restart its updated binary with
+`tun runner --token-file /path/to/runner-token` (or `TUN_RUNNER_TOKEN`).
+The client token is refused on every runner endpoint. Runner credentials work
+only under /v1/runner/, including workspace and CAS downloads; requests require
+the process instance header. Existing runners using the client token must migrate.
+
+Executor limits are 96MiB per blob/output, 4MiB per stdout/stderr stream,
+100000 materialized input nodes and 2GiB total expanded inputs. Exceeding a limit
+returns RESOURCE_EXHAUSTED; log overflow cancels execution promptly. Local file
+copies and output hashing/upload stream with bounded memory. The runner JSON
+transport still buffers individual blobs; replacing it with streaming transfer
+remains a documented deviation. Exec roots use chmod-aware cleanup and are swept
+on startup. Missing inputs return FAILED_PRECONDITION with PreconditionFailure
+MISSING violations; lost runners return UNAVAILABLE. Local CAS reads verify hashes.
