@@ -231,6 +231,7 @@ func TestBazelSessionBwrap(t *testing.T) {
 	if sandbox.NetUsable() == nil {
 		cfg.PrivateNet = true
 	}
+	cfg.DataDir = t.TempDir()
 	ts := bazelServer(t, cfg, false)
 	ws := bazelWS(t, map[string]string{"x": "1"})
 	r := ts.tun(ws, "bazel", "build")
@@ -247,19 +248,27 @@ func TestBazelSessionBwrap(t *testing.T) {
 	if ss := ts.sessions(); len(ss) != 1 || !ss[0].Server {
 		t.Fatalf("sessions: %+v", ss)
 	}
+	// A server restart ends the sandbox (and the daemon in it); the session dir stays.
+	ts.stop()
+	ts = bazelServer(t, cfg, false)
+	r = ts.tun(ws, "bazel", "build")
+	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || !strings.Contains(r.stderr, "2 unchanged") {
+		t.Fatalf("after restart: %+v", r)
+	}
 }
 
 func TestBazelSessionQueueAndCancel(t *testing.T) {
 	ts := bazelServer(t, server.Config{MaxJobs: 4}, false)
 	ws := bazelWS(t, map[string]string{})
-	c := ts.client()
+	c := newClient(ts.env(ws, nil, nil, nil, nil)) // the same client name as the CLI's
 	start := func(session string, args ...string) string {
 		t.Helper()
 		_, _, m, err := bazelManifest(ts.env(ws, nil, nil, nil, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
-		j, _, err := c.createBazel(context.Background(), api.CreateJob{Bazel: &api.BazelJob{Session: session, Root: ws, Manifest: m, Args: args}}, ws)
+		root, _ := filepath.EvalSymlinks(ws)
+		j, _, err := c.createBazel(context.Background(), api.CreateJob{Bazel: &api.BazelJob{Session: session, Root: root, Manifest: m, Args: args}}, ws)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +281,7 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	if j := ts.waitDone(other); j.State != api.Exited { // another session runs meanwhile
 		t.Fatalf("other: %+v", j)
 	}
-	if j := ts.status(b); j.State != api.Queued || j.QueuePosition == nil || *j.QueuePosition != 1 {
+	if j := ts.status(b); j.State != api.Queued || j.QueuePosition == nil || *j.QueuePosition != 1 || !strings.Contains(j.QueueReason, "is running job "+a) {
 		t.Fatalf("b should wait for its session: %+v", j)
 	}
 	if ss := ts.sessions(); len(ss) != 2 || ss[1].State != "busy" || ss[1].Job != a {
@@ -289,6 +298,13 @@ func TestBazelSessionQueueAndCancel(t *testing.T) {
 	}
 	if r := ts.tun("", "logs", "--stderr", b); !strings.Contains(r.stdout, "warm server") {
 		t.Fatalf("b after a canceled command: %+v", r)
+	}
+	time.Sleep(200 * time.Millisecond) // past the cancel's escalation (KillGrace is 50ms here)
+	if r := ts.tun(ws, "bazel", "build"); !strings.Contains(r.stderr, "warm server") {
+		t.Fatalf("a cancel that Bazel obeyed must not end the session's server: %+v", r)
+	}
+	if r := ts.tun(ws, "get", b, "x"); r.code != 125 || !strings.Contains(r.stderr, "tun bazel job") {
+		t.Fatalf("tun get of a bazel job: %+v", r)
 	}
 	r := ts.tun(ws, "bazel", "--timeout", "1s", "sleep", "30")
 	if r.code != 124 {
@@ -328,8 +344,9 @@ func TestBazelSessionRestart(t *testing.T) {
 	if len(ss) != 1 || ss[0].Server || ss[0].Commands != 1 {
 		t.Fatalf("after restart: %+v", ss)
 	}
+	// Without bwrap the old daemon (a host process) is still valid and reused.
 	r := ts.tun(ws, "bazel", "build")
-	if r.code != 0 || !strings.Contains(r.stderr, "Starting local Bazel server") || !strings.Contains(r.stderr, "0 added, 0 updated, 0 deleted, 2 unchanged") {
+	if r.code != 0 || !strings.Contains(r.stderr, "started a new session sandbox") || !strings.Contains(r.stderr, "0 added, 0 updated, 0 deleted, 2 unchanged") {
 		t.Fatalf("after restart: %+v", r)
 	}
 }

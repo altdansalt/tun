@@ -498,6 +498,9 @@ func waitQueued(ctx context.Context, c *Client, j api.Job, e Env) (code int, don
 	if h, err := c.Health(ctx); err == nil {
 		msg += fmt.Sprintf(", %d running", h.Running)
 	}
+	if j.QueueReason != "" {
+		msg += "; " + j.QueueReason
+	}
 	fmt.Fprintf(e.Stderr, "tun: queued (%s)\n", msg)
 	for j.State == api.Queued {
 		select {

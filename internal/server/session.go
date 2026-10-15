@@ -325,6 +325,20 @@ func (s *Server) sessionView(sess *session) api.Session {
 	return v
 }
 
+// queueReason says why queued bazel job j waits, if not just for a job slot. Caller holds s.mu.
+func (s *Server) queueReason(j *job) string {
+	sess := s.sessions[j.SessionID]
+	switch {
+	case sess != nil && sess.job != nil:
+		return fmt.Sprintf("session %s is running job %s (commands in a session run one at a time; --session NAME for another)", sess.Name, sess.job.ID)
+	case sess != nil && sess.stopping:
+		return fmt.Sprintf("session %s is being stopped", sess.Name)
+	case sess == nil && len(s.sessions) >= s.cfg.MaxSessions:
+		return fmt.Sprintf("the server has its maximum of %d sessions; waiting until an idle one is evicted (tun serve --max-sessions)", s.cfg.MaxSessions)
+	}
+	return ""
+}
+
 // sessionPaths are a session's directories as the bazel command sees them.
 type sessionPaths struct {
 	work, home, tmp, out, repo, disk, bazelisk, rc, exe string
@@ -402,9 +416,12 @@ func (s *Server) ensureSandbox(sess *session, spec sandbox.Spec) (bool, error) {
 		sess.sb = nil
 	}
 	dir := s.sessionDir(sess.ID)
-	// A previous sandbox's Bazel server is gone; its pid/port files would name processes of
-	// another pid namespace.
-	os.RemoveAll(filepath.Join(dir, "sandbox", "out", "base", "server"))
+	if s.cfg.Sandbox == sandbox.Bwrap {
+		// A previous sandbox's Bazel server is gone with its pid namespace; its pid/port files
+		// would name processes of another namespace. (Without bwrap they are host pids, and a
+		// server that outlived a tun restart is still valid.)
+		os.RemoveAll(filepath.Join(dir, "sandbox", "out", "base", "server"))
+	}
 	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return false, err
@@ -455,6 +472,7 @@ type bazelRun struct {
 	endState string // set by the first kill
 	sb       *sandbox.Session
 	killed   chan struct{}
+	done     chan struct{} // closed once the command has ended
 }
 
 // kill asks the bazel job to end in state ("" = server shutdown: crash). Bazel's client
@@ -477,8 +495,17 @@ func (br *bazelRun) kill(state string, grace time.Duration) {
 			return
 		}
 		sb.Signal(syscall.SIGINT)
-		time.AfterFunc(grace, func() { sb.Signal(syscall.SIGKILL) })
-		time.AfterFunc(2*grace, sb.Kill)
+		later := func(f func()) func() {
+			return func() {
+				select {
+				case <-br.done:
+				default:
+					f()
+				}
+			}
+		}
+		time.AfterFunc(grace, later(func() { sb.Signal(syscall.SIGKILL) }))
+		time.AfterFunc(2*grace, later(sb.Kill))
 	}
 }
 
@@ -487,7 +514,7 @@ func (br *bazelRun) kill(state string, grace time.Duration) {
 func (s *Server) runBazel(j *job) {
 	s.mu.Lock()
 	sess := s.sessions[j.SessionID]
-	br := &bazelRun{killed: make(chan struct{})}
+	br := &bazelRun{killed: make(chan struct{}), done: make(chan struct{})}
 	logs, err := openLogs(s.jobDir(j.ID), s.cfg.MaxLog)
 	if err == nil && s.closed {
 		logs.close()
@@ -520,6 +547,7 @@ func (s *Server) runBazel(j *job) {
 		}
 	})
 	res := s.bazelCommand(j, sess, br, logs)
+	close(br.done)
 	timer.Stop()
 
 	s.mu.Lock()

@@ -401,6 +401,9 @@ func (s *Server) view(j *job, now time.Time) api.Job {
 	} else {
 		v.QueueSec = secs(end.Sub(v.CreatedAt))
 	}
+	if v.State == api.Queued && j.bz != nil {
+		v.QueueReason = s.queueReason(j)
+	}
 	if v.State == api.Queued {
 		for i, q := range s.queue {
 			if q == j {

@@ -79,6 +79,9 @@ type Job struct {
 	RunSec   float64 `json:"run_sec"`
 	// QueuePosition is set only while the job waits in the FIFO: 1 = next to start.
 	QueuePosition *int `json:"queue_position,omitempty"`
+	// QueueReason: why a queued tun bazel job waits, if not only for a job slot (its session
+	// is busy, or every session is).
+	QueueReason string `json:"queue_reason,omitempty"`
 }
 
 // Health is the body of GET /v1/healthz: server config and current load.
