@@ -1,6 +1,7 @@
 # tun v1 direction: Bazel-native remote execution
 
-Status: direction agreed 2026-10-15; nothing here is built yet. SPEC.md stays the contract for
+Status: direction agreed 2026-10-15; the standalone M1 BEP results package is implemented
+(see results below). SPEC.md stays the contract for
 what exists (`tun run`); this file is the target and the order we get there.
 
 ## Goal

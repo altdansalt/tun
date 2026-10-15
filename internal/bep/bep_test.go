@@ -161,3 +161,13 @@ func TestSnapshotIsolation(t *testing.T) {
 		t.Fatal(again)
 	}
 }
+
+func TestProcessResultOverridesBEP(t *testing.T) {
+	p := New("build")
+	p.Write([]byte("{\"finished\":{\"overallSuccess\":true,\"exitCode\":{\"name\":\"SUCCESS\"}}}\n"))
+	p.SetResult(137, time.Second)
+	s := p.Snapshot()
+	if s.Success || *s.ExitCode != 137 || s.ExitName != "" {
+		t.Fatal(s)
+	}
+}

@@ -99,6 +99,12 @@ func (p *Parser) Finish() error { b := p.pending; p.pending = nil; return p.even
 // SetResult supplies the actual process result (also for query/empty or partial BEP).
 // Call after ingestion; process exit status is authoritative.
 func (p *Parser) SetResult(code int, elapsed time.Duration) {
+	if p.s.ExitCode != nil && *p.s.ExitCode != code {
+		p.s.ExitName = ""
+	}
+	if code == 0 && p.s.ExitName == "" {
+		p.s.ExitName = "SUCCESS"
+	}
 	p.s.ExitCode = &code
 	p.s.Success = code == 0
 	p.s.Complete = true
